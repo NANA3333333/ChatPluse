@@ -20,8 +20,8 @@ import { resolveAvatarUrl } from './utils/avatar';
 // Allow VITE config if available, otherwise dynamically use the current host IP/Domain
 const PROTOCOL = window.location.protocol;
 const HOST = window.location.hostname;
-const API_URL = import.meta.env.VITE_API_URL || `${PROTOCOL}//${HOST}:8001/api`;
-const WS_URL = import.meta.env.VITE_WS_URL || `ws://${HOST}:8001`;
+const API_URL = import.meta.env.VITE_API_URL || `${PROTOCOL}//${HOST}:8000/api`;
+const WS_URL = import.meta.env.VITE_WS_URL || `ws://${HOST}:8000`;
 
 function App() {
   const { token, logout } = useAuth();
