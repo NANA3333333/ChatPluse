@@ -19,10 +19,31 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { callLLM } = require('./llm');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 
 const app = express();
+// Enable security headers. We disable contentSecurityPolicy temporarily to prevent 
+// accidentally blocking frontend scripts since it's an SPA.
+app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
 app.use(express.json()); // Parses incoming JSON requests
+
+// Define rate limiters
+const authLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000, // 5 minutes
+    max: 20, // limit each IP to 20 requests per windowMs for auth routes
+    message: { error: 'Too many authentication attempts. Please try again later.' }
+});
+
+const apiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 120, // limit each IP to 120 api requests per minute
+    message: { error: 'API rate limit exceeded.' }
+});
+
+app.use('/api/', apiLimiter); // Apply general API limiter
+
 
 // Serve static uploaded files
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
@@ -42,7 +63,21 @@ const storage = multer.diskStorage({
         cb(null, file.fieldname + '-' + uniqueSuffix + ext);
     }
 });
-const upload = multer({ storage: storage });
+
+const fileFilter = (req, file, cb) => {
+    // strictly accept only image files to prevent uploading malicious scripts or html
+    if (file.mimetype.startsWith('image/')) {
+        cb(null, true);
+    } else {
+        cb(new Error('Invalid file type. Only images are allowed.'), false);
+    }
+};
+
+const upload = multer({
+    storage: storage,
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    fileFilter: fileFilter
+});
 
 // Initialize the Database schemas
 
@@ -93,19 +128,29 @@ wss.on('connection', (ws) => {
 });
 
 // 0. Upload a file (image or any file)
-app.post('/api/upload', upload.any(), (req, res) => {
-    try {
-        const file = req.files?.[0];
-        if (!file) {
-            return res.status(400).json({ error: 'No file uploaded' });
+app.post('/api/upload', (req, res) => {
+    upload.any()(req, res, function (err) {
+        if (err instanceof multer.MulterError) {
+            // A Multer error occurred when uploading (e.g. file too large)
+            return res.status(400).json({ error: err.message });
+        } else if (err) {
+            // An unknown error occurred (e.g. our custom fileFilter threw an error)
+            return res.status(400).json({ error: err.message });
         }
-        const protocol = req.protocol;
-        const host = req.get('host');
-        const fileUrl = `${protocol}://${host}/uploads/${file.filename}`;
-        res.json({ success: true, url: fileUrl });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
+
+        try {
+            const file = req.files?.[0];
+            if (!file) {
+                return res.status(400).json({ error: 'No file uploaded' });
+            }
+            const protocol = req.protocol;
+            const host = req.get('host');
+            const fileUrl = `${protocol}://${host}/uploads/${file.filename}`;
+            res.json({ success: true, url: fileUrl });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
 });
 
 // ─── AUTHENTICATION MIDDLEWARE ──────────────────────────────────────────
@@ -130,7 +175,7 @@ const authMiddleware = (req, res, next) => {
 };
 
 // ─── AUTH ROUTES ────────────────────────────────────────────────────────
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', authLimiter, (req, res) => {
     try {
         const { username, password, inviteCode } = req.body;
         if (!username || !password) return res.status(400).json({ error: 'Missing username or password' });
@@ -144,7 +189,7 @@ app.post('/api/auth/register', (req, res) => {
     }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', authLimiter, (req, res) => {
     try {
         const { username, password } = req.body;
         const result = authDb.verifyUser(username, password);
