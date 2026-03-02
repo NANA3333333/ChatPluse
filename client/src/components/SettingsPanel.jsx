@@ -320,8 +320,13 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     };
 
     const handleFileUpload = async (event, setAvatarCallback) => {
-        const file = event.target.files[0];
-        if (!file) return;
+        const targetInput = event.target;
+        const file = targetInput.files[0];
+        console.log("File selected:", file, "Event:", event);
+        if (!file) {
+            console.log("No file detected by input!");
+            return;
+        }
         const formData = new FormData();
         formData.append('image', file);
         try {
@@ -340,7 +345,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             console.error('Upload Error:', e);
             alert('Upload failed.');
         } finally {
-            event.target.value = null;
+            if (targetInput) targetInput.value = null;
         }
     };
 
