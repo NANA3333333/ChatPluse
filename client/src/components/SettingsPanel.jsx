@@ -349,10 +349,11 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             return;
         }
 
+        const cleanApiUrl = apiUrl.replace(/\/api\/?$/, '');
         const formData = new FormData();
         formData.append('db_file', file);
         try {
-            const res = await fetch(`${apiUrl}/system/import`, {
+            const res = await fetch(`${cleanApiUrl}/api/system/import`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` },
                 body: formData
