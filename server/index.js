@@ -65,17 +65,17 @@ const storage = multer.diskStorage({
 });
 
 const fileFilter = (req, file, cb) => {
-    // strictly accept only image files to prevent uploading malicious scripts or html
-    if (file.mimetype.startsWith('image/')) {
+    // accept images or sqlite databases
+    if (file.mimetype.startsWith('image/') || file.originalname.endsWith('.db') || file.mimetype === 'application/octet-stream' || file.mimetype === 'application/x-sqlite3') {
         cb(null, true);
     } else {
-        cb(new Error('Invalid file type. Only images are allowed.'), false);
+        cb(new Error('Invalid file type. Only images and .db backups are allowed.'), false);
     }
 };
 
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit for db backups
     fileFilter: fileFilter
 });
 
