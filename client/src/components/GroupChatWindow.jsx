@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Send, Users, Smile, Paperclip, X, Settings, Trash2, UserMinus, ArrowRightLeft, Gift, ChevronLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
+import { resolveAvatarUrl } from '../utils/avatar';
 
 const quickEmojis = ['😀', '😂', '🥺', '😡', '🥰', '👍', '🙏', '💔', '🔥', '✨', '🥳', '😭', '😎', '🙄', '🤔'];
 
@@ -295,9 +296,9 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
     };
 
     const resolveSender = (senderId) => {
-        if (senderId === 'user') return { name: userProfile?.name || 'User', avatar: userProfile?.avatar || 'https://api.dicebear.com/7.x/shapes/svg?seed=User' };
+        if (senderId === 'user') return { name: userProfile?.name || 'User', avatar: resolveAvatarUrl(userProfile?.avatar, apiUrl) || 'https://api.dicebear.com/7.x/shapes/svg?seed=User' };
         const char = allContacts?.find(c => String(c.id) === String(senderId));
-        return char || { name: senderId, avatar: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${senderId}` };
+        return char ? { ...char, avatar: resolveAvatarUrl(char.avatar, apiUrl) } : { name: senderId, avatar: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${senderId}` };
     };
 
     const addEmoji = (emoji) => { setInput(prev => prev + emoji); setShowEmojiPicker(false); };
@@ -424,7 +425,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                         if (parsed.type === 'redpacket') {
                             return (
                                 <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
-                                    <div className="message-avatar"><img src={sender.avatar} alt="" /></div>
+                                    <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                     <div className="message-content">
                                         {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
                                         <RedPacketCard packetId={parsed.packetId} apiUrl={apiUrl} groupId={group.id} isUser={isUser} resolveSender={resolveSender} />
@@ -450,7 +451,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                             const note = parts.length > 1 ? parts.slice(1).join('|').trim() : 'Transfer';
                             return (
                                 <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
-                                    <div className="message-avatar"><img src={sender.avatar} alt="" /></div>
+                                    <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                     <div className="message-content">
                                         {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
                                         <div className="message-bubble transfer-bubble">
@@ -477,7 +478,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                         // Normal message
                         return (
                             <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
-                                <div className="message-avatar"><img src={sender.avatar} alt="" /></div>
+                                <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                 <div className="message-content">
                                     {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
                                     <div className="message-bubble">{msg.content}</div>

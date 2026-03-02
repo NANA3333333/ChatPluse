@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AlertCircle, ArrowRightLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
+import { resolveAvatarUrl } from '../utils/avatar';
 
 function BlockedSystemMessage({ name }) {
     return (
@@ -174,7 +175,7 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry }) {
         <>
             <div className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
                 <div className="message-avatar">
-                    <img src={avatar} alt="Avatar" />
+                    <img src={resolveAvatarUrl(avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="Avatar" />
                 </div>
                 <div className="message-content">
                     {content.startsWith('[TRANSFER]') ? (
@@ -188,7 +189,7 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry }) {
                                 return (
                                     <div className="message-bubble" style={{ padding: 0, overflow: 'hidden', backgroundColor: '#fff', color: '#333', textAlign: 'left', width: '220px', boxSizing: 'border-box', border: '1px solid #eaeaea' }}>
                                         <div style={{ padding: '12px 15px', display: 'flex', alignItems: 'center', gap: '12px', borderBottom: '1px solid #f0f0f0' }}>
-                                            <img src={cardAvatar.replace(']', '')} alt={cardName} style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover' }} />
+                                            <img src={resolveAvatarUrl(cardAvatar.replace(']', ''), apiUrl)} alt={cardName} style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover' }} />
                                             <div style={{ fontSize: '16px', fontWeight: '400' }}>{cardName}</div>
                                         </div>
                                         <div style={{ padding: '4px 15px 6px', fontSize: '12px', color: '#999' }}>

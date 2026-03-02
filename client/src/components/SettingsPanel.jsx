@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { User, Trash2, Edit3, Save, RefreshCw, Palette, Download, Upload, FileText, ChevronDown, ChevronRight, Sparkles, ChevronLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
+import { resolveAvatarUrl } from '../utils/avatar';
 
 const getDefaultGuidelines = (lang) => {
     if (lang === 'en') {
@@ -470,7 +471,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                 <div>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
-                                            <img src={profile.avatar || 'https://api.dicebear.com/7.x/shapes/svg?seed=User'} alt="Me" style={{ width: '60px', height: '60px', borderRadius: '50%', objectFit: 'cover' }} />
+                                            <img src={resolveAvatarUrl(profile.avatar, apiUrl) || 'https://api.dicebear.com/7.x/shapes/svg?seed=User'} alt="Me" style={{ width: '60px', height: '60px', borderRadius: '50%', objectFit: 'cover' }} />
                                             <div>
                                                 <h3 style={{ margin: '0 0 5px 0', fontSize: '20px' }}>{profile.name}</h3>
                                                 <p style={{ color: '#666', margin: 0, whiteSpace: 'pre-wrap', fontSize: '14px' }}>{profile.bio || 'Signature...'}</p>
@@ -680,7 +681,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                         {contacts.map(c => (
                             <div key={c.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px', border: '1px solid #f0f0f0', borderRadius: '6px' }}>
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                    <img src={c.avatar} alt={c.name} style={{ width: '40px', height: '40px', borderRadius: '50%' }} />
+                                    <img src={resolveAvatarUrl(c.avatar, apiUrl)} alt={c.name} style={{ width: '40px', height: '40px', borderRadius: '50%', objectFit: 'cover' }} />
                                     <div>
                                         <div style={{ fontWeight: '500' }}>{c.name}</div>
                                         <div style={{ fontSize: '12px', color: '#999' }}>

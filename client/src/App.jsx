@@ -15,6 +15,7 @@ import { MessageSquare, Users, Compass, Settings, UserPlus, Globe, UsersRound, L
 import { useLanguage } from './LanguageContext';
 import { useAuth } from './AuthContext';
 import Login from './components/Login';
+import { resolveAvatarUrl } from './utils/avatar';
 
 // Allow VITE config if available, otherwise dynamically use the current host IP/Domain
 const PROTOCOL = window.location.protocol;
@@ -333,6 +334,7 @@ function App() {
         <div className="list-container">
           {activeTab === 'chats' && (
             <ContactList
+              apiUrl={API_URL}
               contacts={contacts}
               activeId={activeContactId}
               engineState={engineState}
@@ -392,7 +394,7 @@ function App() {
               {contacts.map(c => (
                 <div key={c.id} className="contact-item" onClick={() => { setActiveContactId(c.id); setActiveTab('chats'); }}>
                   <div className="contact-avatar">
-                    <img src={c.avatar} alt={c.name} />
+                    <img src={resolveAvatarUrl(c.avatar, API_URL)} alt={c.name} style={{ objectFit: 'cover' }} />
                   </div>
                   <div className="contact-info" style={{ display: 'flex', alignItems: 'center' }}>
                     <span className="contact-name" style={{ fontSize: '16px' }}>{c.name}</span>
@@ -414,7 +416,7 @@ function App() {
                   <div className="contact-avatar" style={{ width: 'auto', minWidth: '42px', height: '42px', display: 'flex', alignItems: 'center' }}>
                     {g.members?.slice(0, 3).map((memberObj, idx) => {
                       const memberId = typeof memberObj === 'object' ? memberObj.member_id : memberObj;
-                      const memberAvatar = contacts.find(c => String(c.id) === String(memberId))?.avatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${memberId}`;
+                      const memberAvatar = resolveAvatarUrl(contacts.find(c => String(c.id) === String(memberId))?.avatar, API_URL) || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${memberId}`;
                       return <img key={idx} src={memberAvatar} alt="" style={{ width: g.members.length === 1 ? '42px' : '32px', height: g.members.length === 1 ? '42px' : '32px', borderRadius: '50%', marginLeft: idx > 0 ? '-12px' : '0', border: g.members.length === 1 ? 'none' : '2px solid #fff', zIndex: 10 - idx, objectFit: 'cover', backgroundColor: '#fff' }} />;
                     })}
                     {g.members?.length > 3 && (

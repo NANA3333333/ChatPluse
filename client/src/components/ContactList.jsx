@@ -1,6 +1,7 @@
 import React from 'react';
+import { resolveAvatarUrl } from '../utils/avatar';
 
-function ContactList({ contacts, activeId, onSelect, engineState = {} }) {
+function ContactList({ apiUrl, contacts, activeId, onSelect, engineState = {} }) {
     return (
         <>
             {contacts.map((contact) => {
@@ -14,7 +15,7 @@ function ContactList({ contacts, activeId, onSelect, engineState = {} }) {
                         onClick={() => onSelect(contact.id)}
                     >
                         <div className="contact-avatar" style={{ position: 'relative' }}>
-                            <img src={contact.avatar} alt={contact.name} />
+                            <img src={resolveAvatarUrl(contact.avatar, apiUrl)} alt={contact.name} style={{ objectFit: 'cover' }} />
                             <div className={`autopulse-status-dot ${state?.isThinking ? 'thinking' : 'connected'}`} />
                         </div>
                         <div className="contact-info">

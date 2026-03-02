@@ -143,9 +143,8 @@ app.post('/api/upload', (req, res) => {
             if (!file) {
                 return res.status(400).json({ error: 'No file uploaded' });
             }
-            const protocol = req.protocol;
-            const host = req.get('host');
-            const fileUrl = `${protocol}://${host}/uploads/${file.filename}`;
+            // Return relative path so frontend can construct absolute URL or use it directly
+            const fileUrl = `/uploads/${file.filename}`;
             res.json({ success: true, url: fileUrl });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -2357,11 +2356,19 @@ const clientDistPath = path.join(__dirname, '../client/dist');
 app.use(express.static(clientDistPath));
 
 // Catch-all route to serve the React app for any unhandled paths (client-side routing)
-app.get(/(.*)/, (req, res) => {
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Expires', '0');
-    res.sendFile(path.join(clientDistPath, 'index.html'));
+app.use((req, res, next) => {
+    // Exclude API and upload paths from SPA fallback
+    if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+        return next();
+    }
+    if (req.method === 'GET') {
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
+        res.sendFile(path.join(clientDistPath, 'index.html'));
+    } else {
+        next();
+    }
 });
 
 
