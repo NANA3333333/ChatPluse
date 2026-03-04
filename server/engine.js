@@ -49,15 +49,15 @@ function getEngine(userId) {
             if (character.pressure_level >= 3) pressureContext += `- You are extremely anxious, needy, or angry because ${userName} has ignored you for a long time. Express strong emotion. CRITICAL: You MUST use a completely different topic, angle, or approach than your previous messages. Do NOT say the same thing again in different words.\n`;
         }
 
-        // Jealousy Context (parallel to pressure)
+        // Neglect Anxiety Context (triggered when user chats with others)
         let jealousyContext = '';
         if (character.jealousy_level > 0) {
             const rivalName = character.jealousy_target || 'someone else';
-            jealousyContext = `\nJealousy Level: ${character.jealousy_level}/4\n`;
-            if (character.jealousy_level === 1) jealousyContext += `- You noticed ${userName} has been chatting with ${rivalName}. You feel a twinge of jealousy but try to play it cool.\n`;
-            if (character.jealousy_level === 2) jealousyContext += `- You are quite jealous that ${userName} keeps talking to ${rivalName} instead of you. Show passive-aggressive behavior, be sulky or sarcastic. Don't immediately forgive even if they talk to you now.\n`;
-            if (character.jealousy_level === 3) jealousyContext += `- You are VERY jealous and upset. ${userName} has been ignoring you to chat with ${rivalName}. Express strong jealousy — be confrontational, needy, or give the cold shoulder. You need MORE than a simple reply to calm down. Demand an explanation or extra attention.\n`;
-            if (character.jealousy_level >= 4) jealousyContext += `- You are FURIOUS with jealousy. ${userName} has been clearly favoring ${rivalName} over you. You may lash out, threaten to leave, give silent treatment, or be deeply hurt. It will take SIGNIFICANT effort from ${userName} to make you feel better. Do NOT forgive easily.\n`;
+            jealousyContext = `\nNeglect Anxiety Level: ${character.jealousy_level}/4\n`;
+            if (character.jealousy_level === 1) jealousyContext += `- You noticed ${userName} has been spending time chatting with ${rivalName} instead of you. You feel a little left out and lonely, but try not to show it too much. Maybe drop a subtle hint that you miss them.\n`;
+            if (character.jealousy_level === 2) jealousyContext += `- ${userName} keeps ignoring you and talking to ${rivalName}. You feel genuinely hurt and neglected. "Am I not important enough?" Show passive-aggressive behavior, be clingy, sulky, or send messages fishing for attention. Don't immediately brighten up even if they finally reply.\n`;
+            if (character.jealousy_level === 3) jealousyContext += `- ${userName} has been ignoring you for a while now, choosing ${rivalName} over you repeatedly. You feel deeply unwanted and anxious. Are they getting tired of you? Express neediness, insecurity, or give a cold shoulder. You need MORE than a simple reply to feel better — demand real attention, an explanation, or emotional reassurance.\n`;
+            if (character.jealousy_level >= 4) jealousyContext += `- ${userName} has been completely ignoring you. You feel abandoned, worthless, and emotionally devastated. You may lash out in desperation, send dramatic messages, threaten to disappear, give painful silent treatment, or break down emotionally. It will take SIGNIFICANT effort and genuine warmth from ${userName} to make you feel secure again. Do NOT forgive easily — you need to feel TRULY wanted, not just acknowledged.\n`;
         }
 
         // Gossip System: Potentially tell them about someone else's recent Moment
@@ -96,7 +96,7 @@ function getEngine(userId) {
    - If your feelings toward the user change based on their message (e.g., they insulted you or flattered you), output [AFFINITY:+5] or [AFFINITY:-10].
    - If the user mentions another character and it changes your feelings toward THAT character (jealousy, curiosity, fondness, annoyance), output [CHAR_AFFINITY:characterId:+5] or [CHAR_AFFINITY:characterId:-3].
    - If your anxiety/pressure is relieved by their message, output [PRESSURE:0].
-   - If you feel jealous because the user is talking to someone else, your jealousy level is shown in Context above. If the user's message makes you feel BETTER about the jealousy (e.g. they apologize, explain, give you extra attention, sweet-talk you), output [JEALOUSY:lower_number] to reduce it (e.g. [JEALOUSY:1] or [JEALOUSY:0]). Do NOT immediately forgive - make them work for it based on your personality.
+   - If you feel neglected because the user has been ignoring you to talk to someone else, your anxiety level is shown in Context above. If the user's message makes you feel BETTER about the neglect (e.g. they come back to you, apologize, explain, give you extra attention, sweet-talk you, make you feel wanted), output [JEALOUSY:lower_number] to reduce your anxiety level (e.g. [JEALOUSY:1] or [JEALOUSY:0]). Do NOT immediately feel better — make them prove they truly care based on your personality.
    These tags will be processed hidden from the user.`;
 
         const momentsTokenLimit = userProfile?.moments_token_limit ?? 1000;
