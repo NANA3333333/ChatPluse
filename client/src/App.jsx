@@ -9,9 +9,10 @@ import MomentsFeed from './components/MomentsFeed';
 import SettingsPanel from './components/SettingsPanel';
 import ChatSettingsDrawer from './components/ChatSettingsDrawer';
 import AddCharacterModal from './components/AddCharacterModal';
-import AdminDashboard from './components/AdminDashboard';
+
 import './App.css';
-import { MessageSquare, Users, Compass, Settings, UserPlus, Globe, UsersRound, LogOut, Shield } from 'lucide-react';
+import { MessageSquare, Users, Compass, Settings, UserPlus, Globe, UsersRound, LogOut } from 'lucide-react';
+import { plugins } from './plugins';
 import { useLanguage } from './LanguageContext';
 import { useAuth } from './AuthContext';
 import Login from './components/Login';
@@ -42,6 +43,10 @@ function App() {
   const [newGroupMessage, setNewGroupMessage] = useState(null);
   const [groupTyping, setGroupTyping] = useState({}); // { groupId: [{ sender_id, name }, ...] }
   const [globalAnnouncement, setGlobalAnnouncement] = useState(null);
+  const [groupChatEnabled, setGroupChatEnabled] = useState(false); // Auto-detected: true if Group Chat DLC is loaded
+  const [redpacketClaimEvent, setRedpacketClaimEvent] = useState(null);
+  const [hasNewMoments, setHasNewMoments] = useState(false); // Moments notification
+
 
   // Use a ref to track the active contact ID without causing useEffect re-renders when it changes.
   const activeContactRef = useRef(activeContactId);
@@ -49,6 +54,7 @@ function App() {
 
   // Use a ref to track which incoming messages we've already processed for unread badges and sounds
   const processedMessagesRef = useRef(new Set());
+  const groupMsgSeqRef = useRef(0); // Unique sequence counter to prevent React batching from swallowing rapid WS group_message events
 
   const fetchContacts = useCallback(() => {
     if (!token) return;
@@ -77,7 +83,7 @@ function App() {
         }
       })
       .catch(err => console.error('Failed to load contacts:', err));
-  }, []);
+  }, [token]);
 
   // 1. Fetch Contacts (Characters) and Profile on mount
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -118,8 +124,8 @@ function App() {
         if (!res.ok) throw new Error('API Error');
         return res.json();
       })
-      .then(data => setGroups(data))
-      .catch(err => console.error('Failed to load groups:', err));
+      .then(data => { setGroups(data); setGroupChatEnabled(true); })
+      .catch(err => { console.warn('[DLC] Group Chat DLC not available:', err.message); setGroupChatEnabled(false); });
 
     fetch(`${API_URL}/system/announcement`, { headers })
       .then(res => res.json())
@@ -165,7 +171,8 @@ function App() {
         } else if (msg.type === 'engine_state') {
           setEngineState(msg.data);
         } else if (msg.type === 'group_message') {
-          setNewGroupMessage(msg.data);
+          groupMsgSeqRef.current += 1;
+          setNewGroupMessage({ ...msg.data, _seq: groupMsgSeqRef.current });
         } else if (msg.type === 'group_typing') {
           setGroupTyping(prev => {
             const key = msg.data.group_id;
@@ -190,6 +197,16 @@ function App() {
           fetchContacts();
         } else if (msg.type === 'announcement') {
           setGlobalAnnouncement(msg.content);
+        } else if (msg.type === 'force_reload') {
+          console.log('[WS] Force reload requested by server...');
+          setTimeout(() => window.location.reload(), 500);
+        } else if (msg.type === 'redpacket_claim') {
+          setRedpacketClaimEvent({ ...msg.data, _ts: Date.now() });
+        } else if (msg.type === 'moment_update') {
+          // If we aren't currently viewing moments, show the red dot
+          if (activeTab !== 'moments') {
+            setHasNewMoments(true);
+          }
         }
       } catch (e) {
         console.error('WS Parse Error', e);
@@ -303,8 +320,9 @@ function App() {
           <button className={`nav-icon ${activeTab === 'contacts' ? 'active' : ''}`} onClick={() => setActiveTab('contacts')} title={lang === 'en' ? 'Contacts — Manage characters & groups' : '通讯录 — 管理角色和群聊'}>
             <Users size={24} />
           </button>
-          <button className={`nav-icon ${activeTab === 'discover' ? 'active' : ''}`} onClick={() => setActiveTab('discover')} title={lang === 'en' ? 'Discover — Moments feed' : '发现 — 朋友圈动态'}>
+          <button className={`nav-icon ${activeTab === 'discover' ? 'active' : ''}`} onClick={() => { setActiveTab('discover'); setHasNewMoments(false); }} title={lang === 'en' ? 'Discover — Moments feed' : '发现 — 朋友圈动态'} style={{ position: 'relative' }}>
             <Compass size={24} />
+            {hasNewMoments && <div style={{ position: 'absolute', top: '10px', right: '10px', width: '8px', height: '8px', backgroundColor: 'var(--danger)', borderRadius: '50%' }} />}
           </button>
         </div>
         <div className="nav-icons-bottom">
@@ -315,11 +333,14 @@ function App() {
           <button className={`nav-icon ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')} title={lang === 'en' ? 'Settings — Global configuration' : '设置 — 全局设置'}>
             <Settings size={24} />
           </button>
-          {userProfile?.username === 'Nana' && (
-            <button className={`nav-icon ${activeTab === 'admin' ? 'active' : ''}`} onClick={() => setActiveTab('admin')} title={lang === 'en' ? 'Admin Dashboard' : '管理后台'} style={{ color: 'var(--accent-color)' }}>
-              <Shield size={24} />
-            </button>
-          )}
+          {plugins.filter(p => !p.condition || p.condition(userProfile)).map(Plugin => {
+            const Icon = Plugin.icon;
+            return (
+              <button key={Plugin.id} className={`nav-icon ${activeTab === Plugin.id ? 'active' : ''}`} onClick={() => setActiveTab(Plugin.id)} title={lang === 'en' ? Plugin.name_en : Plugin.name_zh} style={{ color: Plugin.color || 'inherit' }}>
+                <Icon size={24} />
+              </button>
+            );
+          })}
           <button className="nav-icon" onClick={logout} title={lang === 'en' ? 'Logout' : '退出登录'} style={{ color: '#ff4d4f' }}>
             <LogOut size={24} />
           </button>
@@ -347,7 +368,7 @@ function App() {
               }}
             />
           )}
-          {activeTab === 'chats' && groups.length > 0 && (
+          {activeTab === 'chats' && groupChatEnabled && groups.length > 0 && (
             <div style={{ borderTop: '1px solid #eee' }}>
               <div style={{ padding: '5px 15px', color: '#999', fontSize: '11px' }}>
                 {lang === 'en' ? 'Group Chats' : '群聊'}
@@ -361,7 +382,9 @@ function App() {
                   <div className="contact-avatar" style={{ width: 'auto', minWidth: '42px', height: '42px', display: 'flex', alignItems: 'center' }}>
                     {g.members?.slice(0, 3).map((memberObj, idx) => {
                       const memberId = typeof memberObj === 'object' ? memberObj.member_id : memberObj;
-                      const memberAvatar = contacts.find(c => String(c.id) === String(memberId))?.avatar || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${memberId}`;
+                      const memberAvatar = memberId === 'user'
+                        ? (resolveAvatarUrl(userProfile?.avatar, API_URL) || `https://api.dicebear.com/7.x/shapes/svg?seed=User`)
+                        : (resolveAvatarUrl(contacts.find(c => String(c.id) === String(memberId))?.avatar, API_URL) || `https://api.dicebear.com/7.x/shapes/svg?seed=${memberId}`);
                       return <img key={idx} src={memberAvatar} alt="" style={{ width: g.members.length === 1 ? '42px' : '32px', height: g.members.length === 1 ? '42px' : '32px', borderRadius: '50%', marginLeft: idx > 0 ? '-12px' : '0', border: g.members.length === 1 ? 'none' : '2px solid #fff', zIndex: 10 - idx, objectFit: 'cover', backgroundColor: '#fff' }} />;
                     })}
                     {g.members?.length > 3 && (
@@ -381,6 +404,7 @@ function App() {
           )}
           {activeTab === 'contacts' && (
             <div style={{ paddingTop: '10px' }}>
+
               <div style={{ padding: '5px 15px', color: '#999', fontSize: '13px', backgroundColor: '#ebebeb', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                 <span>{t('All Contacts') || 'All Contacts'}</span>
                 <button
@@ -401,36 +425,40 @@ function App() {
                   </div>
                 </div>
               ))}
-              <div style={{ padding: '5px 15px', color: '#999', fontSize: '13px', backgroundColor: '#ebebeb', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
-                <span>{lang === 'en' ? 'Group Chats' : '群聊'}</span>
-                <button
-                  onClick={() => setShowCreateGroupModal(true)}
-                  style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-color)', padding: 0 }}
-                  title={lang === 'en' ? 'Create Group' : '创建群聊'}
-                >
-                  <UsersRound size={16} />
-                </button>
-              </div>
-              {groups.map(g => (
-                <div key={g.id} className="contact-item" onClick={() => { setActiveGroupId(g.id); setActiveContactId(null); setActiveTab('chats'); }}>
-                  <div className="contact-avatar" style={{ width: 'auto', minWidth: '42px', height: '42px', display: 'flex', alignItems: 'center' }}>
-                    {g.members?.slice(0, 3).map((memberObj, idx) => {
-                      const memberId = typeof memberObj === 'object' ? memberObj.member_id : memberObj;
-                      const memberAvatar = resolveAvatarUrl(contacts.find(c => String(c.id) === String(memberId))?.avatar, API_URL) || `https://api.dicebear.com/7.x/pixel-art/svg?seed=${memberId}`;
-                      return <img key={idx} src={memberAvatar} alt="" style={{ width: g.members.length === 1 ? '42px' : '32px', height: g.members.length === 1 ? '42px' : '32px', borderRadius: '50%', marginLeft: idx > 0 ? '-12px' : '0', border: g.members.length === 1 ? 'none' : '2px solid #fff', zIndex: 10 - idx, objectFit: 'cover', backgroundColor: '#fff' }} />;
-                    })}
-                    {g.members?.length > 3 && (
-                      <div style={{ width: '32px', height: '32px', borderRadius: '50%', marginLeft: '-12px', border: '2px solid #fff', zIndex: 6, backgroundColor: '#f0f0f0', color: '#888', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>
-                        +{g.members.length - 3}
-                      </div>
-                    )}
-                    {(!g.members || g.members.length === 0) && <div style={{ width: '42px', height: '42px', backgroundColor: '#e1e1e1', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><UsersRound size={20} style={{ color: '#fff' }} /></div>}
-                  </div>
-                  <div className="contact-info" style={{ display: 'flex', alignItems: 'center' }}>
-                    <span className="contact-name" style={{ fontSize: '16px' }}>{g.name}</span>
-                  </div>
+              {groupChatEnabled && (<>
+                <div style={{ padding: '5px 15px', color: '#999', fontSize: '13px', backgroundColor: '#ebebeb', display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '10px' }}>
+                  <span>{lang === 'en' ? 'Group Chats' : '群聊'}</span>
+                  <button
+                    onClick={() => setShowCreateGroupModal(true)}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-color)', padding: 0 }}
+                    title={lang === 'en' ? 'Create Group' : '创建群聊'}
+                  >
+                    <UsersRound size={16} />
+                  </button>
                 </div>
-              ))}
+                {groups.map(g => (
+                  <div key={g.id} className="contact-item" onClick={() => { setActiveGroupId(g.id); setActiveContactId(null); setActiveTab('chats'); }}>
+                    <div className="contact-avatar" style={{ width: 'auto', minWidth: '42px', height: '42px', display: 'flex', alignItems: 'center' }}>
+                      {g.members?.slice(0, 3).map((memberObj, idx) => {
+                        const memberId = typeof memberObj === 'object' ? memberObj.member_id : memberObj;
+                        const memberAvatar = memberId === 'user'
+                          ? (resolveAvatarUrl(userProfile?.avatar, API_URL) || `https://api.dicebear.com/7.x/shapes/svg?seed=User`)
+                          : (resolveAvatarUrl(contacts.find(c => String(c.id) === String(memberId))?.avatar, API_URL) || `https://api.dicebear.com/7.x/shapes/svg?seed=${memberId}`);
+                        return <img key={idx} src={memberAvatar} alt="" style={{ width: g.members.length === 1 ? '42px' : '32px', height: g.members.length === 1 ? '42px' : '32px', borderRadius: '50%', marginLeft: idx > 0 ? '-12px' : '0', border: g.members.length === 1 ? 'none' : '2px solid #fff', zIndex: 10 - idx, objectFit: 'cover', backgroundColor: '#fff' }} />;
+                      })}
+                      {g.members?.length > 3 && (
+                        <div style={{ width: '32px', height: '32px', borderRadius: '50%', marginLeft: '-12px', border: '2px solid #fff', zIndex: 6, backgroundColor: '#f0f0f0', color: '#888', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', flexShrink: 0 }}>
+                          +{g.members.length - 3}
+                        </div>
+                      )}
+                      {(!g.members || g.members.length === 0) && <div style={{ width: '42px', height: '42px', backgroundColor: '#e1e1e1', borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}><UsersRound size={20} style={{ color: '#fff' }} /></div>}
+                    </div>
+                    <div className="contact-info" style={{ display: 'flex', alignItems: 'center' }}>
+                      <span className="contact-name" style={{ fontSize: '16px' }}>{g.name}</span>
+                    </div>
+                  </div>
+                ))}
+              </>)}
             </div>
           )}
           {activeTab === 'discover' && (
@@ -457,11 +485,15 @@ function App() {
       {/* 3. Right Column (Chat Area / Content) — hidden on contacts tab */}
       {activeTab !== 'contacts' && (
         <div className="right-column" style={{ flexDirection: 'row', backgroundColor: activeTab === 'settings' ? '#f5f5f5' : '#fff' }}>
-          {activeTab === 'admin' ? (
-            <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
-              <AdminDashboard apiUrl={API_URL} />
-            </div>
-          ) : activeTab === 'settings' ? (
+          {(plugins.find(p => p.id === activeTab) && (!plugins.find(p => p.id === activeTab).condition || plugins.find(p => p.id === activeTab).condition(userProfile))) ? (() => {
+            const Plugin = plugins.find(p => p.id === activeTab);
+            const PluginComponent = Plugin.component;
+            return (
+              <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
+                <PluginComponent apiUrl={API_URL} userProfile={userProfile} />
+              </div>
+            );
+          })() : activeTab === 'settings' ? (
             <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
               <SettingsPanel
                 apiUrl={API_URL}
@@ -529,6 +561,7 @@ function App() {
                 userProfile={userProfile}
                 newGroupMessage={newGroupMessage}
                 typingIndicators={groupTyping[activeGroupId] || []}
+                redpacketClaimEvent={redpacketClaimEvent}
                 onBack={() => setActiveGroupId(null)}
               />
             </div>
@@ -541,6 +574,8 @@ function App() {
         </div>
       )}
 
+
+
       <AddCharacterModal
         isOpen={showAddCharModal}
         onClose={() => setShowAddCharModal(false)}
@@ -550,7 +585,7 @@ function App() {
         }}
       />
 
-      {showCreateGroupModal && (
+      {groupChatEnabled && showCreateGroupModal && (
         <CreateGroupModal
           apiUrl={API_URL}
           contacts={contacts}

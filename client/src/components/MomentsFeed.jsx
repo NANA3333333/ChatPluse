@@ -102,8 +102,12 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
     };
 
     const handleDeleteMoment = async (momentId) => {
+        if (!confirm('确定删除这条朋友圈？')) return;
         try {
-            const res = await fetch(`${apiUrl}/moments/${momentId}`, { method: 'DELETE' });
+            const res = await fetch(`${apiUrl}/moments/${momentId}`, {
+                method: 'DELETE',
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
+            });
             const data = await res.json();
             if (data.success) {
                 setMoments(prev => prev.filter(m => m.id !== momentId));
@@ -124,7 +128,7 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
     const resolveAuthor = (id) => {
         if (id === 'user') return { name: userProfile?.name || 'User', avatar: resolveAvatarUrl(userProfile?.avatar, apiUrl) || 'https://api.dicebear.com/7.x/shapes/svg?seed=User' };
         const char = characters[id];
-        return char ? { ...char, avatar: resolveAvatarUrl(char.avatar, apiUrl) } : { name: 'Unknown', avatar: 'https://api.dicebear.com/7.x/pixel-art/svg?seed=Unknown' };
+        return char ? { ...char, avatar: resolveAvatarUrl(char.avatar, apiUrl) } : { name: 'Unknown', avatar: 'https://api.dicebear.com/7.x/shapes/svg?seed=Unknown' };
     };
 
     if (loading) return <div className="placeholder-text">Loading Moments...</div>;
@@ -188,11 +192,9 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
                                     <div className="moment-footer" style={{ marginTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                         <span className="moment-time">{formatTime(moment.timestamp)}</span>
                                         <div className="moment-actions" style={{ display: 'flex', gap: '15px' }}>
-                                            {moment.character_id === 'user' && (
-                                                <button onClick={() => handleDeleteMoment(moment.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#999', display: 'flex', alignItems: 'center', gap: '4px' }} title="Delete">
-                                                    <Trash2 size={16} />
-                                                </button>
-                                            )}
+                                            <button onClick={() => handleDeleteMoment(moment.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#999', display: 'flex', alignItems: 'center', gap: '4px' }} title="Delete">
+                                                <Trash2 size={16} />
+                                            </button>
                                             <button onClick={() => handleLikeToggle(moment.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px', color: isLikedByUser ? 'var(--danger)' : 'var(--accent-color)' }}>
                                                 <Heart size={18} fill={isLikedByUser ? 'var(--danger)' : 'none'} color={isLikedByUser ? 'var(--danger)' : 'var(--accent-color)'} />
                                                 <span>{(moment.likers || []).length > 0 ? moment.likers.length : ''}</span>

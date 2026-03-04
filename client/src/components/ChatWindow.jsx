@@ -38,6 +38,8 @@ function ChatWindow({ contact, allContacts, apiUrl, newIncomingMessage, engineSt
     const [hasMore, setHasMore] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
     const [showHidden, setShowHidden] = useState(false);
+    const [selectMode, setSelectMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState(new Set());
     const PAGE_SIZE = 100;
     const prevBlockedRef = useRef(false);
     const messagesEndRef = useRef(null);
@@ -245,6 +247,10 @@ function ChatWindow({ contact, allContacts, apiUrl, newIncomingMessage, engineSt
                     {engineState?.[contact.id]?.isBlocked === 1 && <span style={{ color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold' }}>(Blocked) 🚫</span>}
                 </div>
                 <div className="chat-header-actions">
+                    <button onClick={() => { setSelectMode(m => !m); setSelectedIds(new Set()); }} title={lang === 'en' ? 'Select Messages' : '选择消息'}
+                        style={selectMode ? { color: 'var(--accent-color)', background: 'rgba(var(--accent-rgb, 74,144,226), 0.12)', borderRadius: '8px' } : {}}>
+                        <Trash size={20} />
+                    </button>
                     <button onClick={() => setIsRecommendModalOpen(true)} title={lang === 'en' ? 'Recommend Contact' : '推荐联系人'}>
                         <UserPlus size={20} />
                     </button>
@@ -294,19 +300,51 @@ function ChatWindow({ contact, allContacts, apiUrl, newIncomingMessage, engineSt
                 )}
                 {messages.map((msg, idx) => {
                     if (idx > 0 && messages[idx - 1].id === msg.id) return null;
+                    const isSelected = selectedIds.has(msg.id);
                     return (
-                        <div key={msg.id} style={msg.hidden ? {
-                            opacity: 0.4, filter: 'grayscale(0.5)',
-                            borderLeft: '3px solid #f0c060', paddingLeft: '4px',
-                            marginBottom: '2px'
-                        } : {}}>
-                            <MessageBubble
-                                message={msg}
-                                characterName={contact.name}
-                                avatar={msg.role === 'character' ? contact.avatar : (userAvatar || 'https://api.dicebear.com/7.x/shapes/svg?seed=User')}
-                                apiUrl={apiUrl}
-                                onRetry={handleRetry}
-                            />
+                        <div key={msg.id} style={{
+                            display: 'flex', alignItems: 'flex-start', gap: '0px',
+                            ...(msg.hidden ? {
+                                opacity: 0.4, filter: 'grayscale(0.5)',
+                                borderLeft: '3px solid #f0c060', paddingLeft: '4px',
+                                marginBottom: '2px'
+                            } : {}),
+                            ...(isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {})
+                        }}
+                            onClick={selectMode ? () => {
+                                setSelectedIds(prev => {
+                                    const next = new Set(prev);
+                                    if (next.has(msg.id)) next.delete(msg.id);
+                                    else next.add(msg.id);
+                                    return next;
+                                });
+                            } : undefined}
+                        >
+                            {selectMode && (
+                                <div style={{
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                    minWidth: '32px', paddingTop: '12px', cursor: 'pointer'
+                                }}>
+                                    <div style={{
+                                        width: '20px', height: '20px', borderRadius: '50%',
+                                        border: isSelected ? 'none' : '2px solid #ccc',
+                                        backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        transition: 'all 0.15s ease'
+                                    }}>
+                                        {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                    </div>
+                                </div>
+                            )}
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                                <MessageBubble
+                                    message={msg}
+                                    characterName={contact.name}
+                                    avatar={msg.role === 'character' ? contact.avatar : (userAvatar || 'https://api.dicebear.com/7.x/shapes/svg?seed=User')}
+                                    apiUrl={apiUrl}
+                                    onRetry={handleRetry}
+                                />
+                            </div>
                         </div>
                     );
                 })}
@@ -325,26 +363,103 @@ function ChatWindow({ contact, allContacts, apiUrl, newIncomingMessage, engineSt
                 <div ref={messagesEndRef} />
             </div>
 
-            <InputBar
-                onSend={handleSend}
-                onTransfer={() => setIsTransferModalOpen(true)}
-                onQuickHide={async () => {
-                    const cid = contactRef.current?.id;
-                    if (!cid) return;
-                    const all = messages;
-                    const half = Math.floor(all.length / 2);
-                    if (half === 0) return;
-                    const res = await fetch(`${apiUrl}/messages/${cid}/hide`, {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ startIdx: 0, endIdx: half - 1 })
-                    });
-                    if ((await res.json()).success && contactRef.current?.id === cid) {
-                        const updated = await fetch(`${apiUrl}/messages/${cid}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json());
-                        setMessages(updated);
-                    }
-                }}
-            />
+            {/* Floating delete bar when in select mode */}
+            {selectMode && (
+                <div style={{
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                    padding: '10px 16px', background: '#fff', borderTop: '1px solid #eee',
+                    boxShadow: '0 -2px 8px rgba(0,0,0,0.06)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <button
+                            onClick={() => {
+                                if (selectedIds.size === messages.length) setSelectedIds(new Set());
+                                else setSelectedIds(new Set(messages.map(m => m.id)));
+                            }}
+                            style={{ fontSize: '13px', color: 'var(--accent-color, #4a90e2)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0' }}
+                        >
+                            {selectedIds.size === messages.length ? (lang === 'en' ? 'Deselect All' : '取消全选') : (lang === 'en' ? 'Select All' : '全选')}
+                        </button>
+                        <span style={{ fontSize: '13px', color: '#888' }}>
+                            {lang === 'en' ? `${selectedIds.size} selected` : `已选 ${selectedIds.size} 条`}
+                        </span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                            onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }}
+                            style={{ padding: '6px 16px', fontSize: '13px', background: '#f5f5f5', border: '1px solid #ddd', borderRadius: '8px', cursor: 'pointer', color: '#666' }}
+                        >
+                            {lang === 'en' ? 'Cancel' : '取消'}
+                        </button>
+                        <button
+                            disabled={selectedIds.size === 0}
+                            onClick={async () => {
+                                if (selectedIds.size === 0) return;
+                                const confirmMsg = lang === 'en'
+                                    ? `Permanently delete ${selectedIds.size} message(s)?`
+                                    : `确定永久删除 ${selectedIds.size} 条消息？`;
+                                if (!confirm(confirmMsg)) return;
+                                try {
+                                    const res = await fetch(`${apiUrl}/messages/batch-delete`, {
+                                        method: 'POST',
+                                        headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ messageIds: [...selectedIds] })
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                        setMessages(prev => prev.filter(m => !selectedIds.has(m.id)));
+                                        setSelectedIds(new Set());
+                                        setSelectMode(false);
+                                    }
+                                } catch (e) {
+                                    console.error('Batch delete failed:', e);
+                                }
+                            }}
+                            style={{
+                                padding: '6px 16px', fontSize: '13px', fontWeight: '600',
+                                background: selectedIds.size > 0 ? '#e74c3c' : '#ddd',
+                                color: '#fff', border: 'none', borderRadius: '8px',
+                                cursor: selectedIds.size > 0 ? 'pointer' : 'not-allowed'
+                            }}
+                        >
+                            <Trash size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+                            {lang === 'en' ? 'Delete' : '删除'}
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            {/* Normal input bar — hidden while in select mode */}
+            {!selectMode && (
+                <InputBar
+                    onSend={handleSend}
+                    onTransfer={() => setIsTransferModalOpen(true)}
+                    onQuickHide={async () => {
+                        const cid = contactRef.current?.id;
+                        if (!cid) return;
+                        // Only consider visible (non-hidden) messages for halving
+                        const visibleMsgs = messages.filter(m => !m.hidden);
+                        const halfCount = Math.floor(visibleMsgs.length / 2);
+                        if (halfCount === 0) return;
+                        // Find the indices of the visible messages we want to hide (first half)
+                        // We need to map back to the index in the FULL messages array for the API
+                        const toHideIds = visibleMsgs.slice(0, halfCount).map(m => m.id);
+                        // Find the max index in the full ordered message list for these messages
+                        const lastHideId = toHideIds[toHideIds.length - 1];
+                        const endIdx = messages.findIndex(m => m.id === lastHideId);
+                        if (endIdx < 0) return;
+                        const res = await fetch(`${apiUrl}/messages/${cid}/hide`, {
+                            method: 'POST',
+                            headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ startIdx: 0, endIdx })
+                        });
+                        if ((await res.json()).success && contactRef.current?.id === cid) {
+                            const updated = await fetch(`${apiUrl}/messages/${cid}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json());
+                            setMessages(updated);
+                        }
+                    }}
+                />
+            )}
             {isTransferModalOpen && (
                 <TransferModal
                     contact={contact}

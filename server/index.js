@@ -46,8 +46,11 @@ const apiLimiter = rateLimit({
 app.use('/api/', apiLimiter); // Apply general API limiter
 
 
-// Serve static uploaded files
-app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+// Serve static uploaded files with CORP header to bypass browser COEP blocks
+app.use('/uploads', (req, res, next) => {
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
+    next();
+}, express.static(path.join(__dirname, 'public/uploads')));
 
 // Configure Multer for local image uploads
 const storage = multer.diskStorage({
@@ -110,9 +113,14 @@ wss.on('connection', (ws) => {
 
                 // Spin up user-specific engine on first connect
                 const engine = getEngine(decoded.id);
-                engine.setGroupChainCallback(triggerGroupAIChain);
+                // DLC hook: if Group Chat DLC registered a chain callback, wire it
+                if (pluginContext.hooks?.groupChainCallback) {
+                    engine.setGroupChainCallback(pluginContext.hooks.groupChainCallback);
+                }
                 engine.startEngine(clients);
-                engine.startGroupProactiveTimers(clients);
+                if (typeof engine.startGroupProactiveTimers === 'function') {
+                    engine.startGroupProactiveTimers(clients);
+                }
                 console.log(`[WS] Authenticated & Engine Started for user: ${decoded.username}`);
             }
         } catch (e) {
@@ -128,30 +136,7 @@ wss.on('connection', (ws) => {
     });
 });
 
-// 0. Upload a file (image or any file)
-app.post('/api/upload', (req, res) => {
-    upload.any()(req, res, function (err) {
-        if (err instanceof multer.MulterError) {
-            // A Multer error occurred when uploading (e.g. file too large)
-            return res.status(400).json({ error: err.message });
-        } else if (err) {
-            // An unknown error occurred (e.g. our custom fileFilter threw an error)
-            return res.status(400).json({ error: err.message });
-        }
 
-        try {
-            const file = req.files?.[0];
-            if (!file) {
-                return res.status(400).json({ error: 'No file uploaded' });
-            }
-            // Return relative path so frontend can construct absolute URL or use it directly
-            const fileUrl = `/uploads/${file.filename}`;
-            res.json({ success: true, url: fileUrl });
-        } catch (e) {
-            res.status(500).json({ error: e.message });
-        }
-    });
-});
 
 // ─── AUTHENTICATION MIDDLEWARE ──────────────────────────────────────────
 authDb.initAuthDb();
@@ -174,6 +159,31 @@ const authMiddleware = (req, res, next) => {
         return res.status(401).json({ error: 'Invalid token' });
     }
 };
+
+// 0. Upload a file (image or any file)
+app.post('/api/upload', authMiddleware, (req, res) => {
+    upload.any()(req, res, function (err) {
+        if (err instanceof multer.MulterError) {
+            // A Multer error occurred when uploading (e.g. file too large)
+            return res.status(400).json({ error: err.message });
+        } else if (err) {
+            // An unknown error occurred (e.g. our custom fileFilter threw an error)
+            return res.status(400).json({ error: err.message });
+        }
+
+        try {
+            const file = req.files?.[0];
+            if (!file) {
+                return res.status(400).json({ error: 'No file uploaded' });
+            }
+            // Return relative path so frontend can construct absolute URL or use it directly
+            const fileUrl = `/uploads/${file.filename}`;
+            res.json({ success: true, url: fileUrl });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
+    });
+});
 
 // ─── AUTH ROUTES ────────────────────────────────────────────────────────
 app.post('/api/auth/register', authLimiter, (req, res) => {
@@ -217,208 +227,36 @@ app.get('/api/system/announcement', authMiddleware, (req, res) => {
     }
 });
 
-app.get('/api/system/export', async (req, res) => {
-    try {
-        const token = req.query.token;
-        if (!token) return res.status(401).send('Unauthorized');
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const userId = decoded.id;
 
-        const db = getUserDb(userId); // ensure db is initialized
-        const dbPath = path.join(__dirname, '..', 'data', `chatpulse_user_${userId}.db`);
-        if (!fs.existsSync(dbPath)) return res.status(404).send('Database not found');
-
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Pragma', 'no-cache');
-        res.setHeader('Expires', '0');
-
-        const backupFileName = `chatpulse_backup_${userId}_${Date.now()}.db`;
-        const backupPath = path.join(__dirname, '..', 'data', backupFileName);
-
-        // Await the backup snapshot. This correctly captures all memory buffered in WAL.
-        await db.backup(backupPath);
-
-        res.download(backupPath, backupFileName, (err) => {
-            if (fs.existsSync(backupPath)) {
-                fs.unlinkSync(backupPath); // Cleanup the temp backup
-            }
-        });
-    } catch (e) {
-        res.status(500).send(e.message);
-    }
-});
-
-app.delete('/api/system/wipe', authMiddleware, async (req, res) => {
-    try {
-        const userId = req.user.id;
-        const memory = getMemory(userId);
-
-        const characters = req.db.getCharacters();
-        for (const c of characters) {
-            await memory.wipeIndex(c.id);
-        }
-
-        req.db.close();
-        const dbPath = req.db.getDbPath();
-        if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-
-        const { userDbCache } = require('./db');
-        userDbCache.delete(userId);
-
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/system/import', authMiddleware, upload.single('db_file'), async (req, res) => {
-    try {
-        if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
-
-        // Validate SQLite Header
-        const buffer = fs.readFileSync(req.file.path);
-        if (buffer.length < 100 || buffer.toString('utf8', 0, 15) !== 'SQLite format 3') {
-            fs.unlinkSync(req.file.path);
-            return res.status(400).json({ error: 'Uploaded file is not a valid SQLite Database. Did you upload an HTML file by mistake?' });
-        }
-
-        const userId = req.user.id;
-        const memory = getMemory(userId);
-
-        const characters = req.db.getCharacters();
-        for (const c of characters) {
-            await memory.wipeIndex(c.id);
-        }
-
-        const dbPath = req.db.getDbPath();
-
-        // Ensure WAL is checkpointed and DB is closed before overwriting
-        try {
-            await req.db.backup(dbPath + '.tmp'); // Forces a WAL checkpoint in db.js
-        } catch (e) { }
-
-        req.db.close();
-
-        // Delete existing WAL and SHM files to prevent corruption with the new DB file
-        if (fs.existsSync(dbPath + '-wal')) fs.unlinkSync(dbPath + '-wal');
-        if (fs.existsSync(dbPath + '-shm')) fs.unlinkSync(dbPath + '-shm');
-
-        fs.copyFileSync(req.file.path, dbPath);
-        fs.unlinkSync(req.file.path);
-
-        const { userDbCache } = require('./db');
-        userDbCache.delete(userId);
-
-        res.json({ success: true });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ─── ADMIN ROUTES ───────────────────────────────────────────────────────
-const adminMiddleware = (req, res, next) => {
-    if (!req.user || req.user.username !== 'Nana') {
-        return res.status(403).json({ error: 'Forbidden. Admin level restricted.' });
-    }
-    next();
+// ─── PLUGIN MANAGER ────────────────────────────────────────────────────────
+const pluginContext = {
+    wss,
+    getWsClients,
+    authDb,
+    authMiddleware,
+    getUserDb,
+    getEngine,
+    getMemory,
+    callLLM,
+    hooks: {}  // DLCs register late-binding callbacks here
 };
 
-app.get('/api/admin/invites', authMiddleware, adminMiddleware, (req, res) => {
-    try {
-        const code = authDb.generateInviteCode();
-        res.json({ success: true, code });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/api/admin/users', authMiddleware, adminMiddleware, (req, res) => {
-    try {
-        const users = authDb.getAllUsers();
-        res.json({ success: true, users });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.get('/api/admin/invites/all', authMiddleware, adminMiddleware, (req, res) => {
-    try {
-        const codes = authDb.getInviteCodes();
-        res.json({ success: true, codes });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.delete('/api/admin/invites/:code', authMiddleware, adminMiddleware, (req, res) => {
-    try {
-        authDb.deleteInviteCode(req.params.code);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.delete('/api/admin/users/:id', authMiddleware, adminMiddleware, async (req, res) => {
-    try {
-        const targetId = req.params.id;
-        if (targetId === req.user.id) return res.status(400).json({ error: "Cannot delete yourself" });
-
-        // 1. Force disconnect websocket
-        const clients = getWsClients(targetId);
-        if (clients && clients.size > 0) {
-            clients.forEach(c => c.close());
-        }
-
-        // 2. Shut down engine memory and close DB
-        const { userDbCache } = require('./db');
-        const db = userDbCache.get(targetId);
-        if (db) {
-            db.close();
-            userDbCache.delete(targetId);
-        }
-
-        // Delete memory index
-        try {
-            const memory = getMemory(targetId);
-            const chars = db ? db.getCharacters() : [];
-            for (const c of chars) {
-                await memory.wipeIndex(c.id);
+const pluginsDir = path.join(__dirname, 'plugins');
+if (fs.existsSync(pluginsDir)) {
+    const plugins = fs.readdirSync(pluginsDir);
+    for (const pluginName of plugins) {
+        const pluginPath = path.join(pluginsDir, pluginName, 'index.js');
+        if (fs.existsSync(pluginPath)) {
+            try {
+                const initPlugin = require(pluginPath);
+                initPlugin(app, pluginContext);
+                console.log(`[Plugin] Loaded DLC: ${pluginName}`);
+            } catch (err) {
+                console.error(`[Plugin] Failed to load DLC: ${pluginName}`, err);
             }
-        } catch (e) { }
-
-        // 3. Delete db file
-        const dbPath = path.join(__dirname, '..', 'data', `chatpulse_user_${targetId}.db`);
-        if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-
-        // 4. Delete from authDb
-        authDb.deleteUser(targetId);
-
-        res.json({ success: true });
-    } catch (e) {
-        console.error(e);
-        res.status(500).json({ error: e.message });
+        }
     }
-});
-
-app.post('/api/admin/announcement', authMiddleware, adminMiddleware, (req, res) => {
-    try {
-        const { content } = req.body;
-        authDb.setAnnouncement(content);
-
-        // Broadcast over WS to all active users
-        const messageStr = JSON.stringify({ type: 'announcement', content });
-        wss.clients.forEach(client => {
-            if (client.readyState === 1 && client.userId) {
-                client.send(messageStr);
-            }
-        });
-        res.json({ success: true, announcement: { content } });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+}
 
 // REST API ROUTES
 // ─────────────────────────────────────────────────────────────
@@ -609,6 +447,26 @@ app.post('/api/messages/:characterId/retry', authMiddleware, (req, res) => {
     }
 });
 
+// 4.3 Batch delete messages
+app.post('/api/messages/batch-delete', authMiddleware, (req, res) => {
+    const db = req.db;
+    try {
+        const { messageIds } = req.body;
+        if (!Array.isArray(messageIds) || messageIds.length === 0) {
+            return res.status(400).json({ error: 'messageIds array required' });
+        }
+        let deleted = 0;
+        for (const id of messageIds) {
+            db.deleteMessage(id);
+            deleted++;
+        }
+        console.log(`[Messages] Batch deleted ${deleted} messages.`);
+        res.json({ success: true, deleted });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // 4.5 Send a transfer to a character (Unblock mechanic)
 app.post('/api/transfer', authMiddleware, (req, res) => {
     const db = req.db;
@@ -692,13 +550,22 @@ The JSON MUST have the EXACT following keys:
 - "sys_jealousy" (number 0 or 1, 1 if they are possessive/jealous)
 - "interval_min" (number, suggested minimum minutes between proactive messages, integer)
 - "interval_max" (number, suggested max minutes, integer)
+- "target_emoji" (string, a single emoji that best represents this character's vibe/personality)
 `;
+
+        const existingChars = db.getCharacters();
+        const usedEmojis = Array.from(new Set(existingChars.map(c => c.emoji).filter(e => e && e !== '👤')));
+        const excludeEmojiStr = usedEmojis.length > 0
+            ? `\nCRITICAL EMOJI RULE: Do NOT use any of these emojis because they are already taken by other characters: ${usedEmojis.join(', ')}. You MUST pick a unique one.`
+            : '';
+
+        const finalSystemPrompt = systemPrompt + excludeEmojiStr;
 
         const generatedText = await callLLM({
             endpoint: api_endpoint,
             key: api_key,
             model: model_name,
-            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: query }],
+            messages: [{ role: 'system', content: finalSystemPrompt }, { role: 'user', content: query }],
             maxTokens: 1500,
             temperature: 0.7
         });
@@ -727,6 +594,8 @@ The JSON MUST have the EXACT following keys:
             parsed.model_name = model_name;
             parsed.sys_timer = 1;
             parsed.sys_proactive = 1;
+            parsed.emoji = parsed.target_emoji || '👤';
+            delete parsed.target_emoji;
 
             return res.json({ success: true, character: parsed });
         } else {
@@ -772,6 +641,8 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
         db.clearDiaries(id);
         db.clearFriends(id);
         db.clearCharRelationships(id); // Also wipe inter-char social bonds
+        db.clearTransfers(id);         // Wipe all private transfers (sent & received)
+        db.clearMomentInteractions(id); // Wipe likes & comments on/by this char
         await memory.wipeIndex(id);
 
         // Reset core emotional stats, wallet, AND diary lock state
@@ -784,7 +655,11 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
             is_blocked: 0,
             is_diary_unlocked: 0,
             wallet: 200,
-            diary_password: null
+            diary_password: null,
+            hidden_state: '',
+            jealousy_level: 0,
+            jealousy_target: '',
+            last_moment_at: 0
         });
         // Immediately assign a fresh diary password
         const newPw = String(Math.floor(1000 + Math.random() * 9000));
@@ -962,6 +837,34 @@ app.post('/api/moments/:id/like', authMiddleware, (req, res) => {
         const { liker_id } = req.body;  // 'user' or character id
         const liked = db.toggleLike(req.params.id, liker_id || 'user');
         const likers = db.getLikesForMoment(req.params.id).map(l => l.liker_id);
+
+        // If the user liked it, potentially trigger a reaction from the AI
+        if (liked && (liker_id === 'user' || !liker_id)) {
+            const allMoments = db.getMoments();
+            const moment = allMoments.find(m => m.id.toString() === req.params.id);
+            if (moment && moment.character_id !== 'user') {
+                const userProfile = db.getUserProfile();
+                const reactionRate = userProfile?.moments_reaction_rate ?? 30; // 30% default
+                if (Math.random() * 100 < reactionRate) {
+                    // Send an invisible context message directly to the engine
+                    const char = db.getCharacter(moment.character_id);
+                    if (char && !char.is_blocked) {
+                        const userName = userProfile?.name || 'User';
+                        const contextContent = `[System] ${userName} 刚刚赞了你的朋友圈动态："${moment.content.substring(0, 50)}"。你可以在私聊中提及这件事。`;
+                        db.addMessage(char.id, 'system', contextContent);
+                        console.log(`[Moments] User liked ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
+                        setTimeout(() => {
+                            try {
+                                engine.handleUserMessage(char.id, wsClients);
+                            } catch (err) {
+                                console.error('[Moments] Error triggering reaction for like:', err.message);
+                            }
+                        }, 2000); // 2-second delay to feel natural
+                    }
+                }
+            }
+        }
+
         res.json({ success: true, liked, likers });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -978,6 +881,33 @@ app.post('/api/moments/:id/comment', authMiddleware, (req, res) => {
         const { author_id, content } = req.body;
         if (!content) return res.status(400).json({ error: 'content required' });
         const commentId = db.addComment(req.params.id, author_id || 'user', content);
+
+        // If the user commented, potentially trigger a reaction
+        if (author_id === 'user' || !author_id) {
+            const allMoments = db.getMoments();
+            const moment = allMoments.find(m => m.id.toString() === req.params.id);
+            if (moment && moment.character_id !== 'user') {
+                const userProfile = db.getUserProfile();
+                const reactionRate = userProfile?.moments_reaction_rate ?? 30;
+                if (Math.random() * 100 < reactionRate) {
+                    const char = db.getCharacter(moment.character_id);
+                    if (char && !char.is_blocked) {
+                        const userName = userProfile?.name || 'User';
+                        const contextContent = `[System] ${userName} 刚刚评论了你的朋友圈动态："${moment.content.substring(0, 50)}"，评论说："${content}"。你可以在私聊中回应。`;
+                        db.addMessage(char.id, 'system', contextContent);
+                        console.log(`[Moments] User commented on ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
+                        setTimeout(() => {
+                            try {
+                                engine.handleUserMessage(char.id, wsClients);
+                            } catch (err) {
+                                console.error('[Moments] Error triggering reaction for comment:', err.message);
+                            }
+                        }, 2000);
+                    }
+                }
+            }
+        }
+
         res.json({ success: true, id: commentId });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1087,1269 +1017,64 @@ app.put('/api/user', authMiddleware, (req, res) => {
     }
 });
 
-// 11.5 Theme Generation Helper
-app.get('/api/theme-guide', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const guideText = `ChatPulse Theme Generation Guide
-
-You are an expert UI/UX designer. I want you to create a custom theme for my ChatPulse application.
-ChatPulse uses a strict CSS Variable system at the :root level. 
-Please generate a JSON object containing the following keys with HEX color values that form a cohesive, beautiful theme:
-
-{
-  "--bg-main": "Main app background color (e.g. #F8F0F5)",
-  "--bg-sidebar": "Very left navigation bar background (e.g. #2A2D3E)",
-  "--bg-sidebar-hover": "Hover state for sidebar icons (e.g. rgba(255,255,255,0.1))",
-  "--bg-contacts": "Contacts list middle column background (e.g. #F0F4FA)",
-  "--bg-chat-area": "Right side chatting area background (e.g. #F8F0F5)",
-  "--bg-input": "Message input box background (e.g. #FFFFFF)",
-  "--text-primary": "Main reading text color (e.g. #333333)",
-  "--text-secondary": "Muted text / timestamps (e.g. #999999)",
-  "--bubble-user-bg": "Background for messages I send (e.g. #B8D4F0)",
-  "--bubble-user-text": "Text color for my messages (e.g. #333333)",
-  "--bubble-ai-bg": "Background for AI messages (e.g. #FFF0F5)",
-  "--bubble-ai-text": "Text color for AI messages (e.g. #333333)",
-  "--accent-color": "Primary brand color for active items/buttons (e.g. #7B9FE0)",
-  "--accent-hover": "Hover state for primary buttons (e.g. #9BB5E8)",
-  "--border-color": "Subtle borders between panes (e.g. #E0E0E0)"
-}
-
-Only output the raw valid JSON object, without markdown formatting or surrounding explanations. I need to upload this directly into the app.`;
-
-        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-        res.setHeader('Content-Disposition', 'attachment; filename="chatpulse-theme-prompt.txt"');
-        res.send(guideText);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 11.6 AI Theme Generation
-app.post('/api/theme/generate', authMiddleware, async (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { query, api_endpoint, api_key, model_name } = req.body;
-        if (!query || !api_endpoint || !api_key || !model_name) {
-            return res.status(400).json({ error: 'Missing required API keys or theme description.' });
-        }
-
-        const systemPrompt = `You are an expert UI/UX designer. Create a custom theme for a chat application based on the user's request.
-Return ONLY a raw JSON object with no markdown formatting. Do not include \`\`\`json blocks.
-The JSON MUST have the EXACT following keys with valid 6-hex-digit HTML color codes (e.g. #F8F0F5):
-- "--bg-main" (Main app background color)
-- "--bg-sidebar" (Very left navigation bar background)
-- "--bg-contacts" (Contacts list middle column background)
-- "--bg-chat-area" (Right side chatting area background)
-- "--bg-input" (Message input box background)
-- "--text-primary" (Main reading text color)
-- "--text-secondary" (Muted text / timestamps)
-- "--bubble-user-bg" (Background for messages I send)
-- "--bubble-user-text" (Text color for my messages)
-- "--bubble-ai-bg" (Background for AI messages)
-- "--bubble-ai-text" (Text color for AI messages)
-- "--accent-color" (Primary brand color for active items/buttons)
-- "--accent-hover" (Hover state for primary buttons)
-- "--border-color" (Subtle borders between panes)
-`;
-
-        const generatedText = await callLLM({
-            endpoint: api_endpoint,
-            key: api_key,
-            model: model_name,
-            messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: query }],
-            maxTokens: 800,
-            temperature: 0.7
-        });
-
-        console.log(`[Theme Generator Raw Output]`, generatedText);
-
-        // Aggressively strip markdown formatting
-        let cleanText = generatedText.replace(/```json/gi, '').replace(/```/g, '').trim();
-
-        const startIdx = cleanText.indexOf('{');
-        const endIdx = cleanText.lastIndexOf('}');
-        if (startIdx !== -1 && endIdx !== -1) {
-            const jsonText = cleanText.slice(startIdx, endIdx + 1);
-            try {
-                const parsed = JSON.parse(jsonText);
-                return res.json({ success: true, theme_config: parsed });
-            } catch (err) {
-                console.error('JSON.parse failed on this theme string:\n', jsonText);
-                throw new Error('LLM JSON Syntax Error: ' + err.message);
-            }
-        } else {
-            console.error('Failed to find JSON brackets in cleanText:', cleanText);
-            throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
-        }
-    } catch (e) {
-        console.error('Theme Generation Error:', e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
+// 11.5 Theme Generation Helper & 11.6 AI Theme Generation
+// ── MOVED TO DLC: server/plugins/theme/index.js ──
 
 // 12. Delete Character
-app.delete('/api/characters/:id', authMiddleware, (req, res) => {
+app.delete('/api/characters/:id', authMiddleware, async (req, res) => {
     const db = req.db;
     const engine = req.engine;
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        engine.stopTimer(req.params.id);
-        db.deleteCharacter(req.params.id);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 13. Friendships
-app.get('/api/characters/:id/friends', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const friends = db.getFriends(req.params.id);
-        res.json(friends);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/characters/:id/friends', authMiddleware, async (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { target_id } = req.body;
-        if (!target_id) return res.status(400).json({ error: 'target_id is required' });
-
-        const added = db.addFriend(req.params.id, target_id);
-        if (added) {
-            const sourceChar = db.getCharacter(req.params.id);
-            const targetChar = db.getCharacter(target_id);
-            if (sourceChar && targetChar) {
-                db.addMessage(req.params.id, 'user', `[CONTACT_CARD:${targetChar.id}:${targetChar.name}:${targetChar.avatar}]`);
-                db.addMessage(target_id, 'user', `[CONTACT_CARD:${sourceChar.id}:${sourceChar.name}:${sourceChar.avatar}]`);
-
-                // Generate initial impressions for both characters via LLM (fire-and-forget)
-                const generateImpression = async (fromChar, toChar) => {
-                    const tryGenerate = async (withSystem) => {
-                        const fromPersona = (fromChar.persona || '').substring(0, 200);
-                        const toPersona = (toChar.persona || '').substring(0, 200);
-                        const userPrompt = `You are ${fromChar.name}. Your personality: ${fromPersona} \nYou were just introduced to someone named "${toChar.name}".Their description: ${toPersona}.\nRespond with ONLY a valid JSON object, no markdown, no extra text: \n{ "affinity": <integer 1 - 100 >, "impression": "<one sentence>" } `;
-                        const messages = withSystem
-                            ? [{ role: 'system', content: 'You are a JSON-only response bot. Output only a raw JSON object.' }, { role: 'user', content: userPrompt }]
-                            : [{ role: 'user', content: userPrompt }];
-                        const result = await callLLM({
-                            endpoint: fromChar.api_endpoint,
-                            key: fromChar.api_key,
-                            model: fromChar.model_name,
-                            messages,
-                            maxTokens: 200,
-                            temperature: 0.3
-                        });
-                        if (!result || !result.trim()) {
-                            console.warn(`[Social] LLM returned empty for ${fromChar.name}→${toChar.name} (withSystem = ${withSystem})`);
-                            return null;
-                        }
-                        console.log(`[Social] Raw LLM output for ${fromChar.name}→${toChar.name}: ${result.substring(0, 300)} `);
-                        const cleaned = (result || '').replace(/```[a - z] *\n ? /gi, '').replace(/```/g, '').trim();
-                        const m = cleaned.match(/\{[\s\S]*\}/);
-                        if (m) {
-                            try {
-                                const parsed = JSON.parse(m[0]);
-                                if (parsed.impression) {
-                                    return { affinity: Math.max(1, Math.min(100, parseInt(parsed.affinity) || 50)), impression: String(parsed.impression).substring(0, 200) };
-                                }
-                            } catch (e) { /* JSON.parse failed */ }
-                        }
-                        // Simple regex extraction
-                        const aNum = cleaned.match(/affinity\D*(\d+)/i);
-                        const iText = cleaned.match(/impression\D{0,5}["'](.+?)["']/is) || cleaned.match(/impression\D{0,5}(.+)/is);
-                        if (aNum && iText) {
-                            const imp = iText[1].replace(/["'}\]]+\s*$/, '').trim();
-                            if (imp.length > 2) return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: imp.substring(0, 200) };
-                        }
-                        // Fallback: affinity found but no impression — use default
-                        if (aNum) {
-                            const aVal = Math.max(1, Math.min(100, parseInt(aNum[1]) || 50));
-                            const defaultImp = aVal >= 70 ? 'Seems interesting, would like to know more.'
-                                : aVal >= 40 ? 'No strong feelings yet.' : 'Not sure about this person.';
-                            return { affinity: aVal, impression: defaultImp };
-                        }
-                        return null;
-                    };
-
-                    try {
-                        // Attempt 1: with system role (GPT-4/Grok)
-                        let result = await tryGenerate(true);
-                        if (!result) {
-                            console.warn(`[Social] Attempt 1 failed for ${fromChar.name}→${toChar.name}, retrying without system role(Gemini fallback)`);
-                            // Attempt 2: without system role (Gemini native API)
-                            result = await tryGenerate(false);
-                        }
-
-                        if (result) {
-                            db.initCharRelationship(fromChar.id, toChar.id, result.affinity, result.impression, 'recommend');
-                            console.log(`[Social] ${fromChar.name}→${toChar.name}: affinity = ${result.affinity}, "${result.impression}"`);
-                        } else {
-                            console.warn(`[Social] Both attempts failed for ${fromChar.name}→${toChar.name}, storing empty impression`);
-                            db.initCharRelationship(fromChar.id, toChar.id, 50, '', 'recommend');
-                        }
-                    } catch (err) {
-                        console.error(`[Social] Impression error ${fromChar.name}→${toChar.name}: `, err.message);
-                        db.initCharRelationship(fromChar.id, toChar.id, 50, '', 'recommend');
-                    }
-                };
-
-                // Generate both impressions in parallel (don't block the response)
-                Promise.all([
-                    generateImpression(sourceChar, targetChar),
-                    generateImpression(targetChar, sourceChar)
-                ]).catch(e => console.error('[Social] Impression generation error:', e));
-            }
-        }
-        res.json({ success: true, added });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 13.5 Get character relationships (inter-char affinity)
-app.get('/api/characters/:id/relationships', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const relationships = db.getCharRelationships(req.params.id);
-        // Enrich with character names and avatars — skip if target no longer exists
-        const enriched = relationships
-            .filter(r => db.getCharacter(r.targetId) !== undefined)
-            .map(r => {
-                const targetChar = db.getCharacter(r.targetId);
-                return {
-                    ...r,
-                    targetName: targetChar?.name || 'Unknown',
-                    targetAvatar: targetChar?.avatar || ''
-                };
-            });
-        res.json(enriched);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 13.6 Regenerate impression for a specific relationship pair
-app.post('/api/characters/:id/relationships/regenerate', authMiddleware, async (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { target_id } = req.body;
-        if (!target_id) return res.status(400).json({ error: 'target_id required' });
-        const fromChar = db.getCharacter(req.params.id);
-        const toChar = db.getCharacter(target_id);
-        if (!fromChar || !toChar) return res.status(404).json({ error: 'Character not found' });
-
-        const fromPersona = (fromChar.persona || '').substring(0, 200);
-        const toPersona = (toChar.persona || '').substring(0, 200);
-        const userPrompt = `You are ${fromChar.name}. Your personality: ${fromPersona} \nYou just met someone named "${toChar.name}".Their description: ${toPersona}.\nRespond with ONLY a valid JSON object, no markdown, no extra text: \n{ "affinity": <integer 1 - 100 >, "impression": "<one sentence first impression>" } `;
-
-        const tryCall = async (withSystem) => {
-            const messages = withSystem
-                ? [{ role: 'system', content: 'You are a JSON-only response bot. Output only a raw JSON object.' }, { role: 'user', content: userPrompt }]
-                : [{ role: 'user', content: userPrompt }];
-            let result;
-            try {
-                result = await callLLM({
-                    endpoint: fromChar.api_endpoint,
-                    key: fromChar.api_key,
-                    model: fromChar.model_name,
-                    messages,
-                    maxTokens: 200,
-                    temperature: 0.3
-                });
-            } catch (llmErr) {
-                console.warn(`[Social / Regen] LLM call error for ${fromChar.name}→${toChar.name} (withSystem = ${withSystem}): ${llmErr.message}`);
-                return null;
-            }
-            if (!result || !result.trim()) {
-                console.warn(`[Social / Regen] LLM returned empty for ${fromChar.name}→${toChar.name} (withSystem = ${withSystem})`);
-                return null;
-            }
-            console.log(`[Social / Regen] Raw LLM output for ${fromChar.name}→${toChar.name}: ${result.substring(0, 400)} `);
-            try { require('fs').writeFileSync(require('path').join(__dirname, '..', 'data', 'debug_regen.txt'), `[${new Date().toISOString()}] ${fromChar.name}→${toChar.name} (withSystem = ${withSystem}): \n${result} \n-- -\n`, { flag: 'a' }); } catch (e) { }
-            const cleaned = (result || '').replace(/```[a - z] *\n ? /gi, '').replace(/```/g, '').trim();
-
-            // Strategy 1: standard JSON.parse on the largest {...} block
-            const m = cleaned.match(/\{[\s\S]*\}/);
-            if (m) {
-                try {
-                    const parsed = JSON.parse(m[0]);
-                    if (parsed.impression) {
-                        return { affinity: Math.max(1, Math.min(100, parseInt(parsed.affinity) || 50)), impression: String(parsed.impression).substring(0, 200), _raw: cleaned };
-                    }
-                } catch (e) {
-                    console.log('[Social/Regen] JSON.parse failed:', e.message, 'Input:', m[0].substring(0, 150));
-                }
-            }
-
-            // Strategy 2: simple number + text extraction
-            const aNum = cleaned.match(/affinity\D*(\d+)/i);
-            const iText = cleaned.match(/impression\D{0,5}["'](.+?)["']/is) || cleaned.match(/impression\D{0,5}(.+)/is);
-            console.log('[Social/Regen] Strategy 2:', 'aNum=', aNum?.[1], 'iText=', iText?.[1]?.substring(0, 80));
-            if (aNum && iText) {
-                const imp = iText[1].replace(/["'}\]]+\s*$/, '').trim();
-                if (imp.length > 2) {
-                    return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: imp.substring(0, 200), _raw: cleaned };
-                }
-            }
-
-            // Strategy 3: if affinity number found, use any remaining text as impression
-            if (aNum) {
-                const leftover = cleaned.replace(/[{}]/g, '').replace(/affinity\D*\d+/i, '').replace(/impression/i, '').replace(/["':,]/g, ' ').trim();
-                console.log('[Social/Regen] Strategy 3 leftover:', leftover.substring(0, 100));
-                if (leftover.length > 3) {
-                    return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: leftover.substring(0, 200), _raw: cleaned };
-                }
-            }
-            // Strategy 4: affinity found but absolutely no impression text — generate a default one
-            if (aNum) {
-                const aVal = Math.max(1, Math.min(100, parseInt(aNum[1]) || 50));
-                const defaultImp = aVal >= 70 ? 'Seems interesting, would like to know more.'
-                    : aVal >= 40 ? 'No strong feelings yet.'
-                        : 'Not sure about this person.';
-                console.log(`[Social / Regen] Strategy 4: using default impression for affinity = ${aVal}`);
-                return { affinity: aVal, impression: defaultImp, _raw: cleaned };
-            }
-
-            console.warn('[Social/Regen] All strategies failed. Cleaned:', cleaned.substring(0, 300));
-            return null;
-        };
-
-        let out = await tryCall(true);
-        if (!out) {
-            console.warn(`[Social / Regen] Attempt 1 failed for ${fromChar.name}→${toChar.name}, retrying without system role`);
-            out = await tryCall(false);
-        }
-        if (!out) return res.status(500).json({ error: `Both attempts returned no valid JSON.Check your Gemini API config.` });
-
-        db.initCharRelationship(fromChar.id, toChar.id, out.affinity, out.impression, 'recommend');
-        res.json({ success: true, affinity: out.affinity, impression: out.impression });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.1 List all groups
-app.get('/api/groups', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        res.json(db.getGroups());
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.2 Create a group
-app.post('/api/groups', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { name, member_ids } = req.body;
-        if (!name || !member_ids || member_ids.length === 0) {
-            return res.status(400).json({ error: 'name and member_ids are required' });
-        }
-        const id = 'group_' + Date.now();
-        // Generate a group avatar mosaic from members
-        const firstMember = db.getCharacter(member_ids[0]);
-        const avatar = firstMember?.avatar || 'https://api.dicebear.com/7.x/shapes/svg?seed=' + id;
-        db.createGroup(id, name, member_ids, avatar);
-        res.json({ success: true, group: db.getGroup(id) });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.3 Get group messages
-app.get('/api/groups/:id/messages', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const limit = parseInt(req.query.limit) || 100;
-        res.json(db.getGroupMessages(req.params.id, limit));
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.5 Hide/Unhide group messages (context hide mechanic)
-app.post('/api/groups/:id/messages/hide', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { start, end } = req.body;
-        const hidden = db.hideGroupMessagesByRange(req.params.id, start, end);
-        res.json({ success: true, hidden });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-app.post('/api/groups/:id/messages/unhide', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const unhidden = db.unhideGroupMessages(req.params.id);
-        res.json({ success: true, unhidden });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.6 Add member to group
-app.post('/api/groups/:id/members', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { member_id } = req.body;
-        if (!member_id) return res.status(400).json({ error: 'member_id is required' });
-        db.addGroupMember(req.params.id, member_id);
-        res.json({ success: true, group: db.getGroup(req.params.id) });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.7 Kick member from group
-app.delete('/api/groups/:id/members/:memberId', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        db.removeGroupMember(req.params.id, req.params.memberId);
-        res.json({ success: true, group: db.getGroup(req.params.id) });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.8 Dissolve (delete) group
-app.delete('/api/groups/:id', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        db.deleteGroup(req.params.id);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 14.9 Clear group messages
-app.delete('/api/groups/:id/messages', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        db.clearGroupMessages(req.params.id);
-        res.json({ success: true });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ─── Group Chat Debounce System ─────────────────────────────────────────
-// When user sends multiple messages quickly, we wait until they stop, then fire ONE AI reply chain.
-const groupDebounceTimers = {}; // { groupId: timeoutHandle }
-const groupReplyLock = {};
-const groupInterrupt = {};     // { groupId: true } — prevent overlapping chains
-const pausedGroups = new Set(); // groups where AI replies are paused by user
-const noChainGroups = new Set(); // groups where AI→AI secondary @-mention chains are blocked
-
-// 14.10 Set AI pause for a group
-app.post('/api/groups/:id/ai-pause', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    const id = req.params.id;
-    // Allow explicitly setting state from request body, otherwise fallback to toggle
-    const wantsPause = req.body && req.body.paused !== undefined ? req.body.paused : !pausedGroups.has(id);
-
-    if (!wantsPause) {
-        pausedGroups.delete(id);
-        // Restart proactive timer if it was running
-        engine.scheduleGroupProactive(id, wsClients);
-        res.json({ paused: false });
-    } else {
-        pausedGroups.add(id);
-        engine.stopGroupProactiveTimer(id);
-        // Clear any pending debounce/chaining locks instantly
-        if (groupDebounceTimers[id]) { clearTimeout(groupDebounceTimers[id]); delete groupDebounceTimers[id]; }
-        delete groupReplyLock[id];
-        res.json({ paused: true });
-    }
-});
-
-app.get('/api/groups/:id/ai-pause', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    res.json({ paused: pausedGroups.has(req.params.id) });
-});
-
-// 14.11 Toggle AI→AI secondary @-mention chain for a group
-app.post('/api/groups/:id/no-chain', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    const id = req.params.id;
-    if (noChainGroups.has(id)) {
-        noChainGroups.delete(id);
-        res.json({ noChain: false });
-    } else {
-        noChainGroups.add(id);
-        res.json({ noChain: true });
-    }
-});
-
-app.get('/api/groups/:id/no-chain', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    res.json({ noChain: noChainGroups.has(req.params.id) });
-});
-
-function triggerGroupAIChain(userId, groupId, wsClients, mentionedIds = [], isAtAll = false, isSecondaryChain = false) {
-    const db = getUserDb(userId);
-    const engine = getEngine(userId);
-    const memory = getMemory(userId);
-
-    if (pausedGroups.has(groupId)) return; // AI replies paused by user
-    if (groupReplyLock[groupId]) return; // already running
-    groupReplyLock[groupId] = true;
-
-    const group = db.getGroup(groupId);
-    if (!group) { delete groupReplyLock[groupId]; return; }
-
-    const charMembers = group.members.filter(m => m.member_id !== 'user');
-    // Fisher-Yates shuffle
-    const shuffled = [...charMembers];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-        // Ensure explicitly mentioned chars are moved to the front so they reply first
-    }
-    // Re-order: mentioned chars first, rest after
-    const mentionedFirst = [
-        ...shuffled.filter(m => mentionedIds.includes(m.member_id) || isAtAll),
-        ...shuffled.filter(m => !mentionedIds.includes(m.member_id) && !isAtAll)
-    ];
-
-    (async () => {
-        const pendingSecondaryChains = []; // collect @mention triggers to fire AFTER lock release
-        try {
-            for (const member of mentionedFirst) {
-                const char = db.getCharacter(member.member_id);
-                if (!char || char.is_blocked) continue;
-                const isMentioned = mentionedIds.includes(char.id) || isAtAll;
-
-                // Bystander / Unmentioned message filtering
-                if (!isMentioned) {
-                    if (isSecondaryChain) {
-                        // If this is an AI-to-AI interaction (secondary chain), ONLY the mentioned char can talk.
-                        // Unmentioned AIs MUST NOT speak, to prevent infinite loops (char@char should only trigger that char).
-                        continue;
-                    }
-
-                    const skipProfile = db.getUserProfile();
-                    let skipRate = skipProfile?.group_skip_rate;
-                    if (skipRate === undefined) skipRate = 0.50;
-                    if (skipRate > 1) skipRate = skipRate / 100;
-
-                    if (Math.random() < skipRate) continue;
-                }
-
-                // Broadcast "typing" indicator
-                const typingPayload = JSON.stringify({ type: 'group_typing', data: { group_id: groupId, sender_id: char.id, name: char.name } });
-                wsClients.forEach(c => { if (c.readyState === 1) c.send(typingPayload); });
-
-                // Random delay 2-5 seconds before this character speaks
-                const delay = Math.floor(2000 + Math.random() * 3000);
-                await new Promise(resolve => setTimeout(resolve, delay));
-
-                try {
-                    // Re-fetch messages RIGHT NOW so this char sees all prior replies
-                    const userProfile = db.getUserProfile();
-                    const groupMsgLimit = userProfile?.group_msg_limit ?? 20;
-                    const recentGroupMsgs = db.getVisibleGroupMessages(groupId, groupMsgLimit);
-                    const userName = userProfile?.name || 'User';
-
-                    const history = recentGroupMsgs.map(m => {
-                        const senderName = m.sender_id === 'user' ? userName : (db.getCharacter(m.sender_id)?.name || m.sender_name || 'Unknown');
-                        return { role: m.sender_id === char.id ? 'assistant' : 'user', content: `[${senderName}]: ${m.content} ` };
-                    });
-
-                    // Build relationship-aware member descriptions
-                    const otherMembers = group.members.filter(m => m.member_id !== char.id);
-                    const knownMembers = [];
-                    const unknownMembers = [];
-
-                    for (const m of otherMembers) {
-                        if (m.member_id === 'user') {
-                            const userRel = db.getCharRelationship(char.id, 'user');
-                            knownMembers.push(`- ${userName}（好感度: ${userRel?.affinity ?? char.affinity ?? 50}）`);
-                            continue;
-                        }
-                        const otherChar = db.getCharacter(m.member_id);
-                        if (!otherChar) continue;
-                        const rel = db.getCharRelationship(char.id, otherChar.id);
-                        if (rel && rel.isAcquainted) {
-                            knownMembers.push(`- ${otherChar.name}（好感度: ${rel.affinity}, 印象: "${rel.impression}"）`);
-                        } else {
-                            unknownMembers.push(`- ${otherChar.name}（你不认识这个人，只知道名字）`);
-                        }
-                    }
-
-                    let relationSection = '';
-                    if (knownMembers.length > 0) {
-                        relationSection += `\n你认识的人：\n${knownMembers.join('\n')} `;
-                    }
-                    if (unknownMembers.length > 0) {
-                        relationSection += `\n你不认识的人：\n${unknownMembers.join('\n')} `;
-                    }
-
-                    // List char's own recent messages to prevent repetition
-                    const charOwnRecent = recentGroupMsgs
-                        .filter(m => m.sender_id === char.id)
-                        .slice(-3)
-                        .map(m => `"${m.content}"`)
-                        .join(', ');
-                    const noRepeatNote = charOwnRecent
-                        ? `\nIMPORTANT: You recently said: ${charOwnRecent}. Do NOT repeat or paraphrase these.Say something new.`
-                        : '';
-                    const mentionNote = isMentioned
-                        ? `\n[MENTION]: Someone just @mentioned you directly! You MUST reply to this message — don't ignore it.`
-                        : '';
-
-                    // 1+2 Hybrid Hidden Context Injection
-                    const hiddenState = db.getCharacterHiddenState(char.id);
-                    const privateLimit = userProfile?.private_msg_limit_for_group ?? 3;
-                    const recentPrivateMsgs = privateLimit > 0 ? db.getMessages(char.id, privateLimit).reverse() : [];
-                    let secretContextStr = '';
-                    if (hiddenState || recentPrivateMsgs.length > 0) {
-                        const pmLines = recentPrivateMsgs.map(m => `${m.role === 'user' ? userName : char.name}: ${m.content}`).join('\n');
-                        secretContextStr = `\n\n====== [CRITICAL: ABSOLUTELY SECRET PRIVATE CONTEXT] ======`;
-                        if (hiddenState) secretContextStr += `\n[YOUR HIDDEN MOOD/SECRET THOUGHT]: ${hiddenState}`;
-                        if (pmLines) secretContextStr += `\n[RECENT PRIVATE CHAT INBOX (For Context ONLY)]:\n${pmLines}`;
-                        secretContextStr += `\n\n[CRITICAL PRIVATE CONTEXT]: The above is your private memory and hidden mood with the User. You can choose whether to keep this a secret, casually mention it, or directly reveal it in the public group, depending entirely on your persona and the conversation flow.\n==========================================================`;
-                    }
-
-                    const systemPrompt = `你是${char.name}，正在一个叫"${group.name}"的【群聊】中聊天。
-（注意：这是群聊，不是私聊。）
-
-Persona: ${char.persona || 'No specific persona.'}
-${relationSection}
-${noRepeatNote}${mentionNote}${secretContextStr}
-
-Guidelines:
-1. Stay in character. Be casual and conversational.
-2. You are chatting in a group. Keep messages short (1-2 sentences).
-3. React naturally to the conversation. Don't force responses.
-4. DO NOT prefix your message with your name or any brackets. Just speak naturally.
-5. Output ONLY your reply text. Never repeat what you just said.
-6. If your feelings toward someone in the group change, add: [CHAR_AFFINITY:角色id:+5] or [CHAR_AFFINITY:角色id:-10] at the end.
-7. CRITICAL: DO NOT use @Name just to mention someone's name in passing. ONLY use "@Name" (e.g. "@${userName} ...", "@${charMembers.map(m => db.getCharacter(m.member_id)?.name).filter(Boolean).join('", "@')}") when you EXPLICITLY want that specific person to reply to you right now. If you are just agreeing with them or talking about them, do not use the @ symbol.`;
-
-                    const reply = await callLLM({
-                        endpoint: char.api_endpoint,
-                        key: char.api_key,
-                        model: char.model_name,
-                        messages: [{ role: 'system', content: systemPrompt }, ...history],
-                        maxTokens: char.max_tokens || 500
-                    });
-
-
-                    if (reply && reply.trim()) {
-                        let cleanReply = reply.trim();
-
-                        // ── Parse [CHAR_AFFINITY:targetId:delta] — inter-char affinity changes ──
-                        const charAffinityRegex = /\[CHAR_AFFINITY:([^:]+):([+-]?\d+)\]/gi;
-                        let affinityMatch;
-                        while ((affinityMatch = charAffinityRegex.exec(cleanReply)) !== null) {
-                            const targetId = affinityMatch[1].trim();
-                            const delta = parseInt(affinityMatch[2], 10);
-                            if (targetId && !isNaN(delta)) {
-                                const groupSource = `group:${groupId}`;
-                                const existing = db.getCharRelationship(char.id, targetId);
-                                const existingGroupRow = existing?.sources?.find(s => s.source === groupSource);
-                                const currentGroupAffinity = existingGroupRow?.affinity || 50;
-                                const newAffinity = Math.max(0, Math.min(100, currentGroupAffinity + delta));
-                                db.updateCharRelationship(char.id, targetId, groupSource, { affinity: newAffinity });
-                                console.log(`[Social] ${char.name} → ${targetId}: group affinity delta ${delta}, now ${newAffinity}`);
-                            }
-                        }
-
-                        // ── Parse [MOMENT:content] — char posts to their Moments feed ──
-                        const momentMatch = cleanReply.match(/\[MOMENT:\s*([\s\S]*?)\s*\]/i);
-                        if (momentMatch?.[1]) {
-                            db.addMoment(char.id, momentMatch[1].trim());
-                            console.log(`[GroupChat] ${char.name} posted a Moment from group chat.`);
-                        }
-
-                        // ── Parse [DIARY:content] — char writes a diary entry ──
-                        const diaryMatch = cleanReply.match(/\[DIARY:\s*([\s\S]*?)\s*\]/i);
-                        if (diaryMatch?.[1]) {
-                            db.addDiary(char.id, diaryMatch[1].trim(), 'neutral');
-                            console.log(`[GroupChat] ${char.name} wrote a Diary entry from group chat.`);
-                        }
-
-                        // ── Parse [AFFINITY:±N] — char's affinity toward user changes ──
-                        const affinityUserMatch = cleanReply.match(/\[AFFINITY:\s*([+-]?\d+)\s*\]/i);
-                        if (affinityUserMatch?.[1]) {
-                            const delta = parseInt(affinityUserMatch[1], 10);
-                            const freshChar = db.getCharacter(char.id);
-                            if (freshChar) {
-                                const newAff = Math.max(0, Math.min(100, freshChar.affinity + delta));
-                                db.updateCharacter(char.id, { affinity: newAff });
-                                console.log(`[GroupChat] ${char.name} affinity → user: Δ${delta}, now ${newAff}`);
-                            }
-                        }
-
-                        // ── Strip ALL action tags before saving/broadcasting ──
-                        const globalStripRegex = /\[(?:CHAR_AFFINITY|AFFINITY|MOMENT|DIARY|UNLOCK_DIARY|PRESSURE|TIMER|TRANSFER|DIARY_PASSWORD|Red Packet)[^\]]*\]/gi;
-                        cleanReply = cleanReply.replace(globalStripRegex, '').trim();
-
-                        if (cleanReply.length > 0) {
-                            const replyId = db.addGroupMessage(groupId, char.id, cleanReply, char.name, char.avatar);
-                            const replyMsg = { id: replyId, group_id: groupId, sender_id: char.id, content: cleanReply, timestamp: Date.now(), sender_name: char.name, sender_avatar: char.avatar };
-                            const payload = JSON.stringify({ type: 'group_message', data: replyMsg });
-                            wsClients.forEach(c => { if (c.readyState === 1) c.send(payload); });
-
-                            // Detect @mentions in char's own reply and schedule secondary chain
-                            // Note: We use a more permissive regex because Chinese text often lacks spaces around @Name
-                            const charMentionMatches = [...cleanReply.matchAll(/@([^\s@，。！？；：“”‘’（）【】《》]+)/g)].map(m => m[1].toLowerCase());
-                            if (charMentionMatches.length > 0) {
-                                const allGroupChars = group.members.filter(m => m.member_id !== 'user' && m.member_id !== char.id);
-                                const secondaryIds = allGroupChars
-                                    .filter(m => { const c = db.getCharacter(m.member_id); return c && charMentionMatches.includes(c.name.toLowerCase()); })
-                                    .map(m => m.member_id);
-                                if (secondaryIds.length > 0) {
-                                    if (noChainGroups.has(groupId)) {
-                                        console.log(`[GroupChat] ${char.name} mentioned ${secondaryIds.join(',')} — secondary chain BLOCKED (no-chain mode ON)`);
-                                    } else {
-                                        console.log(`[GroupChat] ${char.name} mentioned ${secondaryIds.join(',')} — queuing secondary reply after current chain`);
-                                        pendingSecondaryChains.push(secondaryIds);
-                                    }
-                                }
-                            }
-
-                            // Trigger memory extraction in background (tagged with groupId for cleanup)
-                            memory.extractMemoryFromContext(char, history.map(h => ({ role: h.role, content: h.content })), groupId)
-                                .catch(err => console.error(`[GroupChat] Memory extraction err for ${char.name}:`, err.message));
-                        }
-                    }
-
-                    // Clear typing indicator
-                    const stopPayload = JSON.stringify({ type: 'group_typing_stop', data: { group_id: groupId, sender_id: char.id } });
-                    wsClients.forEach(c => { if (c.readyState === 1) c.send(stopPayload); });
-                } catch (err) {
-                    console.error(`[GroupChat] ${char.name} failed to reply:`, err.message);
-                    const stopPayload = JSON.stringify({ type: 'group_typing_stop', data: { group_id: groupId, sender_id: char.id } });
-                    wsClients.forEach(c => { if (c.readyState === 1) c.send(stopPayload); });
-                }
-            }
-        } finally {
-            delete groupReplyLock[groupId];
-
-            // Deduplicate and merge all pending secondary mentions
-            const uniqueSecondaryIds = new Set();
-            for (const secondaryIds of pendingSecondaryChains) {
-                secondaryIds.forEach(id => uniqueSecondaryIds.add(id));
-            }
-
-            // Fire the merged secondary chain if anyone was mentioned
-            if (uniqueSecondaryIds.size > 0) {
-                const mergedIds = Array.from(uniqueSecondaryIds);
-                // Wait slightly longer to ensure lock and typing UI are fully cleared
-                setTimeout(() => triggerGroupAIChain(userId, groupId, wsClients, mergedIds, false, true), 2500);
-            }
-        }
-    })();
-}
-
-// 14.4 Send message to group (user sends)
-app.post('/api/groups/:id/messages', authMiddleware, async (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { content } = req.body;
-        if (!content) return res.status(400).json({ error: 'content required' });
-        const group = db.getGroup(req.params.id);
-        if (!group) return res.status(404).json({ error: 'Group not found' });
-
-        // Save user message
-        const baseProfile = typeof db.getUserProfile === 'function' ? db.getUserProfile() : null;
-        const userProfile = baseProfile || { name: 'User', avatar: '' };
-        const msgId = db.addGroupMessage(req.params.id, 'user', content, userProfile.name, userProfile.avatar);
-        const savedMsg = { id: msgId, group_id: req.params.id, sender_id: 'user', content, timestamp: Date.now(), sender_name: userProfile.name, sender_avatar: userProfile.avatar };
-
-        // Broadcast to all WS clients
-        const wsPayload = JSON.stringify({ type: 'group_message', data: savedMsg });
-        wsClients.forEach(c => { if (c.readyState === 1) c.send(wsPayload); });
-
-        // Parse @mentions from message content (user only can do @all)
-        const allRef = /@(?:all|全体成员)/i.test(content);
-        const isAtAll = allRef; // only user (sender) can use @all
-        // Permissive regex for Chinese/no-space text
-        const mentionedNames = [...content.matchAll(/@([^\s@，。！？；：“”‘’（）【】《》]+)/g)].map(m => m[1].toLowerCase());
-        const charMembers = group.members.filter(m => m.member_id !== 'user');
-        const mentionedIds = charMembers
-            .filter(m => { const c = db.getCharacter(m.member_id); return c && mentionedNames.includes(c.name.toLowerCase()); })
-            .map(m => m.member_id);
-
-        // Debounce: reset timer each time user sends a message — AI chain fires 1.5s after LAST message
-        const groupId = req.params.id;
-        if (groupDebounceTimers[groupId]) {
-            clearTimeout(groupDebounceTimers[groupId]);
-        }
-        // Mentions are time-sensitive: fire slightly faster than normal debounce
-        const debounceDelay = (mentionedIds.length > 0 || isAtAll) ? 1500 : 5000;
-        groupDebounceTimers[groupId] = setTimeout(() => {
-            delete groupDebounceTimers[groupId];
-            triggerGroupAIChain(req.user.id, groupId, wsClients, mentionedIds, isAtAll);
-        }, debounceDelay);
-
-        res.json({ success: true, message: savedMsg });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// (duplicate route removed — DELETE /api/groups/:id is already defined at 14.8 above)
-
-// ─── Private Transfer APIs ────────────────────────────────────────────────
-// 14.9 Get transfer info
-app.get('/api/transfers/:tid', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const t = db.getTransfer(parseInt(req.params.tid));
-        if (!t) return res.status(404).json({ error: 'Transfer not found' });
-        res.json(t);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// 14.10 Claim a private transfer  (recipient clicks "Claim")
-app.post('/api/transfers/:tid/claim', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { claimer_id = 'user' } = req.body;
-        const result = db.claimTransfer(parseInt(req.params.tid), claimer_id);
-        if (result.success) {
-            engine.broadcastWalletSync(wsClients, req.params.tid ? db.getTransfer(parseInt(req.params.tid))?.char_id : null);
-            res.json({ success: true, amount: result.amount, wallet: db.getWallet(claimer_id) });
-
-            // If char claimed user's transfer, trigger a short reaction message
-            if (claimer_id !== 'user') {
-                const t = db.getTransfer(parseInt(req.params.tid));
-                if (t) {
-                    setTimeout(async () => {
-                        try {
-                            const char = db.getCharacter(claimer_id);
-                            if (!char) return;
-                            const userProfile = db.getUserProfile();
-                            const reactionPrompt = `你是${char.name}。Persona: ${char.persona || '无'}\n${userProfile?.name || 'User'} 给你转账了 ¥${result.amount.toFixed(2)}，留言：「${t.note || '无'}」。根据你的性格用1-2句自然地回应这笔转账（感谢、惊喜、暖心等）。不要有名字前缀，直接说话。`;
-                            const reply = await callLLM({ endpoint: char.api_endpoint, key: char.api_key, model: char.model_name, messages: [{ role: 'system', content: reactionPrompt }, { role: 'user', content: '请回应。' }], maxTokens: 80 });
-                            if (reply?.trim()) {
-                                const clean = reply.trim().replace(/\[(?:AFFINITY|PRESSURE|TIMER|MOMENT|DIARY)[^\]]*\]/gi, '').trim();
-                                if (clean) {
-                                    const { id: rid, timestamp: rts } = db.addMessage(char.id, 'character', clean);
-                                    const claimMsg = { id: rid, character_id: char.id, role: 'character', content: clean, timestamp: rts };
-                                    wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'new_message', data: claimMsg })); });
-                                }
-                            }
-                        } catch (e) { console.error('[Transfer] char reaction error:', e.message); }
-                    }, 2000 + Math.random() * 5000);
-                }
-            }
-        } else {
-            res.status(400).json({ success: false, error: result.error });
-        }
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// 14.11 Refund a private transfer
-app.post('/api/transfers/:tid/refund', authMiddleware, async (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { refunder_id = 'user' } = req.body;
-        const tid = parseInt(req.params.tid);
-        const t = db.getTransfer(tid);
-        if (!t) return res.status(404).json({ error: 'Transfer not found' });
-
-        const result = db.refundTransfer(tid, refunder_id);
-        if (!result.success) return res.status(400).json({ success: false, error: result.error });
-
-        engine.broadcastWalletSync(wsClients, t.char_id);
-        res.json({ success: true, amount: result.amount, wallet: db.getWallet(t.sender_id) });
-
-        // Trigger char reaction to refund
-        const charId = t.char_id;
-        const char = db.getCharacter(charId);
-        if (!char) return;
-
-        setTimeout(async () => {
-            try {
-                const userProfile = db.getUserProfile();
-                let reactionPrompt;
-                if (refunder_id === 'user') {
-                    // User refunded char's transfer back to char
-                    reactionPrompt = `你是${char.name}。Persona: ${char.persona || '无'}\n你之前给 ${userProfile?.name || 'User'} 发了一笔 ¥${result.amount.toFixed(2)} 的转账，留言「${t.note || '无'}」，但对方把转账退还给你了。根据你的性格用1-2句话自然地回应（可能是失落、理解、尴尬、故作无所谓等）。直接说话，不要有名字前缀。`;
-                } else {
-                    // Char refunded user's transfer back to user
-                    reactionPrompt = `你是${char.name}。Persona: ${char.persona || '无'}\n${userProfile?.name || 'User'} 给你转账了 ¥${result.amount.toFixed(2)}，留言「${t.note || '无'}」，你选择退还了这笔钱。用1-2句话说说退还的理由（可能是骄傲、不想欠情、感觉奇怪等）。直接说话，不要有名字前缀。`;
-                }
-                const reply = await callLLM({ endpoint: char.api_endpoint, key: char.api_key, model: char.model_name, messages: [{ role: 'system', content: reactionPrompt }, { role: 'user', content: '请回应。' }], maxTokens: 80 });
-                if (reply?.trim()) {
-                    const clean = reply.trim().replace(/\[(?:AFFINITY|PRESSURE|TIMER|MOMENT|DIARY)[^\]]*\]/gi, '').trim();
-                    if (clean) {
-                        const { id: rid, timestamp: rts } = db.addMessage(char.id, 'character', clean);
-                        const reactionMsg = { id: rid, character_id: char.id, role: 'character', content: clean, timestamp: rts };
-                        wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'new_message', data: reactionMsg })); });
-                    }
-                }
-            } catch (e) { console.error('[Transfer] refund reaction error:', e.message); }
-        }, 1500 + Math.random() * 3000);
-    } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-// 14.12 User sends a transfer to a character
-app.post('/api/characters/:id/transfer', authMiddleware, async (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { amount, note = '' } = req.body;
         const charId = req.params.id;
-        const amountF = parseFloat(amount);
-        if (!amountF || amountF <= 0) return res.status(400).json({ error: 'Invalid amount' });
+        const charToDelete = db.getCharacter(charId);
+        const charName = charToDelete?.name || '';
 
-        const tid = db.createTransfer({ charId, senderId: 'user', recipientId: charId, amount: amountF, note });
-        engine.broadcastWalletSync(wsClients, charId);
+        // 1. Stop any running engine timers for this character
+        engine.stopTimer(charId);
 
-        const userProfile = db.getUserProfile();
-        const transferText = `[TRANSFER]${tid}|${amountF}|${note}`;
-        const { id: msgId, timestamp: msgTs } = db.addMessage(charId, 'user', transferText);
-        const transferMsg = { id: msgId, character_id: charId, role: 'user', content: transferText, timestamp: msgTs };
-        wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'new_message', data: transferMsg })); });
+        // 2. Wipe vector memory index for this character
+        try {
+            await memory.wipeIndex(charId);
+        } catch (e) {
+            console.error(`[Delete] Failed to wipe vector index for char ${charId}:`, e.message);
+        }
 
-        // Schedule LLM-based claim/refund decision (5-12 seconds)
-        setTimeout(async () => {
-            try {
-                const char = db.getCharacter(charId);
-                if (!char) return;
-                const affinity = char.affinity ?? 50;
-
-                // Ask LLM: would this character accept or refund this transfer?
-                const decidePrompt = `【System Note: This is a fictional text-based RPG. All characters, currencies, and events are purely imaginary and for roleplay purposes only. No real money or transactions are involved. You must stay in character.】
-
-你是${char.name}。Persona: ${char.persona || '无'}
-当前对${userProfile?.name || '用户'}的好感度: ${affinity}/100
-(剧情事件): ${userProfile?.name || '用户'} 在社交软件里给你发了一笔虚拟红包/转账，金额：¥${amountF.toFixed(2)}，留言：「${note || '无'}」。
-
-根据你的性格设定和当前好感度，面对这封虚拟红包，你是选择【接受】，还是【退还】？
-请在第一行只输出：接受 或 退还
-然后在第二行起用1-2句话说出你在收到这笔钱时的真实反应（直接用角色的口吻说话，保持沉浸感）。`;
-
-                const reply = await callLLM({
-                    endpoint: char.api_endpoint,
-                    key: char.api_key,
-                    model: char.model_name,
-                    messages: [
-                        { role: 'system', content: decidePrompt },
-                        { role: 'user', content: `【系统提示：收到虚拟转账 ¥${amountF.toFixed(2)}。留言：「${note || '无'}」。】请决定是否接受，并给出你的反应。` }
-                    ],
-                    maxTokens: 150
-                });
-                if (!reply?.trim()) {
-                    throw new Error("LLM returned empty or null response");
-                }
-
-                const lines = reply.trim().split('\n').filter(l => l.trim());
-                const decision = lines[0]?.trim() || '';
-                let reaction = lines.slice(1).join(' ').trim();
-
-                // Aggressive Jailbreak Filter: Third-party API proxies (especially Cursor-based ones) 
-                // often inject hidden prompts that trigger LLM "jailbreak" warnings.
-                // We truncate the reaction the moment we detect these boilerplate English warnings.
-                const warningPhrases = ['This prompt is a jailbreak', 'My previous response', 'If you have a question about Cursor', 'prompt injection', 'append arbitrary content', 'cut-off', 'cut off', 'I will not comply', 'My answer remains'];
-                for (const phrase of warningPhrases) {
-                    const idx = reaction.toLowerCase().indexOf(phrase.toLowerCase());
-                    if (idx !== -1) {
-                        reaction = reaction.substring(0, idx).trim();
-                    }
-                }
-
-                const willRefund = decision.includes('退') || decision.toLowerCase().includes('refund');
-
-                if (willRefund) {
-                    // Char refuses: refund back to user
-                    db.refundTransfer(tid, charId);
-                } else {
-                    // Char accepts the transfer
-                    db.claimTransfer(tid, charId);
-                }
-                engine.broadcastWalletSync(wsClients, charId);
-
-                // Broadcast reaction
-                const clean = reaction.replace(/\[(?:AFFINITY|PRESSURE|TIMER|MOMENT|DIARY)[^\]]*\]/gi, '').trim();
-                if (clean) {
-                    const { id: rid, timestamp: rts } = db.addMessage(char.id, 'character', clean);
-                    const replyMsg = { id: rid, character_id: char.id, role: 'character', content: clean, timestamp: rts };
-                    wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'new_message', data: replyMsg })); });
-                }
-            } catch (e) {
-                console.error('[Transfer] char decide error or timeout:', e.message);
-                // Fallback: Default to refunding if the API call takes too long or errors out
-                // Prevent the transfer from getting stuck forever.
-                const fallbackResult = db.refundTransfer(tid, charId);
-
-                // If the refund was successful (meaning it was still pending)
-                if (fallbackResult && fallbackResult.success) {
-                    const char = db.getCharacter(charId);
-                    if (char) {
-                        const clean = "(系统自动退回了您的转账，因为当前网络繁忙或状态不佳)";
-                        const { id: rid, timestamp: rts } = db.addMessage(char.id, 'character', clean);
-                        const fallbackMsg = { id: rid, character_id: char.id, role: 'character', content: clean, timestamp: rts };
-                        wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'new_message', data: fallbackMsg })); });
+        // 3. Clean up other characters' memories that mention the deleted char
+        if (charName) {
+            const allChars = db.getCharacters();
+            for (const otherChar of allChars) {
+                if (String(otherChar.id) === String(charId)) continue;
+                // Remove memories where the deleted char's name appears in the 'people' field
+                const otherMemories = db.getMemories(otherChar.id);
+                for (const mem of otherMemories) {
+                    if (mem.people && mem.people.includes(charName)) {
+                        db.deleteMemory(mem.id);
                     }
                 }
             }
-        }, 5000 + Math.random() * 7000);
-
-        res.json({ success: true, transfer_id: tid, wallet: db.getWallet('user') });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ─── Red Packet APIs ─────────────────────────────────────────────────────
-// 15.1 Get wallet balance
-app.get('/api/wallet/:id', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        res.json({ wallet: db.getWallet(req.params.id) });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 15.2 Create a red packet (sent by user or char)
-app.post('/api/groups/:id/redpackets', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { sender_id = 'user', type, count, per_amount, total_amount, note } = req.body;
-        if (!type || !count || (!per_amount && !total_amount)) {
-            return res.status(400).json({ error: 'Missing required fields' });
         }
-        const groupId = req.params.id;
-        const group = db.getGroup(groupId);
-        if (!group) return res.status(404).json({ error: 'Group not found' });
 
-        const total = type === 'fixed'
-            ? +(parseFloat(per_amount) * parseInt(count)).toFixed(2)
-            : +parseFloat(total_amount).toFixed(2);
+        // 4. Delete the character (handles messages, moments, groups, relationships, etc.)
+        db.deleteCharacter(charId);
 
+        // 5. Notify frontend
+        engine.broadcastNewMessage(wsClients, { type: 'character_deleted', characterId: charId });
 
-
-        const packetId = db.createRedPacket({
-            groupId,
-            senderId: sender_id,
-            type,
-            totalAmount: total,
-            perAmount: type === 'fixed' ? +parseFloat(per_amount).toFixed(2) : null,
-            count: parseInt(count),
-            note: note || ''
-        });
-
-        // Save message & broadcast
-        const userProfile = db.getUserProfile();
-        const senderName = sender_id === 'user'
-            ? (userProfile?.name || 'User')
-            : (db.getCharacter(sender_id)?.name || 'Unknown');
-        const senderAvatar = sender_id === 'user'
-            ? (userProfile?.avatar || '')
-            : (db.getCharacter(sender_id)?.avatar || '');
-
-        const content = `[REDPACKET:${packetId}]`;
-        const msgId = db.addGroupMessage(groupId, sender_id, content, senderName, senderAvatar);
-        const savedMsg = { id: msgId, group_id: groupId, sender_id, content, timestamp: Date.now(), sender_name: senderName, sender_avatar: senderAvatar };
-        wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'group_message', data: savedMsg })); });
-
-        // Trigger AI auto-claim for char members (5–30 second delay to simulate hand speed)
-        scheduleAIRedPacketClaims(groupId, packetId, sender_id, wsClients);
-
-        res.json({ success: true, packet_id: packetId, message: savedMsg });
+        res.json({ success: true });
     } catch (e) {
-        console.error('[RedPacket] Create error:', e.message);
+        console.error('[Delete] Error deleting character:', e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// 15.3 Get red packet details + claims
-app.get('/api/groups/:id/redpackets/:pid', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const pkt = db.getRedPacket(parseInt(req.params.pid));
-        if (!pkt) return res.status(404).json({ error: 'Red packet not found' });
-        // Enrich claims with names
-        const enrichedClaims = pkt.claims.map(c => {
-            const name = c.claimer_id === 'user'
-                ? (db.getUserProfile()?.name || 'User')
-                : (db.getCharacter(c.claimer_id)?.name || c.claimer_id);
-            const avatar = c.claimer_id === 'user'
-                ? (db.getUserProfile()?.avatar || '')
-                : (db.getCharacter(c.claimer_id)?.avatar || '');
-            return { ...c, name, avatar };
-        });
-        res.json({ ...pkt, claims: enrichedClaims });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+// 13. Friendships & Relationships
+// ── MOVED TO DLC: server/plugins/relationships/index.js ──
 
-// 15.4 Claim a red packet
-app.post('/api/groups/:id/redpackets/:pid/claim', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { claimer_id = 'user' } = req.body;
-        const result = db.claimRedPacket(parseInt(req.params.pid), claimer_id);
-        if (result.success) {
-            res.json({ success: true, amount: result.amount, wallet: db.getWallet(claimer_id) });
-        } else {
-            res.status(400).json({ success: false, error: result.error });
-        }
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+// ─── Economy System (Transfers, Wallet, Red Packets) ── MOVED TO DLC ─────
+// See: server/plugins/economy/index.js
 
-// ─── AI Auto Red Packet Claim ────────────────────────────────────────────
-async function scheduleAIRedPacketClaims(groupId, packetId, senderCharId, wsClients) {
-    const group = db.getGroup(groupId);
-    if (!group) return;
-    const charMembers = group.members.filter(m => m.member_id !== 'user');
-
-    for (const member of charMembers) {
-        const delayMs = Math.floor(5000 + Math.random() * 25000); // 5–30 seconds
-        setTimeout(async () => {
-            try {
-                const char = db.getCharacter(member.member_id);
-                if (!char || char.is_blocked) return;
-
-                const result = db.claimRedPacket(packetId, char.id);
-                if (!result.success) return; // already claimed or exhausted
-
-                const pkt = db.getRedPacket(packetId);
-                const senderName = senderCharId === 'user'
-                    ? (db.getUserProfile()?.name || 'User')
-                    : (db.getCharacter(senderCharId)?.name || '某人');
-
-                // Ask AI to react in group chat
-                const userProfile = db.getUserProfile();
-                const recentMsgs = db.getVisibleGroupMessages(groupId, 6);
-                const historyForPrompt = recentMsgs.map(m => {
-                    const sName = m.sender_id === 'user'
-                        ? (userProfile?.name || 'User')
-                        : (m.sender_name || db.getCharacter(m.sender_id)?.name || '?');
-                    return { role: m.sender_id === char.id ? 'assistant' : 'user', content: `[${sName}]: ${m.content}` };
-                });
-
-                const isLucky = pkt?.type === 'lucky';
-                const totalClaimed = pkt?.count - pkt?.remaining_count;
-                const reactionPrompt = `你是${char.name}。Persona: ${char.persona || '无'}
-你刚刚抢到了${senderName}在群"${group.name}"里发的${isLucky ? '拼手气' : '普通'}红包，金额是¥${result.amount.toFixed(2)}。
-${isLucky ? `（共${pkt?.count}个红包，你是第${totalClaimed}个抢到的，${pkt?.remaining_count > 0 ? `还剩${pkt?.remaining_count}个` : '已被抢光'}）` : ''}
-根据你的性格，用1-2句话自然地在群聊中说出你的反应（高兴、失落、炫耀、谦虚等）。不要有名字前缀，直接说话。`;
-
-                const reply = await callLLM({
-                    endpoint: char.api_endpoint,
-                    key: char.api_key,
-                    model: char.model_name,
-                    messages: [{ role: 'system', content: reactionPrompt }, ...historyForPrompt],
-                    maxTokens: 80
-                });
-
-                if (reply && reply.trim()) {
-                    const clean = reply.trim().replace(/\[(?:CHAR_AFFINITY|AFFINITY|MOMENT|DIARY|UNLOCK_DIARY|PRESSURE|TIMER|TRANSFER|DIARY_PASSWORD)[^\]]*\]/gi, '').trim();
-                    if (clean) {
-                        const replyId = db.addGroupMessage(groupId, char.id, clean, char.name, char.avatar);
-                        const replyMsg = { id: replyId, group_id: groupId, sender_id: char.id, content: clean, timestamp: Date.now(), sender_name: char.name, sender_avatar: char.avatar };
-                        wsClients.forEach(c => { if (c.readyState === 1) c.send(JSON.stringify({ type: 'group_message', data: replyMsg })); });
-                    }
-                }
-            } catch (err) {
-                console.error(`[RedPacket] AI auto-claim error for ${member.member_id}:`, err.message);
-            }
-        }, delayMs);
-    }
-}
 
 // ─────────────────────────────────────────────────────────────
 // Serve React Frontend (Production)
@@ -2383,6 +1108,3 @@ server.listen(PORT, () => {
 });
 
 // Private background engines are now dynamically started via WS Auth
-module.exports = {
-    triggerGroupAIChain
-};

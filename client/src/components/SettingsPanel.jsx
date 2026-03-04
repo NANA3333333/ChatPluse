@@ -49,6 +49,8 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const [editAvatar, setEditAvatar] = useState('');
     const [editBanner, setEditBanner] = useState('');
     const [editBio, setEditBio] = useState('');
+    const [editMomentsTokenLimit, setEditMomentsTokenLimit] = useState(500);
+    const [editMomentsReactionRate, setEditMomentsReactionRate] = useState(30);
 
     // Theme Editor states
     const [editThemeConfig, setEditThemeConfig] = useState({});
@@ -96,6 +98,8 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 setEditAvatar(data.avatar || '');
                 setEditBanner(data.banner || '');
                 setEditBio(data.bio || '');
+                setEditMomentsTokenLimit(data.moments_token_limit !== undefined ? data.moments_token_limit : 500);
+                setEditMomentsReactionRate(data.moments_reaction_rate !== undefined ? data.moments_reaction_rate : 30);
 
                 // Initialize theme config edit states
                 if (data.theme_config) {
@@ -755,28 +759,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                         {lang === 'en' ? '🎯 Group Chat Settings' : '🎯 群聊设置'}
                     </h2>
 
-                    {/* Group Context Limit */}
-                    <div style={{ marginBottom: '18px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
-                            <span>{lang === 'en' ? 'Group Context Messages' : '群聊上下文消息数'}</span>
-                            <span>{profile.group_msg_limit || 20} <span style={{ fontSize: '12px', color: '#999' }}>{lang === 'en' ? '(rich context)' : '（上下文丰富）'}</span></span>
-                        </div>
-                        <input type="range" min="0" max="100" value={profile.group_msg_limit || 20}
-                            onChange={e => {
-                                const v = parseInt(e.target.value);
-                                setProfile(p => ({ ...p, group_msg_limit: v }));
-                                fetch(`${apiUrl}/user`, {
-                                    method: 'PUT',
-                                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` },
-                                    body: JSON.stringify({ group_msg_limit: v })
-                                });
-                            }}
-                            style={{ width: '100%', backgroundSize: `${((profile.group_msg_limit || 20)) * 100 / 100}% 100%` }} />
-                        <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
-                            {lang === 'en' ? 'Number of recent messages each AI can see in group chat. Higher = richer context, but slightly slower.'
-                                : '控制每个 AI 角色在群聊回复前能看到的最近消息数量。越高上下文越丰富，但响应稍慢。'}
-                        </div>
-                    </div>
+
 
                     {/* Private Context Limit in Group */}
                     <div style={{ marginBottom: '18px' }}>
@@ -902,6 +885,61 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                         <span style={{ fontSize: '24px', fontWeight: '700', color: 'var(--accent-color)', marginLeft: '10px' }}>
                             ¥{(profile.wallet ?? 100).toFixed(2)}
                         </span>
+                    </div>
+                </div>
+
+                {/* Moments Feed Settings */}
+                <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee', marginTop: '20px' }}>
+                    <h2 style={{ margin: '0 0 20px 0', fontSize: '18px' }}>
+                        {lang === 'en' ? '📲 Moments Settings' : '📲 朋友圈设置'}
+                    </h2>
+
+                    {/* Moments Context Limit */}
+                    <div style={{ marginBottom: '18px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
+                            <span>{lang === 'en' ? 'Max Context Tokens' : '朋友圈上下文注入量'}</span>
+                            <span>{editMomentsTokenLimit} {lang === 'en' ? 'chars' : '字'}</span>
+                        </div>
+                        <input type="range" min="0" max="10000" step="100" value={editMomentsTokenLimit}
+                            onChange={e => {
+                                const v = parseInt(e.target.value);
+                                setEditMomentsTokenLimit(v);
+                                setProfile(p => ({ ...p, moments_token_limit: v }));
+                                fetch(`${apiUrl}/user`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` },
+                                    body: JSON.stringify({ moments_token_limit: v })
+                                });
+                            }}
+                            style={{ width: '100%', backgroundSize: `${(editMomentsTokenLimit - 0) * 100 / (10000 - 0)}% 100%` }} />
+                        <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                            {lang === 'en' ? 'How much of the recent Moments feed to inject into the AI memory. Larger values cost more tokens but allow AI to read more posts.'
+                                : '每次私聊/群聊回复时，给 AI 提供多少字的最新朋友圈动态（包含你的和它认识的角色的朋友圈）。0 = 关闭。'}
+                        </div>
+                    </div>
+
+                    {/* Moments Reaction Rate */}
+                    <div style={{ marginBottom: '10px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
+                            <span>{lang === 'en' ? 'Reaction Probability' : '互动反馈概率'}</span>
+                            <span>{editMomentsReactionRate}%</span>
+                        </div>
+                        <input type="range" min="0" max="100" value={editMomentsReactionRate}
+                            onChange={e => {
+                                const v = parseInt(e.target.value);
+                                setEditMomentsReactionRate(v);
+                                setProfile(p => ({ ...p, moments_reaction_rate: v }));
+                                fetch(`${apiUrl}/user`, {
+                                    method: 'PUT',
+                                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` },
+                                    body: JSON.stringify({ moments_reaction_rate: v })
+                                });
+                            }}
+                            style={{ width: '100%', backgroundSize: `${(editMomentsReactionRate - 0) * 100 / (100 - 0)}% 100%` }} />
+                        <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                            {lang === 'en' ? 'Probability that a character naturally reacts/replies in private chat when you like or comment on their Moment.'
+                                : '当你给角色的朋友圈点赞或评论时，该角色主动在私聊中找你互动的概率。'}
+                        </div>
                     </div>
                 </div>
 

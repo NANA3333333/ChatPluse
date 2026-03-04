@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Users, Smile, Paperclip, X, Settings, Trash2, UserMinus, ArrowRightLeft, Gift, ChevronLeft } from 'lucide-react';
+import { Send, Users, Smile, Paperclip, X, Settings, Trash2, UserMinus, ArrowRightLeft, Gift, ChevronLeft, Trash } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
@@ -89,7 +89,7 @@ function RedPacketModal({ group, apiUrl, onClose, userWallet }) {
 }
 
 /* ─── Red Packet Card (parsed from [REDPACKET:id] in content) ─── */
-function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender }) {
+function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender, claimEvent }) {
     const { lang } = useLanguage();
     const [pkt, setPkt] = useState(null);
     const [showDetail, setShowDetail] = useState(false);
@@ -98,6 +98,13 @@ function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender }) {
         try { const r = await fetch(`${apiUrl}/groups/${groupId}/redpackets/${packetId}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }); setPkt(await r.json()); } catch (e) { console.error(e); }
     }, [apiUrl, groupId, packetId]);
     useEffect(() => { if (packetId) loadPkt(); }, [packetId, loadPkt]);
+
+    // Re-fetch when a matching claim event arrives (real-time update)
+    useEffect(() => {
+        if (claimEvent && claimEvent.packet_id === packetId) {
+            loadPkt();
+        }
+    }, [claimEvent, packetId, loadPkt]);
 
     const handleClaim = async () => {
         try {
@@ -164,9 +171,11 @@ function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender }) {
 /* ─── Right-side Group Management Drawer ─── */
 function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang }) {
     const [noChain, setNoChain] = useState(false);
+    const [injectLimit, setInjectLimit] = useState(group?.inject_limit ?? 5);
 
     useEffect(() => {
         if (!group) return;
+        setInjectLimit(group.inject_limit ?? 5);
         fetch(`${apiUrl}/groups/${group.id}/no-chain`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json()).then(d => setNoChain(!!d.no_chain)).catch(() => { });
     }, [group, apiUrl]);
 
@@ -174,6 +183,10 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang }) {
     const toggleNoChain = async () => {
         const v = !noChain; setNoChain(v);
         fetch(`${apiUrl}/groups/${group.id}/no-chain`, { method: 'POST', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ no_chain: v }) });
+    };
+    const updateInjectLimit = (val) => {
+        setInjectLimit(val);
+        fetch(`${apiUrl}/groups/${group.id}`, { method: 'PUT', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ inject_limit: val }) });
     };
     const clearMessages = () => { if (window.confirm(lang === 'en' ? 'Clear all messages?' : '清空所有消息？')) fetch(`${apiUrl}/groups/${group.id}/messages`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(() => window.location.reload()); };
     const dissolveGroup = () => { if (window.confirm(lang === 'en' ? 'Dissolve this group?' : '解散此群？')) fetch(`${apiUrl}/groups/${group.id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(() => window.location.reload()); };
@@ -226,6 +239,17 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang }) {
                         </span>
                     </label>
                 </div>
+                <div style={{ marginTop: '14px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '14px', marginBottom: '6px' }}>
+                        <span>📤 {lang === 'en' ? 'Inject into other contexts' : '注入私聊/其他群的消息条数'}</span>
+                        <span style={{ fontWeight: '600', color: 'var(--accent-color)', minWidth: '28px', textAlign: 'right' }}>{injectLimit}</span>
+                    </div>
+                    <input type="range" min="0" max="30" value={injectLimit} onChange={e => updateInjectLimit(parseInt(e.target.value))}
+                        style={{ width: '100%', accentColor: 'var(--accent-color)' }} />
+                    <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                        {lang === 'en' ? 'Messages from this group injected into private chat & other group chats. 0 = disabled.' : '本群消息注入私聊和其他群聊的条数。0 = 关闭注入。'}
+                    </div>
+                </div>
             </div>
 
             {/* Danger Zone */}
@@ -245,7 +269,7 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang }) {
 }
 
 /* ─── Main GroupChatWindow ─── */
-function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMessage, typingIndicators, onBack }) {
+function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMessage, typingIndicators, redpacketClaimEvent, onBack }) {
     const { lang } = useLanguage();
     const [messages, setMessages] = useState([]);
     const [input, setInput] = useState('');
@@ -255,6 +279,8 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
     const messagesEndRef = useRef(null);
     const fileInputRef = useRef(null);
     const textareaRef = useRef(null);
+    const [selectMode, setSelectMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState(new Set());
 
     // Mentions logic
     const [showMentionMenu, setShowMentionMenu] = useState(false);
@@ -298,7 +324,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
     const resolveSender = (senderId) => {
         if (senderId === 'user') return { name: userProfile?.name || 'User', avatar: resolveAvatarUrl(userProfile?.avatar, apiUrl) || 'https://api.dicebear.com/7.x/shapes/svg?seed=User' };
         const char = allContacts?.find(c => String(c.id) === String(senderId));
-        return char ? { ...char, avatar: resolveAvatarUrl(char.avatar, apiUrl) } : { name: senderId, avatar: `https://api.dicebear.com/7.x/pixel-art/svg?seed=${senderId}` };
+        return char ? { ...char, avatar: resolveAvatarUrl(char.avatar, apiUrl) } : { name: senderId, avatar: `https://api.dicebear.com/7.x/shapes/svg?seed=${senderId}` };
     };
 
     const addEmoji = (emoji) => { setInput(prev => prev + emoji); setShowEmojiPicker(false); };
@@ -395,6 +421,10 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                         <span style={{ fontSize: '12px', color: '#999' }}>({group.members?.length || 0})</span>
                     </div>
                     <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                        <button onClick={() => { setSelectMode(m => !m); setSelectedIds(new Set()); }} title={lang === 'en' ? 'Select Messages' : '选择消息'}
+                            style={selectMode ? { color: 'var(--accent-color)', background: 'rgba(var(--accent-rgb, 74,144,226), 0.12)', borderRadius: '8px', border: 'none', cursor: 'pointer', padding: '6px' } : { background: 'none', border: 'none', cursor: 'pointer', color: 'var(--accent-color)', padding: '6px' }}>
+                            <Trash size={20} />
+                        </button>
                         <button onClick={() => setShowManageDrawer(!showManageDrawer)}
                             style={{ background: 'none', border: 'none', cursor: 'pointer', color: showManageDrawer ? 'var(--danger)' : 'var(--accent-color)' }}
                             title={lang === 'en' ? 'Group management — members, AI controls, danger zone' : '群管理 — 成员、AI 控制、危险操作'}>
@@ -421,14 +451,33 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                             );
                         }
 
+                        const isSelected = selectedIds.has(msg.id);
+                        const selectionClick = selectMode ? () => {
+                            setSelectedIds(prev => {
+                                const next = new Set(prev);
+                                if (next.has(msg.id)) next.delete(msg.id);
+                                else next.add(msg.id);
+                                return next;
+                            });
+                        } : undefined;
+
                         // Red packet
                         if (parsed.type === 'redpacket') {
                             return (
-                                <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
+                                <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}
+                                    style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
+                                    onClick={selectionClick}>
+                                    {selectMode && (
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
+                                            <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
+                                                {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                            </div>
+                                        </div>
+                                    )}
                                     <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                     <div className="message-content">
                                         {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
-                                        <RedPacketCard packetId={parsed.packetId} apiUrl={apiUrl} groupId={group.id} isUser={isUser} resolveSender={resolveSender} />
+                                        <RedPacketCard packetId={parsed.packetId} apiUrl={apiUrl} groupId={group.id} isUser={isUser} resolveSender={resolveSender} claimEvent={redpacketClaimEvent} />
                                         {msg.timestamp && (
                                             <div style={{
                                                 fontSize: '11px', color: '#bbb', marginTop: '4px',
@@ -450,7 +499,16 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                             const amount = parts[0].trim();
                             const note = parts.length > 1 ? parts.slice(1).join('|').trim() : 'Transfer';
                             return (
-                                <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
+                                <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}
+                                    style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
+                                    onClick={selectionClick}>
+                                    {selectMode && (
+                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
+                                            <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
+                                                {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                            </div>
+                                        </div>
+                                    )}
                                     <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                     <div className="message-content">
                                         {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
@@ -477,7 +535,16 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
 
                         // Normal message
                         return (
-                            <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}>
+                            <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}
+                                style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
+                                onClick={selectionClick}>
+                                {selectMode && (
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
+                                        <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
+                                            {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                        </div>
+                                    </div>
+                                )}
                                 <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                 <div className="message-content">
                                     {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
@@ -525,8 +592,74 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                     </div>
                 )}
 
+                {/* Floating delete bar when in select mode */}
+                {selectMode && (
+                    <div style={{
+                        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                        padding: '10px 16px', background: '#fff', borderTop: '1px solid #eee',
+                        boxShadow: '0 -2px 8px rgba(0,0,0,0.06)'
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <button
+                                onClick={() => {
+                                    if (selectedIds.size === messages.length) setSelectedIds(new Set());
+                                    else setSelectedIds(new Set(messages.map(m => m.id)));
+                                }}
+                                style={{ fontSize: '13px', color: 'var(--accent-color, #4a90e2)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0' }}
+                            >
+                                {selectedIds.size === messages.length ? (lang === 'en' ? 'Deselect All' : '取消全选') : (lang === 'en' ? 'Select All' : '全选')}
+                            </button>
+                            <span style={{ fontSize: '13px', color: '#888' }}>
+                                {lang === 'en' ? `${selectedIds.size} selected` : `已选 ${selectedIds.size} 条`}
+                            </span>
+                        </div>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                            <button
+                                onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }}
+                                style={{ padding: '6px 16px', fontSize: '13px', background: '#f5f5f5', border: '1px solid #ddd', borderRadius: '8px', cursor: 'pointer', color: '#666' }}
+                            >
+                                {lang === 'en' ? 'Cancel' : '取消'}
+                            </button>
+                            <button
+                                disabled={selectedIds.size === 0}
+                                onClick={async () => {
+                                    if (selectedIds.size === 0) return;
+                                    const confirmMsg = lang === 'en'
+                                        ? `Permanently delete ${selectedIds.size} message(s)?`
+                                        : `确定永久删除 ${selectedIds.size} 条消息？`;
+                                    if (!confirm(confirmMsg)) return;
+                                    try {
+                                        const res = await fetch(`${apiUrl}/groups/${group.id}/messages/batch-delete`, {
+                                            method: 'POST',
+                                            headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ messageIds: [...selectedIds] })
+                                        });
+                                        const data = await res.json();
+                                        if (data.success) {
+                                            setMessages(prev => prev.filter(m => !selectedIds.has(m.id)));
+                                            setSelectedIds(new Set());
+                                            setSelectMode(false);
+                                        }
+                                    } catch (e) {
+                                        console.error('Group batch delete failed:', e);
+                                    }
+                                }}
+                                style={{
+                                    padding: '6px 16px', fontSize: '13px', fontWeight: '600',
+                                    background: selectedIds.size > 0 ? '#e74c3c' : '#ddd',
+                                    color: '#fff', border: 'none', borderRadius: '8px',
+                                    cursor: selectedIds.size > 0 ? 'pointer' : 'not-allowed'
+                                }}
+                            >
+                                <Trash size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
+                                {lang === 'en' ? 'Delete' : '删除'}
+                            </button>
+                        </div>
+                    </div>
+                )}
+
                 {/* Input area — matches private chat InputBar style */}
-                <div className="input-area">
+                {!selectMode && (<div className="input-area">
                     <div className="input-toolbar" style={{ position: 'relative' }}>
                         <button onClick={() => setShowEmojiPicker(!showEmojiPicker)} title={lang === 'en' ? 'Insert emoji' : '插入表情'}><Smile size={20} /></button>
                         <button onClick={() => fileInputRef.current?.click()} title={lang === 'en' ? 'Send file' : '发送文件'}><Paperclip size={20} /></button>
@@ -570,6 +703,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, newGroupMess
                         <button className="send-button" onClick={handleSend}>{lang === 'en' ? 'Send' : '发送'}</button>
                     </div>
                 </div>
+                )}
             </div>
 
             {showManageDrawer && (

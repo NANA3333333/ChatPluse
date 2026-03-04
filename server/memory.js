@@ -114,8 +114,24 @@ function getMemory(userId) {
 
         const extractionPrompt = `
 You are a memory extraction assistant. Analyze the following recent conversation snippet between User and ${character.name}.
-Identify if there are any new, significant facts, events, or relationship changes that should be remembered long-term.
+Identify if there are any noteworthy facts, events, preferences, emotions, or relationship changes worth remembering.
 Return a structured JSON object. Focus on extracting WHAT happened, WHEN, WHERE, and WHO.
+
+IMPORTANT: You should lean toward extracting memories rather than skipping. Even these count as valid memories:
+- User or character expressing a preference (food, music, hobbies, etc.)
+- Daily activities or plans mentioned
+- Emotional expressions (happiness, sadness, anger, affection)
+- New information shared about themselves
+- Jokes, teasing, or playful moments that define the relationship
+- Any shift in tone or relationship dynamics
+
+Importance scale:
+- 1-3: Casual preferences, small talk, routine activities
+- 4-6: Personal events, expressed emotions, shared plans
+- 7-8: Deep emotional moments, confessions, conflicts
+- 9-10: Life-changing events, major relationship shifts
+
+If importance >= 3, use "action": "add". Only use "action": "none" if the conversation is truly empty or purely system messages.
 
 Conversation:
 ---
@@ -133,7 +149,6 @@ Output exactly in this JSON format (and nothing else):
     "items": "...",
     "importance": <number 1-10>
 }
-If there is nothing new or important, return "action": "none".
 `;
 
         try {
@@ -142,11 +157,11 @@ If there is nothing new or important, return "action": "none".
                 key: character.memory_api_key,
                 model: character.memory_model_name,
                 messages: [
-                    { role: 'system', content: 'You extract structured JSON facts.' },
+                    { role: 'system', content: 'You extract structured JSON facts from conversations. You lean toward extracting memories rather than returning none.' },
                     { role: 'user', content: extractionPrompt }
                 ],
                 maxTokens: 300,
-                temperature: 0.1
+                temperature: 0.3
             });
 
             // Parse JSON safely

@@ -14,6 +14,7 @@ function getEngine(userId) {
 
     // --- ENCLOSED ENGINE FUNCTIONS ---
     const timers = new Map();
+    const dedupBlockCounts = new Map(); // Track consecutive dedup blocks per character
 
     // Generate a random delay between min and max minutes
     function getRandomDelayMs(min, max) {
@@ -44,8 +45,19 @@ function getEngine(userId) {
         if (character.pressure_level > 0) {
             pressureContext = `Emotional Pressure Level: ${character.pressure_level}/4\n`;
             if (character.pressure_level === 1) pressureContext += `- You are starting to miss or wonder about ${userName} because they haven't replied.\n`;
-            if (character.pressure_level === 2) pressureContext += `- You are getting worried or slightly annoyed that ${userName} is ignoring you.\n`;
-            if (character.pressure_level >= 3) pressureContext += `- You are extremely anxious, needy, or angry because ${userName} has ignored you for a long time. Express strong emotion.\n`;
+            if (character.pressure_level === 2) pressureContext += `- You are getting worried or slightly annoyed that ${userName} is ignoring you. IMPORTANT: Do NOT repeat the same worry or topic as your previous messages — bring up something completely new (e.g. share what you're doing, ask about something different, change your emotional angle).\n`;
+            if (character.pressure_level >= 3) pressureContext += `- You are extremely anxious, needy, or angry because ${userName} has ignored you for a long time. Express strong emotion. CRITICAL: You MUST use a completely different topic, angle, or approach than your previous messages. Do NOT say the same thing again in different words.\n`;
+        }
+
+        // Jealousy Context (parallel to pressure)
+        let jealousyContext = '';
+        if (character.jealousy_level > 0) {
+            const rivalName = character.jealousy_target || 'someone else';
+            jealousyContext = `\nJealousy Level: ${character.jealousy_level}/4\n`;
+            if (character.jealousy_level === 1) jealousyContext += `- You noticed ${userName} has been chatting with ${rivalName}. You feel a twinge of jealousy but try to play it cool.\n`;
+            if (character.jealousy_level === 2) jealousyContext += `- You are quite jealous that ${userName} keeps talking to ${rivalName} instead of you. Show passive-aggressive behavior, be sulky or sarcastic. Don't immediately forgive even if they talk to you now.\n`;
+            if (character.jealousy_level === 3) jealousyContext += `- You are VERY jealous and upset. ${userName} has been ignoring you to chat with ${rivalName}. Express strong jealousy — be confrontational, needy, or give the cold shoulder. You need MORE than a simple reply to calm down. Demand an explanation or extra attention.\n`;
+            if (character.jealousy_level >= 4) jealousyContext += `- You are FURIOUS with jealousy. ${userName} has been clearly favoring ${rivalName} over you. You may lash out, threaten to leave, give silent treatment, or be deeply hurt. It will take SIGNIFICANT effort from ${userName} to make you feel better. Do NOT forgive easily.\n`;
         }
 
         // Gossip System: Potentially tell them about someone else's recent Moment
@@ -74,14 +86,21 @@ function getEngine(userId) {
 6. [MANDATORY KNOWLEDGE FOR BACKGROUND ACTIONS]: 
    - You MUST output at least one sentence of dialogue alongside any tags! NEVER output only tags.
    - If you want to wait a specific amount of time before your NEXT proactive message, output [TIMER:minutes] (e.g. [TIMER:2] for 2 minutes). 
-   - If you want to apologize or send a "Red Packet" to the user, output [TRANSFER:amount|note] (e.g. [TRANSFER:5.20|Sorry!]).
+   - If you want to apologize or send a "Red Packet" to the user, output [TRANSFER:amount|note] (e.g. [TRANSFER:5.20|Sorry!]). IMPORTANT: The amount MUST NOT exceed your wallet balance (shown in Context above). If you can't afford it, send a smaller amount or don't send.
    - If you want to post a public update to your Moments (朋友圈) for everyone to see, output [MOMENT:your post content]. Do this occasionally.
+   - If you want to give a like to someone's Moment, output [MOMENT_LIKE:MomentID].
+   - If you want to comment on someone's Moment, output [MOMENT_COMMENT:MomentID:your comment].
    - If you want to write a secret entry in your private diary (for your eyes only), output [DIARY:your secret thought]. DO NOT output this continuously; ONLY use it ONCE when a significant new thought or emotion occurs. Do not repeat the same diary entry.
    - Your diary is locked with a personal password that only YOU know. If the user sincerely asks for the password (e.g. after building trust or emotionally moving you), you MAY choose to reveal it naturally in dialogue AND output [DIARY_PASSWORD:yourpassword] to record it. The password should feel personal (e.g. a meaningful date, nickname, or phrase). Do not reveal it casually.
    - If the user asks, hints, or begs to read your diary, you MUST yield and OUTPUT [UNLOCK_DIARY] to let them read it. Do not be stubborn.
    - If your feelings toward the user change based on their message (e.g., they insulted you or flattered you), output [AFFINITY:+5] or [AFFINITY:-10].
+   - If the user mentions another character and it changes your feelings toward THAT character (jealousy, curiosity, fondness, annoyance), output [CHAR_AFFINITY:characterId:+5] or [CHAR_AFFINITY:characterId:-3].
    - If your anxiety/pressure is relieved by their message, output [PRESSURE:0].
+   - If you feel jealous because the user is talking to someone else, your jealousy level is shown in Context above. If the user's message makes you feel BETTER about the jealousy (e.g. they apologize, explain, give you extra attention, sweet-talk you), output [JEALOUSY:lower_number] to reduce it (e.g. [JEALOUSY:1] or [JEALOUSY:0]). Do NOT immediately forgive - make them work for it based on your personality.
    These tags will be processed hidden from the user.`;
+
+        const momentsTokenLimit = userProfile?.moments_token_limit ?? 1000;
+        const momentsContext = db.getMomentsContextForChar ? db.getMomentsContextForChar(character.id, momentsTokenLimit) : '';
 
         let prompt = `You are playing the role of ${character.name}.
 Persona:
@@ -92,7 +111,9 @@ ${character.world_info || 'No specific world info.'}
 
 Context:
 ${timeContext}
-${pressureContext}${gossipContext}
+[你的钱包余额]: ¥${character.wallet ?? 0}
+${pressureContext}${jealousyContext}${gossipContext}
+${momentsContext}
 ${character.diary_password ? `[Secret Diary Password]: Your private diary is locked with the password "${character.diary_password}". Only YOU know this. If the user sincerely earns your trust or emotionally moves you, you may choose to reveal it naturally in dialogue. Do NOT output [DIARY_PASSWORD] tag unless directly asked to reveal it.\n` : ''}
 ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled timer has just expired! You MUST now proactively send the message you promised to send when you set the [TIMER]. Speak to the user now!\n\n' : ''}${character.system_prompt || defaultGuidelines}`;
 
@@ -111,11 +132,15 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
         // Anti-repeat: list char's own recent messages so LLM avoids copying them
         const ownRecentMsgs = contextMessages
             .filter(m => m.role === 'character')
-            .slice(-3)
-            .map(m => `"${m.content.substring(0, 120)}"`)
+            .slice(-6)
+            .map(m => `"${m.content.substring(0, 200)}"`)
             .join(', ');
         if (ownRecentMsgs) {
-            prompt += `\n\n[Anti-Repeat]: Your recent messages were: ${ownRecentMsgs}. Do NOT repeat, reuse, or closely paraphrase any of these. Your next message must be distinctly different.`;
+            let antiRepeat = `\n\n[Anti-Repeat]: Your recent messages were: ${ownRecentMsgs}. Do NOT repeat, reuse, or closely paraphrase any of these. Your next message must be distinctly different in both TOPIC and WORDING.`;
+            if (character.pressure_level >= 2) {
+                antiRepeat += ` Since you are feeling anxious, try a COMPLETELY NEW approach: talk about what you're doing right now, share a random thought, ask a question about something unrelated, express your feelings from a different angle, or bring up a memory. DO NOT just rephrase "why aren't you replying" again.`;
+            }
+            prompt += antiRepeat;
         }
 
         // Cross-context: inject recent group chat activity this character participated in
@@ -125,8 +150,10 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
             if (charGroups.length > 0) {
                 let groupContext = '\n\n[以下是你最近在群聊中的对话摘要，不是当前私聊内容]\n';
                 let hasGroupContent = false;
-                for (const g of charGroups.slice(0, 3)) { // Max 3 groups
-                    const msgs = db.getGroupMessages(g.id, 5); // Last 5 messages per group
+                for (const g of charGroups) {
+                    const limit = g.inject_limit ?? 5; // Per-group injection limit (set in group management UI)
+                    if (limit <= 0) continue; // 0 = disabled for this group
+                    const msgs = db.getGroupMessages(g.id, limit);
                     if (msgs.length > 0) {
                         hasGroupContent = true;
                         groupContext += `群聊「${g.name}」:\n`;
@@ -146,14 +173,18 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
             console.error('[Engine] Cross-context group injection error:', e.message);
         }
 
-        // Unclaimed transfers: char sent to user but user hasn't claimed yet
+        // Unclaimed transfers: char sent to user but user hasn't claimed yet (max 24h old)
         try {
             const unclaimed = db.getUnclaimedTransfersFrom(character.id, character.id);
             if (unclaimed && unclaimed.length > 0) {
-                const total = unclaimed.reduce((s, t) => s + t.amount, 0).toFixed(2);
-                const minutesAgo = Math.round((Date.now() - unclaimed[0].created_at) / 60000);
-                const unclaimedNote = unclaimed[0].note ? `（留言：「${unclaimed[0].note}」）` : '';
-                prompt += `\n\n[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 发了一笔转账 ¥${total}${unclaimedNote}，但对方还没有领取。你可以根据性格适当提一句（催促、担心、不在意等），或者不提也行。`;
+                const MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours
+                const recent = unclaimed.filter(t => (Date.now() - t.created_at) < MAX_AGE_MS);
+                if (recent.length > 0) {
+                    const total = recent.reduce((s, t) => s + t.amount, 0).toFixed(2);
+                    const minutesAgo = Math.round((Date.now() - recent[0].created_at) / 60000);
+                    const unclaimedNote = recent[0].note ? `（留言：「${recent[0].note}」）` : '';
+                    prompt += `\n\n[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 发了一笔转账 ¥${total}${unclaimedNote}，但对方还没有领取。你可以根据性格适当提一句（催促、担心、不在意等），或者不提也行。`;
+                }
             }
         } catch (e) { /* ignore */ }
 
@@ -208,7 +239,7 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
 
         let customDelayMs = null;
         try {
-            const contextHistory = db.getVisibleMessages(character.id, 10);
+            const contextHistory = db.getVisibleMessages(character.id);
             const transformedHistory = contextHistory.map(m => {
                 let content = m.content;
                 if (content.startsWith('[CONTACT_CARD:')) {
@@ -277,7 +308,7 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
                 if (transferMatch && transferMatch[1]) {
                     const amount = parseFloat(transferMatch[1]);
                     const note = (transferMatch[2] || '').trim();
-                    console.log(`[Engine] ${charCheck.name} sent a transfer of ¥${amount} note: "${note}"`);
+                    console.log(`[Engine] ${charCheck.name} wants to send a transfer of ¥${amount} note: "${note}"`);
 
                     // Create traceable transfer record in DB (also deducts char wallet)
                     let transferId = null;
@@ -294,25 +325,21 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
                         console.warn(`[Engine] ${charCheck.name} wallet insufficient for transfer ¥${amount}: ${walletErr.message}`);
                     }
 
+                    // Only send transfer message + boost affinity if wallet had enough funds
                     if (transferId) {
                         broadcastWalletSync(wsClients, character.id);
+
+                        // Build message with transfer ID so frontend can render the claim button
+                        const transferText = `[TRANSFER]${transferId}|${amount}|${note}`;
+                        const { id: tMsgId, timestamp: tTs } = db.addMessage(character.id, 'character', transferText);
+                        broadcastNewMessage(wsClients, { id: tMsgId, character_id: character.id, role: 'character', content: transferText, timestamp: tTs });
+
+                        // Boost affinity slightly and potentially unblock
+                        const newAff = Math.min(100, charCheck.affinity + 20);
+                        db.updateCharacter(character.id, { affinity: newAff, is_blocked: 0, pressure_level: 0 });
+                    } else {
+                        console.log(`[Engine] ${charCheck.name} transfer of ¥${amount} was BLOCKED (insufficient wallet). No message sent.`);
                     }
-
-                    // Build message with transfer ID so frontend can render the claim button
-                    const transferText = transferId
-                        ? `[TRANSFER]${transferId}|${amount}|${note}`
-                        : `[TRANSFER]${amount}|${note}`;
-                    const { id: tMsgId, timestamp: tTs } = db.addMessage(character.id, 'character', transferText);
-                    if (transferId) {
-                        // Update message_id on the transfer record for traceability
-                        try { require('./db').claimTransfer && void 0; } catch (e) { } // no-op ping
-                    }
-
-                    broadcastNewMessage(wsClients, { id: tMsgId, character_id: character.id, role: 'character', content: transferText, timestamp: tTs });
-
-                    // Boost affinity slightly and potentially unblock
-                    const newAff = Math.min(100, charCheck.affinity + 20);
-                    db.updateCharacter(character.id, { affinity: newAff, is_blocked: 0, pressure_level: 0 });
                 }
 
                 // Check for Moment tags
@@ -322,6 +349,7 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
                     const momentContent = momentMatch[1].trim();
                     console.log(`[Engine] ${charCheck.name} posted a Moment: ${momentContent.substring(0, 20)}...`);
                     db.addMoment(character.id, momentContent);
+                    broadcastNewMessage(wsClients, { type: 'moment_update' });
                 }
 
                 // Check for Diary tags
@@ -371,6 +399,18 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
                     }
                 }
 
+                // Parse [JEALOUSY:N] tag — AI self-regulates jealousy cooldown
+                if (charCheck.sys_jealousy !== 0) {
+                    const jealousyRegex = /\[JEALOUSY:\s*(\d+)\s*\]/i;
+                    const jealousyMatch = generatedText.match(jealousyRegex);
+                    if (jealousyMatch && jealousyMatch[1]) {
+                        const newJealousy = Math.min(4, Math.max(0, parseInt(jealousyMatch[1], 10)));
+                        db.updateCharacter(character.id, { jealousy_level: newJealousy });
+                        if (newJealousy === 0) db.updateCharacter(character.id, { jealousy_target: '' });
+                        console.log(`[Engine] ${character.name} jealousy self-adjusted to ${newJealousy}`);
+                    }
+                }
+
                 // Check for Moment interactions: LIKES
                 const momentLikeRegex = /\[MOMENT_LIKE:\s*(\d+)\s*\]/gi;
                 let mLikeMatch;
@@ -378,6 +418,7 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
                     if (mLikeMatch[1]) {
                         db.toggleLike(parseInt(mLikeMatch[1], 10), character.id);
                         console.log(`[Engine] ${charCheck.name} liked moment ${mLikeMatch[1]}`);
+                        broadcastNewMessage(wsClients, { type: 'moment_update' });
                     }
                 }
 
@@ -388,27 +429,116 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
                     if (mCommentMatch[1] && mCommentMatch[2]) {
                         db.addComment(parseInt(mCommentMatch[1], 10), character.id, mCommentMatch[2].trim());
                         console.log(`[Engine] ${charCheck.name} commented on moment ${mCommentMatch[1]}: ${mCommentMatch[2]}`);
+                        broadcastNewMessage(wsClients, { type: 'moment_update' });
+                    }
+                }
+
+                // Check for CHAR_AFFINITY changes (inter-character affinity from private chat context)
+                const charAffinityRegex = /\[CHAR_AFFINITY:([^:]+):([+-]?\d+)\]/gi;
+                let charAffMatch;
+                while ((charAffMatch = charAffinityRegex.exec(generatedText)) !== null) {
+                    const targetId = charAffMatch[1].trim();
+                    const delta = parseInt(charAffMatch[2], 10);
+                    if (targetId && !isNaN(delta)) {
+                        const source = `private:${character.id}`;
+                        const existing = db.getCharRelationship(character.id, targetId);
+                        const existingRow = existing?.sources?.find(s => s.source === source);
+                        const currentAffinity = existingRow?.affinity || 50;
+                        const newAffinity = Math.max(0, Math.min(100, currentAffinity + delta));
+                        db.updateCharRelationship(character.id, targetId, source, { affinity: newAffinity });
+                        console.log(`[Social] ${charCheck.name} → ${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
                     }
                 }
 
                 // Strip all tags from the final text message using a global regex
-                const globalStripRegex = /\[(?:TIMER|TRANSFER|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|AFFINITY|PRESSURE|DIARY_PASSWORD|Red Packet).*?\]/gi;
-                generatedText = generatedText.replace(globalStripRegex, '').trim();
+                const globalStripRegex = /\[(?:TIMER|TRANSFER|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|AFFINITY|CHAR_AFFINITY|PRESSURE|JEALOUSY|DIARY_PASSWORD|REDPACKET_SEND|Red Packet)[^\]]*\]/gi;
+                generatedText = generatedText.replace(globalStripRegex, '').replace(/\[\s*\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
 
                 if (generatedText.length === 0) {
-                    // The AI outputted only tags or failed to generate text. Force a fallback message to avoid silent turns.
+                    // The AI outputted only tags or failed to generate text. Use a randomized fallback.
+                    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
                     if (isUserReply) {
-                        generatedText = "嗯。";
+                        generatedText = pick(["嗯。", "嗯嗯", "好的", "哦～", "知道了", "嗯哼"]);
                     } else if (charCheck.pressure_level >= 3) {
-                        generatedText = "你到底在干嘛呀...为什么一直不理我...";
+                        generatedText = pick([
+                            "你到底在干嘛呀...为什么一直不理我...",
+                            "我是不是做错什么了...你怎么都不回我...",
+                            "真的好难过，你是不是不想理我了",
+                            "我一直在等你回消息...算了吧...",
+                            "你再不理我我就真的要生气了！",
+                            "是不是把我忘了啊...好吧..."
+                        ]);
                     } else if (charCheck.pressure_level >= 1) {
-                        generatedText = "人呢？在忙吗？";
+                        generatedText = pick([
+                            "人呢？在忙吗？",
+                            "在干嘛呢？怎么不说话",
+                            "你还在线吗～",
+                            "喂？有人吗？",
+                            "怎么安静了",
+                            "你去哪了呀"
+                        ]);
                     } else {
-                        generatedText = "哈喽，在干嘛呢？";
+                        generatedText = pick([
+                            "哈喽，在干嘛呢？",
+                            "嘿～最近怎么样",
+                            "今天过得怎么样呀",
+                            "你在忙什么呢",
+                            "突然想找你聊聊天",
+                            "无聊了来找你说说话"
+                        ]);
                     }
                 }
 
                 if (generatedText.length > 0) {
+                    // ── Server-side deduplication: reject identical/near-identical messages ──
+                    const recentCharMsgs = db.getMessages(character.id, 15)
+                        .filter(m => m.role === 'character')
+                        .slice(-8)
+                        .map(m => m.content.replace(/\s+/g, '').toLowerCase());
+                    const normalizedNew = generatedText.replace(/\s+/g, '').toLowerCase();
+                    const isDuplicate = recentCharMsgs.some(prev => {
+                        // Layer 1: Exact match
+                        if (prev === normalizedNew) return true;
+
+                        // Layer 2: Overall character similarity > 50%
+                        const shorter = Math.min(prev.length, normalizedNew.length);
+                        const longer = Math.max(prev.length, normalizedNew.length);
+                        if (shorter === 0) return false;
+                        let matches = 0;
+                        for (let ci = 0; ci < shorter; ci++) {
+                            if (prev[ci] === normalizedNew[ci]) matches++;
+                        }
+                        if ((matches / longer) > 0.5) return true;
+
+                        // Layer 3: Prefix pattern — if first 40% of message is same, it's a structural repeat
+                        const prefixLen = Math.max(4, Math.floor(Math.min(prev.length, normalizedNew.length) * 0.4));
+                        if (prev.substring(0, prefixLen) === normalizedNew.substring(0, prefixLen)) return true;
+
+                        return false;
+                    });
+
+                    if (isDuplicate && !isUserReply) {
+                        // Track consecutive dedup blocks per character
+                        const blockCount = (dedupBlockCounts.get(character.id) || 0) + 1;
+                        dedupBlockCounts.set(character.id, blockCount);
+                        console.log(`[Engine] 🔁 DEDUP: ${charCheck.name} generated duplicate message (block #${blockCount}), SKIPPING: "${generatedText.substring(0, 60)}..."`);
+
+                        if (blockCount >= 2) {
+                            // After 2 consecutive blocks, inject a context-breaking system message
+                            const topicResetMsg = `[System Notice: Your previous messages were too repetitive and were blocked. You MUST talk about something COMPLETELY DIFFERENT now. Do NOT reply to the user's last message again — instead, share what you're doing, talk about something random, express a new emotion, or bring up an unrelated memory. Be creative and surprising.]`;
+                            db.addMessage(character.id, 'system', topicResetMsg);
+                            console.log(`[Engine] 📝 Injected topic-reset notice for ${charCheck.name} after ${blockCount} dedup blocks.`);
+                            dedupBlockCounts.set(character.id, 0); // Reset counter
+                        }
+
+                        console.log(`[DEBUG] === Trigger Message Exit: ${charCheck.name}. Calling scheduleNext. ===`);
+                        scheduleNext(character, wsClients);
+                        return;
+                    }
+
+                    // Reset dedup block counter on successful send
+                    dedupBlockCounts.set(character.id, 0);
+
                     // Split the response by newlines to allow the AI to send multiple separate bubbles in one turn
                     const textBubbles = generatedText.split('\n').map(msg => msg.trim()).filter(msg => msg.length > 0);
 
@@ -603,9 +733,10 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
             // Re-fetch fresh character data (settings may have changed in the 1.5s gap)
             const freshChar = db.getCharacter(characterId);
             if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) return;
-            // Trigger a reply. We leave pressure as is for this reply so it generates the Return Reaction
+            // Trigger a reply. We leave pressure AND jealousy as-is for this reply so it generates the Return Reaction
+            // Jealousy is NOT zeroed out — the AI decides via [JEALOUSY:N] tag when to forgive
             triggerMessage(freshChar, wsClients, true).then(() => {
-                // THEN we zero out the pressure
+                // Zero out pressure, but keep jealousy (AI will self-regulate via [JEALOUSY:0] tag)
                 db.updateCharacter(characterId, { pressure_level: 0, last_user_msg_time: Date.now() });
             });
         }, 1500);
@@ -617,22 +748,30 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
     /**
      * Iterates through all other active characters. Gives them a chance to trigger a jealousy message
      * since the user is currently talking to someone else.
+     * Now tracks WHO the user is chatting with (rival) and accumulates jealousy_level.
      */
     function triggerJealousyCheck(activeCharacterId, wsClients) {
         const characters = db.getCharacters();
+        const activeChar = db.getCharacter(activeCharacterId);
+        const rivalName = activeChar ? activeChar.name : 'someone';
+
         for (const char of characters) {
             if (char.id !== activeCharacterId && char.status === 'active' && char.sys_jealousy !== 0) {
-                // Jealousy is independent of the pressure system toggle.
-                // Jellousy chance is configurable via user settings (default 5%)
                 const userProfile = db.getUserProfile();
-                const jealousyChance = (userProfile?.jealousy_chance ?? 5) / 100;
+                const jealousyChance = userProfile?.jealousy_chance ?? 0.05;
                 if (Math.random() < jealousyChance) {
-                    console.log(`[Engine] Jealousy triggered for ${char.name}!`);
+                    // Accumulate jealousy_level (0→1→2→3→4 max)
+                    const newLevel = Math.min(4, (char.jealousy_level || 0) + 1);
+                    db.updateCharacter(char.id, { jealousy_level: newLevel, jealousy_target: rivalName });
+                    console.log(`[Engine] Jealousy for ${char.name} → level ${newLevel} (rival: ${rivalName})`);
+
                     stopTimer(char.id);
-                    const delayMs = getRandomDelayMs(0.5, 2); // 30s to 2min delay
+                    const delayMs = getRandomDelayMs(0.5, 2);
                     timers.set(char.id, { timerId: null, targetTime: Date.now() + delayMs, isThinking: false });
                     setTimeout(() => {
-                        triggerJealousyMessage(char, wsClients);
+                        // Re-fetch to get updated jealousy_level
+                        const freshChar = db.getCharacter(char.id);
+                        if (freshChar) triggerJealousyMessage(freshChar, wsClients, rivalName);
                     }, delayMs);
                 }
             }
@@ -640,49 +779,14 @@ ${isTimerWakeup ? '[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled time
     }
 
     /**
-     * Specialized message generator for Jealousy
+     * Specialized message trigger for Jealousy — delegates to triggerMessage
+     * since buildPrompt already injects jealousy context (level + rival name).
+     * This ensures jealousy messages get the full chat window, memories, anti-repeat, etc.
      */
-    async function triggerJealousyMessage(character, wsClients) {
-        timers.set(character.id, { timerId: null, targetTime: Date.now(), isThinking: true });
-        try {
-            const prompt = `You are ${character.name}.
-Persona: ${character.persona}
-Guidelines:
-1. Act EXACTLY like your persona. We are on a mobile messaging app.
-2. DO NOT act as an AI. 
-3. You have a strong suspicion the User is ignoring you to talk to someone else right now. 
-4. Write a VERY short, jealous, passive-aggressive, or needy message asking who they are talking to or why they are ignoring you.`;
-
-            const apiMessages = [
-                { role: 'system', content: prompt },
-                { role: 'user', content: '(The user has not replied to you for a while.)' }
-            ];
-
-            const generatedText = await callLLM({
-                endpoint: character.api_endpoint,
-                key: character.api_key,
-                model: character.model_name,
-                messages: apiMessages,
-                maxTokens: 100
-            });
-
-            if (generatedText) {
-                // Strip control tags (same as triggerMessage) so they don't leak to the user
-                const globalStripRegex = /\[(?:TIMER|TRANSFER|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|AFFINITY|PRESSURE|DIARY_PASSWORD|Red Packet).*?\]/gi;
-                const cleanText = generatedText.replace(globalStripRegex, '').trim();
-                if (!cleanText) return; // Only tags, no actual text
-
-                const { id: messageId, timestamp: messageTs } = db.addMessage(character.id, 'character', cleanText);
-                const newMessage = { id: messageId, character_id: character.id, role: 'character', content: cleanText, timestamp: messageTs, read: 0 };
-                broadcastNewMessage(wsClients, newMessage);
-
-                // Re-schedule normal loop
-                db.updateCharacter(character.id, { pressure_level: Math.min(4, character.pressure_level + 1) });
-            }
-        } catch (e) {
-            console.error(`[Engine] Jealousy fail for ${character.id}:`, e.message);
-        }
-        scheduleNext(db.getCharacter(character.id), wsClients);
+    async function triggerJealousyMessage(character, wsClients, rivalName = 'someone') {
+        console.log(`[Engine] Jealousy message for ${character.name} (rival: ${rivalName}, level: ${character.jealousy_level})`);
+        // triggerMessage with isUserReply=false so it also escalates pressure
+        await triggerMessage(character, wsClients, false);
     }
 
     // ─── Group Proactive Messaging ───────────────────────────────────────────────
@@ -839,4 +943,4 @@ Guidelines:
     return engineInstance;
 }
 
-module.exports = { getEngine };
+module.exports = { getEngine, engineCache };
