@@ -7,7 +7,12 @@ build/
 # Server specific
 server/.env
 data/
+server/data/
 server/uploads/
+*.db
+*.db-wal
+*.db-shm
+.jwt_secret
 
 # Client specific
 client/dist/

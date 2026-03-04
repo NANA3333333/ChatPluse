@@ -12,12 +12,30 @@ const { WebSocketServer } = require('ws');
 const { getUserDb } = require('./db');
 const authDb = require('./authDb');
 const jwt = require('jsonwebtoken');
-const JWT_SECRET = process.env.JWT_SECRET || 'chatpulse_super_secret_key';
+const path = require('path');
+const fs = require('fs');
+
+// Generate or load a persistent JWT secret (never hardcoded in source)
+function getJwtSecret() {
+    if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
+    const secretPath = path.join(__dirname, 'data', '.jwt_secret');
+    try {
+        if (fs.existsSync(secretPath)) {
+            return fs.readFileSync(secretPath, 'utf8').trim();
+        }
+    } catch (e) { /* fall through to generate */ }
+    // Generate a strong 256-bit random secret and persist
+    const dataDir = path.join(__dirname, 'data');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    const secret = require('crypto').randomBytes(32).toString('base64url');
+    fs.writeFileSync(secretPath, secret, { mode: 0o600 });
+    console.log('[Auth] Generated new JWT secret and saved to data/.jwt_secret');
+    return secret;
+}
+const JWT_SECRET = getJwtSecret();
 const { getEngine } = require('./engine');
 const { getMemory } = require('./memory');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { callLLM } = require('./llm');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
@@ -238,6 +256,7 @@ const pluginContext = {
     getEngine,
     getMemory,
     callLLM,
+    JWT_SECRET,
     hooks: {}  // DLCs register late-binding callbacks here
 };
 

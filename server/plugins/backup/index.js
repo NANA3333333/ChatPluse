@@ -6,10 +6,7 @@ const archiver = require('archiver');
 const unzipper = require('unzipper');
 
 module.exports = function (app, pluginContext) {
-    const { getMemory, getUserDb, getEngine, getWsClients, authMiddleware } = pluginContext;
-
-    // Use a hardcoded or configured secret, same as index.js
-    const JWT_SECRET = process.env.JWT_SECRET || 'chatpulse_super_secret_key';
+    const { getMemory, getUserDb, getEngine, getWsClients, authMiddleware, JWT_SECRET } = pluginContext;
 
     // Resolve path to the shared uploads directory (server/public/uploads)
     const uploadsDir = path.join(__dirname, '..', '..', 'public', 'uploads');

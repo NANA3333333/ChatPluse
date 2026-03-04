@@ -2,6 +2,7 @@ const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 
 const dataDir = path.join(__dirname, '..', 'data');
 if (!fs.existsSync(dataDir)) {
@@ -43,8 +44,13 @@ function initAuthDb() {
     // Auto-seed root admin account "Nana"
     const rootUser = db.prepare('SELECT id FROM users WHERE username = ?').get('Nana');
     if (!rootUser) {
+        const adminPw = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString('base64url');
+        if (!process.env.ADMIN_PASSWORD) {
+            console.log(`[AuthDB] ⚠️  No ADMIN_PASSWORD env var set. Generated random admin password: ${adminPw}`);
+            console.log('[AuthDB] Set ADMIN_PASSWORD environment variable to use a fixed password.');
+        }
         const id = generateId();
-        const hash = bcrypt.hashSync('lsd554951', 10);
+        const hash = bcrypt.hashSync(adminPw, 10);
         db.prepare('INSERT INTO users (id, username, password_hash, created_at) VALUES (?, ?, ?, ?)').run(id, 'Nana', hash, Date.now());
         console.log('[AuthDB] Root user Nana seeded successfully.');
     }
@@ -58,6 +64,11 @@ function generateId() {
 
 function createUser(username, password, inviteCode) {
     try {
+        // Password strength validation
+        if (!password || password.length < 6) {
+            return { success: false, error: 'Password must be at least 6 characters long' };
+        }
+
         if (username !== 'Nana') {
             if (!inviteCode) return { success: false, error: 'Invite code is required' };
             const invite = db.prepare('SELECT used_by FROM invite_codes WHERE code = ?').get(inviteCode);
@@ -99,11 +110,8 @@ function getUserById(id) {
 }
 
 function generateInviteCode() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    let code = '';
-    for (let i = 0; i < 8; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    // Use crypto for unpredictable invite codes (12 chars)
+    const code = crypto.randomBytes(9).toString('base64url').substring(0, 12).toUpperCase();
     db.prepare('INSERT INTO invite_codes (code, created_at) VALUES (?, ?)').run(code, Date.now());
     return code;
 }
