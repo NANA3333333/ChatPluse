@@ -215,7 +215,7 @@ module.exports = function initCityDb(db) {
         }
 
         const configDefaults = [
-            ['dlc_enabled', '0'],
+            ['dlc_enabled', '1'],
             ['metabolism_rate', '20'],
             ['inflation', '1.0'],
             ['work_bonus', '1.0'],
@@ -246,7 +246,7 @@ module.exports = function initCityDb(db) {
     try { db.prepare("ALTER TABLE city_items ADD COLUMN stock INTEGER DEFAULT -1").run(); } catch (e) { }
 
     // Migration: force-enable DLC for existing users (old default was '0')
-    // disabled: try { db.prepare("UPDATE city_config SET value = '1' WHERE key = 'dlc_enabled' AND value = '0'").run(); } catch (e) { }
+    try { db.prepare("UPDATE city_config SET value = '1' WHERE key = 'dlc_enabled' AND value = '0'").run(); } catch (e) { }
 
     // Migration: delete deprecated clock settings that pollute the UI
     try { db.prepare("DELETE FROM city_config WHERE key IN ('tick_label', 'tick_interval_minutes')").run(); } catch (e) { }
