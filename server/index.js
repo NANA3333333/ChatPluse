@@ -34,7 +34,7 @@ function getJwtSecret() {
 }
 const JWT_SECRET = getJwtSecret();
 const { getEngine } = require('./engine');
-const { getMemory } = require('./memory');
+const { getMemory, extractMemoryFromContext, setWsClientsResolver } = require('./memory');
 const multer = require('multer');
 const { callLLM } = require('./llm');
 const helmet = require('helmet');
@@ -116,6 +116,9 @@ function getWsClients(userId) {
     }
     return userWsClients.get(userId);
 }
+
+// Inject the global WS resolver into memory.js so it can broadcast without circular dependencies
+setWsClientsResolver(getWsClients);
 
 wss.on('connection', (ws) => {
     console.log('[WS] Frontend client connected.');

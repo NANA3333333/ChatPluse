@@ -9,6 +9,11 @@ const { buildUniversalContext } = require('./contextBuilder');
 let pipeline = null;
 let extractionDisabled = false;
 
+let globalWsClientsResolver = null;
+function setWsClientsResolver(resolver) {
+    globalWsClientsResolver = resolver;
+}
+
 async function getExtractor() {
     if (extractionDisabled) return null;
     if (!pipeline) {
@@ -541,13 +546,14 @@ Output exactly in this JSON format (and nothing else):
             console.log(`[Memory] Stored new memory for ${characterId}: ${memoryData.event} `);
 
             // Broadcast real-time update to connected clients
-            const { getWsClients } = require('./engine');
-            const wsClients = getWsClients(userId);
-            if (wsClients) {
-                const eventPayload = JSON.stringify({ type: 'memory_update', characterId: characterId });
-                wsClients.forEach(c => {
-                    if (c.readyState === 1) c.send(eventPayload);
-                });
+            if (globalWsClientsResolver) {
+                const wsClients = globalWsClientsResolver(userId);
+                if (wsClients) {
+                    const eventPayload = JSON.stringify({ type: 'memory_update', characterId: characterId });
+                    wsClients.forEach(c => {
+                        if (c.readyState === 1) c.send(eventPayload);
+                    });
+                }
             }
         } catch (e) {
             console.error(`[Memory] Save failed for ${characterId}: `, e.message);
@@ -567,5 +573,4 @@ Output exactly in this JSON format (and nothing else):
     memoryCache.set(userId, instance);
     return instance;
 }
-
-module.exports = { getMemory };
+module.exports = { getMemory, setWsClientsResolver };
