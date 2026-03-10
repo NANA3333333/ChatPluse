@@ -239,19 +239,16 @@ module.exports = function initCityDb(db) {
         }
     }
 
-    // Call seedDefaults on boot
-    seedDefaults(db);
-
     // Migration: add stock to city_items for existing users
     try { db.prepare("ALTER TABLE city_items ADD COLUMN stock INTEGER DEFAULT -1").run(); } catch (e) { }
-
-    // Migration: force-enable DLC for existing users (old default was '0')
-    // disabled: try { db.prepare("UPDATE city_config SET value = '1' WHERE key = 'dlc_enabled' AND value = '0'").run(); } catch (e) { }
 
     // Migration: delete deprecated clock settings that pollute the UI
     try { db.prepare("DELETE FROM city_config WHERE key IN ('tick_label', 'tick_interval_minutes')").run(); } catch (e) { }
 
     console.log('[City DB] 已添加并清理过时配置');
+
+    // Call seedDefaults on boot
+    seedDefaults(db);
 
     // Migration: city-to-chat integration config (probability sliders)
     const hasChatProb = db.prepare("SELECT value FROM city_config WHERE key = 'city_chat_probability'").get();
