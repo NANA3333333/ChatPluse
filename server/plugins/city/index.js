@@ -681,7 +681,7 @@ ${universalContextB?.preamble || ''}
                 messages: [
                     { role: 'system', content: '你是一个城市生活模拟角色扮演引擎。你必须严格按照用户提供的JSON格式返回结果，不要输出任何JSON以外的文字、解释或markdown。只返回一个完整的JSON对象，包含 action、log、chat、moment、diary 五个字段。' },
                     { role: 'user', content: prompt }
-                ], maxTokens: 1200, temperature: 0.8
+                ], maxTokens: 2500, temperature: 0.8
             });
             let codeMatch = null;
             let richNarrations = null;
@@ -1075,7 +1075,7 @@ ${logsContext ? '\\n' + logsContext : ''}`;
                     messages: [
                         { role: 'system', content: '你是一个城市社交遭遇模拟器。请用第三人称描述角色说的话或做的动作（50字左右）。只输出行为描述文本，不要JSON或其他格式。' },
                         { role: 'user', content: prompt }
-                    ], maxTokens: 600, temperature: 0.85
+                    ], maxTokens: 1500, temperature: 0.85
                 });
                 const cleanReply = reply.replace(/\n+/g, ' ').replace(/"/g, "'").trim();
                 simulationLogs.push(`【${speaker.name}的行动】: ${cleanReply || '[无响应]'}`);
@@ -1134,7 +1134,7 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
         try {
             const reply = await callLLM({
                 endpoint: systemApiChar.api_endpoint, key: systemApiChar.api_key, model: systemApiChar.model_name,
-                messages: [{ role: 'user', content: systemPrompt }], maxTokens: 2500, temperature: 0.7
+                messages: [{ role: 'user', content: systemPrompt }], maxTokens: 4000, temperature: 0.7
             });
             const match = reply.match(/\{[\s\S]*\}/);
             if (match) {
@@ -1270,7 +1270,7 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
                 messages: [
                     { role: 'system', content: '你是一个日程规划助手。只返回一个JSON数组，每个元素包含hour、action和reason三个字段。不要输出任何JSON以外的文字或markdown格式。' },
                     { role: 'user', content: prompt }
-                ], maxTokens: 500, temperature: 0.7
+                ], maxTokens: 1000, temperature: 0.7
             });
             // Extract JSON from reply — strip markdown code fences if present
             const cleaned = reply.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
@@ -1379,7 +1379,7 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
             const reply = await callLLM({
                 endpoint: aiChar.api_endpoint, key: aiChar.api_key, model: aiChar.model_name,
                 messages: [{ role: 'user', content: fullPrompt }],
-                maxTokens: 800, temperature: 0.9
+                maxTokens: 1500, temperature: 0.9
             });
 
             // Extract JSON from reply
@@ -1814,7 +1814,7 @@ ${missedTaskText}
             try {
                 const reply = await callLLM({
                     endpoint: char.api_endpoint, key: char.api_key, model: char.model_name,
-                    messages: [{ role: 'user', content: prompt }], maxTokens: 800, temperature: 0.95
+                    messages: [{ role: 'user', content: prompt }], maxTokens: 1500, temperature: 0.95
                 });
 
                 const jsonMatch = reply.match(/\{[\s\S]*\}/);

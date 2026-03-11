@@ -226,6 +226,14 @@ module.exports = function initCityDb(db) {
             ['city_stranger_meet_prob', '20'],     // Z: Stranger encounter probability (%)
             ['mayor_enabled', '0'],
             ['mayor_interval_hours', '6'],
+            ['mayor_model_char_id', 'auto'],
+            ['mayor_custom_endpoint', ''],
+            ['mayor_custom_key', ''],
+            ['mayor_custom_model', ''],
+            ['city_chat_probability', '0'],
+            ['city_moment_probability', '30'],
+            ['city_diary_probability', '100'],
+            ['city_memory_probability', '100'],
             ['mayor_prompt', `你是这座城市的"市长AI"（The Mayor），拥有上帝视角，负责管理整座城市的经济、天气、突发事件和悬赏任务。\n\n你必须根据以下实时数据来做出决策：\n1. 查看昨天的商品销量和库存，决定今天的物价涨跌\n2. 随机生成1-3个城市事件（天气变化、限时活动、突发事故等）\n3. 在布告栏发布1-2个悬赏任务供市民接单\n\n请严格按照以下JSON格式回复，不要添加任何其他文字：\n{\n  "price_changes": [{"item_id": "bread", "new_price": 5, "reason": "供不应求"}],\n  "events": [{"type": "weather|economy|random|disaster", "title": "事件标题", "emoji": "🌧️", "description": "具体描述", "effect": {"district": "park", "cal_bonus": -50, "money_bonus": 0}, "duration_hours": 12}],\n  "quests": [{"title": "任务名", "emoji": "📜", "description": "任务描述", "reward_gold": 50, "reward_cal": 0, "difficulty": "easy|normal|hard"}],\n  "announcement": "今日城市广播内容（一句话）"\n}`]
         ];
 
