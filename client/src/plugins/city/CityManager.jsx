@@ -233,7 +233,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                     <h3 style={{ margin: 0, fontSize: '16px' }}>🗺️ 城市分区</h3>
                     <button style={btnStyle('#4caf50')} onClick={() => setEditing({ ...EMPTY_DISTRICT })}><Plus size={14} /> 新增</button>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px', padding: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '10px', padding: '12px' }}>
                     {districts.map(d => (
                         <div key={d.id} style={{ padding: '12px', borderRadius: '10px', border: '1px solid #eee', backgroundColor: d.is_enabled ? '#fff' : '#f9f9f9', opacity: d.is_enabled ? 1 : 0.55 }}>
                             <div style={{ fontSize: '24px', marginBottom: '4px' }}>{d.emoji}</div>
@@ -260,7 +260,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                     <h3 style={{ margin: 0, fontSize: '16px' }}>🛒 商品目录</h3>
                     <button style={btnStyle('#4caf50')} onClick={() => setEditingItem({ ...EMPTY_ITEM })}><Plus size={14} /> 新增商品</button>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(160px, 1fr))', gap: '8px', padding: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px, 1fr))', gap: '8px', padding: '12px' }}>
                     {items.map(it => (
                         <div key={it.id} style={{ padding: '10px', borderRadius: '8px', border: '1px solid #eee', backgroundColor: it.is_available ? '#fff' : '#f9f9f9', opacity: it.is_available ? 1 : 0.5 }}>
                             <div style={{ fontSize: '22px', marginBottom: '2px' }}>{it.emoji}</div>
@@ -285,7 +285,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                 <div style={headerStyle}>
                     <h3 style={{ margin: 0, fontSize: '16px' }}>⚙️ 经济调控</h3>
                 </div>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: '10px', padding: '12px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '10px', padding: '12px' }}>
                     {Object.entries(config).filter(([k]) => !HIDDEN_CONFIG_KEYS.includes(k)).map(([key, value]) => (
                         <div key={key} style={{ padding: '8px', border: '1px solid #eee', borderRadius: '6px' }}>
                             <label style={labelStyle}>{CONFIG_LABELS[key] || key}</label>
@@ -498,8 +498,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                     </div>
                     {mayorModelMode === 'custom' && (
                         <div style={{ padding: '10px', backgroundColor: '#fafafa', borderRadius: '8px', border: '1px dashed #ccc', marginBottom: '12px' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) auto', gap: '8px', alignItems: 'flex-end' }}>
-                                <div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', alignItems: 'flex-end' }}>
+                                <div style={{ flex: '1 1 200px' }}>
                                     <label style={labelStyle}>API Endpoint</label>
                                     <input style={inputStyle} value={customEndpoint} onChange={e => setCustomEndpoint(e.target.value)} placeholder="https://api.openai.com/v1/chat/completions" />
                                 </div>
@@ -507,11 +507,11 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                                     <label style={labelStyle}>API Key</label>
                                     <input style={inputStyle} type="password" value={customKey} onChange={e => setCustomKey(e.target.value)} placeholder="sk-..." />
                                 </div>
-                                <div>
+                                <div style={{ flex: '1 1 120px' }}>
                                     <label style={labelStyle}>模型名称</label>
                                     <input style={inputStyle} value={customModel} onChange={e => setCustomModel(e.target.value)} placeholder="gpt-4o" />
                                 </div>
-                                <div>
+                                <div style={{ width: '100%', display: 'flex', justifyContent: 'flex-end' }}>
                                     <button style={btnStyle('#9c27b0')} onClick={saveCustomApi}><Save size={12} /> 保存</button>
                                 </div>
                             </div>
@@ -539,8 +539,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                             ) : <div>❌ {mayorResult.reason || mayorResult.error || '失败'}</div>}
                         </div>
                     )}
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: '12px' }}>
-                        <div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
+                        <div style={{ flex: '1 1 280px' }}>
                             <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px' }}>📢 活跃事件 ({events.length})</div>
                             {events.length === 0 ? <div style={{ fontSize: '11px', color: '#bbb' }}>暂无事件</div> : events.map(e => (
                                 <div key={e.id} style={{ padding: '6px', border: '1px solid #eee', borderRadius: '6px', marginBottom: '4px', fontSize: '11px', display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
@@ -553,7 +553,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                                 </div>
                             ))}
                         </div>
-                        <div>
+                        <div style={{ flex: '1 1 280px' }}>
                             <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px' }}>📜 悬赏任务 ({quests.length})</div>
                             {quests.length === 0 ? <div style={{ fontSize: '11px', color: '#bbb' }}>暂无任务</div> : quests.map(q => (
                                 <div key={q.id} style={{ padding: '6px', border: '1px solid #eee', borderRadius: '6px', marginBottom: '4px', fontSize: '11px', display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
@@ -608,8 +608,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
 
             {
                 editing && (
-                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }} onClick={(e) => { if (e.target === e.currentTarget) setEditing(null); }}>
-                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '24px', width: '480px', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}>
+                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999, padding: '16px', boxSizing: 'border-box' }} onClick={(e) => { if (e.target === e.currentTarget) setEditing(null); }}>
+                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '24px', width: '100%', maxWidth: '480px', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.2)', boxSizing: 'border-box' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                                 <h3 style={{ margin: 0 }}>{editing.id ? `编辑：${editing.name}` : '新建分区'}</h3>
                                 <button onClick={() => setEditing(null)} style={{ border: 'none', background: 'none', cursor: 'pointer' }}><X size={20} /></button>
@@ -710,8 +710,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
 
             {
                 editingItem && (
-                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }} onClick={(e) => { if (e.target === e.currentTarget) setEditingItem(null); }}>
-                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '24px', width: '440px', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}>
+                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999, padding: '16px', boxSizing: 'border-box' }} onClick={(e) => { if (e.target === e.currentTarget) setEditingItem(null); }}>
+                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '24px', width: '100%', maxWidth: '440px', maxHeight: '80vh', overflowY: 'auto', boxShadow: '0 10px 40px rgba(0,0,0,0.2)', boxSizing: 'border-box' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
                                 <h3 style={{ margin: 0 }}>{editingItem.id ? `编辑商品：${editingItem.name}` : '新建商品'}</h3>
                                 <button onClick={() => setEditingItem(null)} style={{ border: 'none', background: 'none', cursor: 'pointer' }}><X size={20} /></button>
@@ -743,8 +743,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
 
             {
                 giveItemTarget && (
-                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }} onClick={(e) => { if (e.target === e.currentTarget) setGiveItemTarget(null); }}>
-                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '20px', width: '360px', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}>
+                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999, padding: '16px', boxSizing: 'border-box' }} onClick={(e) => { if (e.target === e.currentTarget) setGiveItemTarget(null); }}>
+                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '20px', width: '100%', maxWidth: '360px', boxShadow: '0 10px 40px rgba(0,0,0,0.2)', boxSizing: 'border-box' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                                 <h3 style={{ margin: 0, fontSize: '15px' }}>送物品给 {giveItemTarget.charName}</h3>
                                 <button onClick={() => setGiveItemTarget(null)} style={{ border: 'none', background: 'none', cursor: 'pointer' }}><X size={18} /></button>
@@ -764,8 +764,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
             }
             {
                 viewInventory && (
-                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999 }} onClick={(e) => { if (e.target === e.currentTarget) setViewInventory(null); }}>
-                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '20px', width: '400px', maxHeight: '70vh', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 40px rgba(0,0,0,0.2)' }}>
+                    <div style={{ position: 'fixed', inset: 0, backgroundColor: 'rgba(0,0,0,0.4)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 9999, padding: '16px', boxSizing: 'border-box' }} onClick={(e) => { if (e.target === e.currentTarget) setViewInventory(null); }}>
+                        <div style={{ backgroundColor: '#fff', borderRadius: '16px', padding: '20px', width: '100%', maxWidth: '400px', maxHeight: '70vh', display: 'flex', flexDirection: 'column', boxShadow: '0 10px 40px rgba(0,0,0,0.2)', boxSizing: 'border-box' }}>
                             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                                 <h3 style={{ margin: 0, fontSize: '15px', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                     🎒 {viewInventory.charName} 的背包
