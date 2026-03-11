@@ -430,6 +430,24 @@ ${universalContextB?.preamble || ''}
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
+    app.get('/api/city/events', authMiddleware, (req, res) => {
+        try { ensureCityDb(req.db); res.json({ success: true, events: req.db.city.getAllEvents() }); }
+        catch (e) { res.status(500).json({ error: e.message }); }
+    });
+    app.delete('/api/city/events/:id', authMiddleware, (req, res) => {
+        try { ensureCityDb(req.db); req.db.city.deleteEvent(req.params.id); res.json({ success: true }); }
+        catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
+    app.get('/api/city/quests', authMiddleware, (req, res) => {
+        try { ensureCityDb(req.db); res.json({ success: true, quests: req.db.city.getAllQuests() }); }
+        catch (e) { res.status(500).json({ error: e.message }); }
+    });
+    app.delete('/api/city/quests/:id', authMiddleware, (req, res) => {
+        try { ensureCityDb(req.db); req.db.city.deleteQuest(req.params.id); res.json({ success: true }); }
+        catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
     // Admin: Wipe ALL city data (logs, inventory, districts, etc., and reset characters)
     app.delete('/api/city/data/wipe', authMiddleware, (req, res) => {
         try {
