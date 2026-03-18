@@ -22,11 +22,12 @@ function init(app, context) {
     router.post('/scheduler', authMiddleware, (req, res) => {
         try {
             const db = getSchedulerDb(req.user.id);
-            const { character_id, cron_expr, task_prompt, action_type, is_enabled } = req.body;
+            const { character_id, cron_expr, task_prompt, action_type, is_enabled, batch_size } = req.body;
             if (!character_id || !cron_expr || !action_type) {
                 return res.status(400).json({ error: 'Missing required fields' });
             }
-            const newId = db.addTask(character_id, cron_expr, task_prompt, action_type, is_enabled);
+            const normalizedBatchSize = Math.max(10, Math.min(500, Number(batch_size) || 80));
+            const newId = db.addTask(character_id, cron_expr, task_prompt, action_type, is_enabled, normalizedBatchSize);
             res.json({ success: true, id: newId });
         } catch (e) {
             console.error('[Scheduler] POST task error:', e);
@@ -38,8 +39,9 @@ function init(app, context) {
     router.put('/scheduler/:id', authMiddleware, (req, res) => {
         try {
             const db = getSchedulerDb(req.user.id);
-            const { character_id, cron_expr, task_prompt, action_type, is_enabled } = req.body;
-            db.updateTask(req.params.id, character_id, cron_expr, task_prompt, action_type, is_enabled);
+            const { character_id, cron_expr, task_prompt, action_type, is_enabled, batch_size } = req.body;
+            const normalizedBatchSize = Math.max(10, Math.min(500, Number(batch_size) || 80));
+            db.updateTask(req.params.id, character_id, cron_expr, task_prompt, action_type, is_enabled, normalizedBatchSize);
             res.json({ success: true });
         } catch (e) {
             console.error('[Scheduler] PUT task error:', e);
@@ -126,7 +128,9 @@ function init(app, context) {
                             if (memory.aggregateDailyMemories) {
                                 console.log(`[Scheduler] Starting daily memory aggregation for ${char.name}...`);
                                 try {
-                                    await memory.aggregateDailyMemories(char, 24);
+                                    await memory.aggregateDailyMemories(char, 24, {
+                                        batchSize: Math.max(10, Math.min(500, Number(task.batch_size) || 80))
+                                    });
                                 } catch (e) {
                                     console.error(`[Scheduler] Memory aggregation failed for ${char.name}:`, e);
                                 }
@@ -138,24 +142,30 @@ function init(app, context) {
                 // --- 2. Background System Sweep (Threshold Overflow Memory) ---
                 if (memory.sweepOverflowMemories) {
                     const allChars = userDb.getCharacters();
-                    const olderThanMs = Date.now() - (3 * 60 * 60 * 1000); // 3 hours ago
 
                     for (const char of allChars) {
                         if (!char.is_blocked) {
                             const sweepLimit = char.sweep_limit || 30;
-                            // 1. Count private unsummarized messages
-                            let unsummarizedCount = userDb.countUnsummarizedMessages(char.id, olderThanMs);
+                            const privateWindow = char.context_msg_limit || 60;
+                            const groups = userDb.getGroups().filter(g => g.members.some(m => m.member_id === char.id));
+                            const groupWindows = groups.map(g => ({ groupId: g.id, windowLimit: g.inject_limit ?? 5 }));
 
-                            // 2. Count group unsummarized messages if we haven't hit limit
+                            if (!char.sweep_initialized && typeof userDb.initializeSweepBaseline === 'function') {
+                                const initialized = userDb.initializeSweepBaseline(char.id, privateWindow, groupWindows);
+                                console.log(`[Scheduler] Initialized W baseline for ${char.name}, marked ${initialized} old messages as digested.`);
+                                continue;
+                            }
+
+                            let unsummarizedCount = userDb.countOverflowMessages(char.id, privateWindow);
+
                             if (unsummarizedCount < sweepLimit) {
-                                const groups = userDb.getGroups().filter(g => g.members.some(m => m.member_id === char.id));
                                 for (const g of groups) {
-                                    unsummarizedCount += userDb.countUnsummarizedGroupMessages(g.id, olderThanMs);
+                                    const groupWindow = g.inject_limit ?? 5;
+                                    unsummarizedCount += userDb.countOverflowGroupMessages(g.id, groupWindow);
                                     if (unsummarizedCount >= sweepLimit) break;
                                 }
                             }
 
-                            // 3. Trigger sweep if threshold is met
                             if (unsummarizedCount >= sweepLimit) {
                                 console.log(`[Scheduler] Threshold reached (${unsummarizedCount} >= ${sweepLimit}) for ${char.name}. Triggering memory sweep.`);
                                 memory.sweepOverflowMemories(char).catch(err => {

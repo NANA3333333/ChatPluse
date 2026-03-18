@@ -1,4 +1,4 @@
-const Database = require('better-sqlite3');
+﻿const Database = require('better-sqlite3');
 const path = require('path');
 const fs = require('fs');
 
@@ -46,21 +46,11 @@ function getUserDb(userId) {
             hidden_state TEXT DEFAULT '',
             jealousy_level INTEGER DEFAULT 0,
             jealousy_target TEXT DEFAULT '',
-            city_reply_pending INTEGER DEFAULT 0,
-            city_ignore_streak INTEGER DEFAULT 0,
-            city_last_outreach_at INTEGER DEFAULT 0,
-            city_post_ignore_reaction INTEGER DEFAULT 0,
             stat_int INTEGER DEFAULT 50,
             stat_sta INTEGER DEFAULT 50,
             stat_cha INTEGER DEFAULT 50,
             sweep_limit INTEGER DEFAULT 30,
-            sweep_initialized INTEGER DEFAULT 1,
-            sweep_last_error TEXT DEFAULT '',
-            sweep_last_run_at INTEGER DEFAULT 0,
-            sweep_last_success_at INTEGER DEFAULT 0,
-            sweep_last_saved_count INTEGER DEFAULT 0,
-            impression_q_limit INTEGER DEFAULT 3,
-            context_msg_limit INTEGER DEFAULT 60
+            impression_q_limit INTEGER DEFAULT 3
         );
 
         CREATE TABLE IF NOT EXISTS messages (
@@ -87,8 +77,6 @@ function getUserDb(userId) {
             importance INTEGER DEFAULT 5,
             embedding BLOB,
             created_at INTEGER NOT NULL,
-            last_retrieved_at INTEGER,
-            retrieval_count INTEGER DEFAULT 0,
             FOREIGN KEY (character_id) REFERENCES characters(id)
         );
 
@@ -163,7 +151,6 @@ function getUserDb(userId) {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             avatar TEXT,
-            context_msg_limit INTEGER DEFAULT 60,
             created_at INTEGER NOT NULL
         );
 
@@ -248,7 +235,7 @@ function getUserDb(userId) {
 
         // Add emoji for existing DBs (Migration)
         try {
-            db.prepare("ALTER TABLE characters ADD COLUMN emoji TEXT DEFAULT '👤'").run();
+            db.prepare("ALTER TABLE characters ADD COLUMN emoji TEXT DEFAULT '🙂'").run();
         } catch (e) {
             // Ignore error if column already exists
         }
@@ -261,19 +248,6 @@ function getUserDb(userId) {
         // Add banner for existing DBs
         try {
             db.prepare('ALTER TABLE user_profile ADD COLUMN banner TEXT').run();
-        } catch (e) { }
-
-        // Add context_msg_limit for group_chats
-        try {
-            db.prepare('ALTER TABLE group_chats ADD COLUMN context_msg_limit INTEGER DEFAULT 60').run();
-        } catch (e) { }
-
-        // Memory retrieval stats
-        try {
-            db.prepare('ALTER TABLE memories ADD COLUMN last_retrieved_at INTEGER').run();
-        } catch (e) { }
-        try {
-            db.prepare('ALTER TABLE memories ADD COLUMN retrieval_count INTEGER DEFAULT 0').run();
         } catch (e) { }
 
         // Add initial_affinity for existing DBs (migration for the chat wipe bug)
@@ -300,12 +274,6 @@ function getUserDb(userId) {
         } catch (e) {
         }
 
-        // Add context_msg_limit for characters
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN context_msg_limit INTEGER DEFAULT 60').run();
-        } catch (e) {
-        }
-
         // Add master toggles for systems
         try {
             db.prepare('ALTER TABLE characters ADD COLUMN sys_proactive INTEGER DEFAULT 1').run();
@@ -324,29 +292,6 @@ function getUserDb(userId) {
         // Add sweep_limit to characters
         try {
             db.prepare('ALTER TABLE characters ADD COLUMN sweep_limit INTEGER DEFAULT 30').run();
-        } catch (e) {
-        }
-
-        // Existing characters should start W from zero after upgrade; new characters default to initialized
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN sweep_initialized INTEGER DEFAULT 1').run();
-            db.prepare('UPDATE characters SET sweep_initialized = 0').run();
-        } catch (e) {
-        }
-        try {
-            db.prepare("ALTER TABLE characters ADD COLUMN sweep_last_error TEXT DEFAULT ''").run();
-        } catch (e) {
-        }
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN sweep_last_run_at INTEGER DEFAULT 0').run();
-        } catch (e) {
-        }
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN sweep_last_success_at INTEGER DEFAULT 0').run();
-        } catch (e) {
-        }
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN sweep_last_saved_count INTEGER DEFAULT 0').run();
         } catch (e) {
         }
 
@@ -502,14 +447,9 @@ function getUserDb(userId) {
         // Enhanced jealousy system
         try { db.prepare('ALTER TABLE characters ADD COLUMN jealousy_level INTEGER DEFAULT 0').run(); } catch (e) { }
         try { db.prepare("ALTER TABLE characters ADD COLUMN jealousy_target TEXT DEFAULT ''").run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN city_reply_pending INTEGER DEFAULT 0').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN city_ignore_streak INTEGER DEFAULT 0').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN city_last_outreach_at INTEGER DEFAULT 0').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN city_post_ignore_reaction INTEGER DEFAULT 0').run(); } catch (e) { }
 
         // City DLC: per-character toggle for city event notifications to private chat
         try { db.prepare('ALTER TABLE characters ADD COLUMN sys_city_notify INTEGER DEFAULT 0').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN sys_city_social INTEGER DEFAULT 1').run(); } catch (e) { }
         // City DLC: schedule & activity frequency
         try { db.prepare('ALTER TABLE characters ADD COLUMN is_scheduled INTEGER DEFAULT 1').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN city_action_frequency INTEGER DEFAULT 1').run(); } catch (e) { }
@@ -522,7 +462,7 @@ function getUserDb(userId) {
         console.log('[DB] Database initialized successfully.');
     }
 
-    // ─── Character Queries ──────────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Character Queries 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function getCharacters() {
         return db.prepare('SELECT * FROM characters').all();
@@ -538,11 +478,11 @@ function getUserDb(userId) {
         'memory_model_name', 'interval_min', 'interval_max', 'affinity', 'initial_affinity',
         'status', 'pressure_level', 'last_user_msg_time', 'is_blocked', 'system_prompt', 'max_tokens',
         'sys_proactive', 'sys_timer', 'sys_pressure', 'sys_jealousy', 'is_diary_unlocked', 'diary_password', 'wallet', 'emoji', 'last_moment_at',
-        'jealousy_level', 'jealousy_target', 'city_reply_pending', 'city_ignore_streak', 'city_last_outreach_at', 'city_post_ignore_reaction',
-        'stat_int', 'stat_sta', 'stat_cha', 'sweep_limit', 'sweep_last_error', 'sweep_last_run_at', 'sweep_last_success_at', 'sweep_last_saved_count',
+        'jealousy_level', 'jealousy_target',
+        'stat_int', 'stat_sta', 'stat_cha', 'sweep_limit',
         // City DLC fields
-        'calories', 'city_status', 'location', 'education', 'sys_survival', 'sys_city_notify', 'sys_city_social',
-        'impression_q_limit', 'is_scheduled', 'city_action_frequency', 'context_msg_limit'
+        'calories', 'city_status', 'location', 'education', 'sys_survival', 'sys_city_notify',
+        'impression_q_limit', 'is_scheduled', 'city_action_frequency'
     ];
 
     // Generates a memorable random diary password (4-digit number)
@@ -551,7 +491,7 @@ function getUserDb(userId) {
     }
 
     function updateCharacter(id, data) {
-        // Filter out 'id' from data keys — it's always passed as a separate parameter
+        // Filter out 'id' from data keys 鈥?it's always passed as a separate parameter
         const fields = Object.keys(data).filter(k => characterColumns.includes(k) && k !== 'id');
         if (fields.length === 0) return;
 
@@ -582,7 +522,7 @@ function getUserDb(userId) {
             // Ensure emoji has a default
             if (!fields.includes('emoji')) {
                 fields.push('emoji');
-                values.push('👤');
+                values.push('🙂');
             }
 
             const placeholders = fields.map(() => '?').join(', ');
@@ -613,7 +553,7 @@ function getUserDb(userId) {
         db.prepare('UPDATE characters SET hidden_state = ? WHERE id = ?').run(hidden_state || '', id);
     }
 
-    // ─── Message Queries ────────────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Message Queries 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function getMessages(characterId, limit = 100) {
         return db.prepare('SELECT * FROM messages WHERE character_id = ? ORDER BY id DESC LIMIT ?')
@@ -627,7 +567,7 @@ function getUserDb(userId) {
             .reverse();
     }
 
-    // Returns messages excluding hidden ones — used for LLM context
+    // Returns messages excluding hidden ones 鈥?used for LLM context
     // Pass limit=0 to get ALL visible messages (no cap)
     function getVisibleMessages(characterId, limit = 0) {
         if (limit > 0) {
@@ -679,59 +619,6 @@ function getUserDb(userId) {
         const row = db.prepare('SELECT COUNT(*) as count FROM messages WHERE character_id = ? AND hidden = 0 AND is_summarized = 0 AND timestamp < ?')
             .get(characterId, olderThanTimestamp);
         return row ? row.count : 0;
-    }
-
-    function getOverflowMessages(characterId, windowLimit = 0, limit = 50) {
-        if (windowLimit <= 0) return [];
-        return db.prepare(`
-            SELECT * FROM messages
-            WHERE character_id = ?
-              AND hidden = 0
-              AND is_summarized = 0
-              AND id NOT IN (
-                SELECT id FROM messages
-                WHERE character_id = ? AND hidden = 0
-                ORDER BY id DESC
-                LIMIT ?
-              )
-            ORDER BY timestamp ASC
-            LIMIT ?
-        `).all(characterId, characterId, windowLimit, limit);
-    }
-
-    function countOverflowMessages(characterId, windowLimit = 0) {
-        if (windowLimit <= 0) return 0;
-        const row = db.prepare(`
-            SELECT COUNT(*) as count FROM messages
-            WHERE character_id = ?
-              AND hidden = 0
-              AND is_summarized = 0
-              AND id NOT IN (
-                SELECT id FROM messages
-                WHERE character_id = ? AND hidden = 0
-                ORDER BY id DESC
-                LIMIT ?
-              )
-        `).get(characterId, characterId, windowLimit);
-        return row ? row.count : 0;
-    }
-
-    function markOverflowMessagesSummarized(characterId, windowLimit = 0) {
-        if (windowLimit <= 0) return 0;
-        const info = db.prepare(`
-            UPDATE messages
-            SET is_summarized = 1
-            WHERE character_id = ?
-              AND hidden = 0
-              AND is_summarized = 0
-              AND id NOT IN (
-                SELECT id FROM messages
-                WHERE character_id = ? AND hidden = 0
-                ORDER BY id DESC
-                LIMIT ?
-              )
-        `).run(characterId, characterId, windowLimit);
-        return info ? info.changes : 0;
     }
 
     function markMessagesSummarized(messageIds) {
@@ -806,17 +693,10 @@ function getUserDb(userId) {
         return { character, messages, memories, moments };
     }
 
-    // ─── Memory Queries ─────────────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Memory Queries 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function getMemories(characterId) {
-        return db.prepare(`
-            SELECT * FROM memories
-            WHERE character_id = ?
-            ORDER BY
-                CASE WHEN last_retrieved_at IS NULL THEN 1 ELSE 0 END ASC,
-                last_retrieved_at DESC,
-                created_at DESC
-        `).all(characterId);
+        return db.prepare('SELECT * FROM memories WHERE character_id = ? ORDER BY created_at DESC').all(characterId);
     }
 
     function getMemory(id) {
@@ -844,22 +724,7 @@ function getUserDb(userId) {
         db.prepare('DELETE FROM memories WHERE id = ?').run(id);
     }
 
-    function markMemoriesRetrieved(memoryIds = []) {
-        const ids = (memoryIds || []).filter(Boolean);
-        if (ids.length === 0) return;
-        const now = Date.now();
-        const stmt = db.prepare(`
-            UPDATE memories
-            SET last_retrieved_at = ?, retrieval_count = COALESCE(retrieval_count, 0) + 1
-            WHERE id = ?
-        `);
-        const tx = db.transaction((rows) => {
-            for (const id of rows) stmt.run(now, id);
-        });
-        tx(ids);
-    }
-
-    // ─── Phase 3: Moments & Diaries ──────────────────────────────────────────
+    // 鈹€鈹€鈹€ Phase 3: Moments & Diaries 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function getMoments() {
         return db.prepare('SELECT * FROM moments ORDER BY timestamp DESC LIMIT 100').all();
@@ -955,7 +820,7 @@ function getUserDb(userId) {
         return db.prepare('SELECT * FROM moment_comments WHERE moment_id=? ORDER BY timestamp ASC').all(momentId);
     }
 
-    // ─── Moments Context Builder for LLM Injection ─────────────────────────
+    // 鈹€鈹€鈹€ Moments Context Builder for LLM Injection 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     function getMomentsContextForChar(charId, charLimit = 500) {
         if (charLimit <= 0) return '';
 
@@ -976,11 +841,13 @@ function getUserDb(userId) {
             const likers = getLikesForMoment(m.id).map(l => resolveName(l.liker_id));
             const comments = getComments(m.id).map(c => `${resolveName(c.author_id)}: ${c.content}`);
             let line = `  [ID:${m.id}] "${m.content}" (${timeAgo})`;
-            if (likers.length > 0) line += ` ❤️ ${likers.join(', ')}`;
+            if (likers.length > 0) line += ` ❤️ ${likers.join(", ")}`;
             if (comments.length > 0) line += `\n    评论: ${comments.join(' | ')}`;
+            return line;
             return line;
         };
 
+        // Helper: simple time ago
         // Helper: simple time ago
         function formatTimeAgo(ts) {
             const diffMin = Math.floor((Date.now() - ts) / 60000);
@@ -1007,7 +874,7 @@ function getUserDb(userId) {
 
         // Build sections, respecting char limit
         const sections = [
-            { label: `[你的朋友圈]`, moments: ownMoments },
+            { label: '[你的朋友圈]', moments: ownMoments },
             { label: `[${userName}的朋友圈]`, moments: userMoments },
         ];
         // Group friend moments by char
@@ -1035,17 +902,20 @@ function getUserDb(userId) {
         }
 
         // Mark which moments the char has already liked/commented
+        // Mark which moments the char has already liked/commented
         const charLiked = db.prepare('SELECT moment_id FROM moment_likes WHERE liker_id = ?').all(charId).map(r => r.moment_id);
         const charCommented = db.prepare('SELECT DISTINCT moment_id FROM moment_comments WHERE author_id = ?').all(charId).map(r => r.moment_id);
-        if (charLiked.length > 0) result += `\n(你已点赞的朋友圈ID: ${charLiked.join(', ')})`;
-        if (charCommented.length > 0) result += `\n(你已评论过的朋友圈ID: ${charCommented.join(', ')})`;
+        if (charLiked.length > 0) result += `\n(你已点赞的朋友圈 ID: ${charLiked.join(", ")})`;
+        if (charCommented.length > 0) result += `\n(你已评论过的朋友圈 ID: ${charCommented.join(", ")})`;
+
+
 
         result += '\n===========================================';
         return result;
     }
 
 
-    // ─── User Profile ───────────────────────────────────────────────────────
+    // 鈹€鈹€鈹€ User Profile 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function getUserProfile() {
         let profile = db.prepare('SELECT * FROM user_profile WHERE id = ?').get('default');
@@ -1054,75 +924,19 @@ function getUserDb(userId) {
                 .run('default', 'User', 'https://api.dicebear.com/7.x/notionists/svg?seed=User');
             profile = db.prepare('SELECT * FROM user_profile WHERE id = ?').get('default');
         }
-        if (profile) {
-            // Older DBs may still store percentages as whole numbers instead of 0-1 decimals.
-            if (typeof profile.group_skip_rate === 'number' && profile.group_skip_rate > 1) {
-                profile.group_skip_rate = profile.group_skip_rate / 100;
-            }
-            if (typeof profile.jealousy_chance === 'number' && profile.jealousy_chance > 1) {
-                profile.jealousy_chance = profile.jealousy_chance / 100;
-            }
-        }
         return profile;
     }
 
     function updateUserProfile(data) {
-        const allowedFields = ['name', 'avatar', 'banner', 'bio', 'theme', 'custom_css', 'theme_config', 'group_msg_limit', 'group_skip_rate', 'group_proactive_enabled', 'group_interval_min', 'group_interval_max', 'jealousy_chance', 'wallet', 'private_msg_limit_for_group', 'moments_token_limit', 'moments_reaction_rate'];
+        const allowedFields = ['name', 'avatar', 'banner', 'bio', 'theme', 'custom_css', 'theme_config', 'group_msg_limit', 'group_skip_rate', 'group_proactive_enabled', 'group_interval_min', 'group_interval_max', 'jealousy_chance', 'wallet', 'private_msg_limit_for_group', 'moments_token_limit'];
         const fields = Object.keys(data).filter(k => allowedFields.includes(k));
         if (fields.length === 0) return;
-        const normalizedData = { ...data };
-        if (normalizedData.group_skip_rate !== undefined) {
-            normalizedData.group_skip_rate = Math.max(0, Math.min(1, Number(normalizedData.group_skip_rate) || 0));
-        }
-        if (normalizedData.jealousy_chance !== undefined) {
-            normalizedData.jealousy_chance = Math.max(0, Math.min(1, Number(normalizedData.jealousy_chance) || 0));
-        }
-        if (normalizedData.moments_reaction_rate !== undefined) {
-            normalizedData.moments_reaction_rate = Math.max(0, Math.min(100, parseInt(normalizedData.moments_reaction_rate, 10) || 0));
-        }
         const setClause = fields.map(f => `${f} = ?`).join(', ');
-        const values = fields.map(f => normalizedData[f]);
+        const values = fields.map(f => data[f]);
         db.prepare(`UPDATE user_profile SET ${setClause} WHERE id = ?`).run(...values, 'default');
     }
 
-    function getJealousyState(characterId) {
-        const row = db.prepare('SELECT jealousy_level, jealousy_target FROM characters WHERE id = ?').get(characterId);
-        if (!row) return null;
-        return {
-            level: row.jealousy_level || 0,
-            target_id: row.jealousy_target || '',
-            active: (row.jealousy_level || 0) > 0
-        };
-    }
-
-    function getTokenUsageSummary(characterId) {
-        const totals = db.prepare(`
-            SELECT
-                COUNT(*) as request_count,
-                COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-                COALESCE(SUM(completion_tokens), 0) as completion_tokens
-            FROM token_usage
-            WHERE character_id = ?
-        `).get(characterId);
-        const byContext = db.prepare(`
-            SELECT
-                context_type,
-                COUNT(*) as request_count,
-                COALESCE(SUM(prompt_tokens), 0) as prompt_tokens,
-                COALESCE(SUM(completion_tokens), 0) as completion_tokens
-            FROM token_usage
-            WHERE character_id = ?
-            GROUP BY context_type
-        `).all(characterId);
-        return {
-            request_count: totals?.request_count || 0,
-            prompt_tokens: totals?.prompt_tokens || 0,
-            completion_tokens: totals?.completion_tokens || 0,
-            by_context: byContext || []
-        };
-    }
-
-    // ─── Friendship Management ──────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Friendship Management 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     function addFriend(char1Id, char2Id) {
         if (char1Id === char2Id) return false;
         const stmt = db.prepare('INSERT OR IGNORE INTO character_friends (char1_id, char2_id, created_at) VALUES (?, ?, ?)');
@@ -1156,8 +970,8 @@ function getUserDb(userId) {
             db.prepare(`DELETE FROM moment_comments WHERE moment_id IN (${placeholders})`).run(...momentIds);
         }
         // Delete likes/comments BY this char on others' moments
-        db.prepare('DELETE FROM moment_likes WHERE liker_id = ?').run(charId);
-        db.prepare('DELETE FROM moment_comments WHERE author_id = ?').run(charId);
+        db.prepare('DELETE FROM moment_likes WHERE user_id = ?').run(charId);
+        db.prepare('DELETE FROM moment_comments WHERE user_id = ?').run(charId);
     }
 
     function getFriends(charId) {
@@ -1175,7 +989,7 @@ function getUserDb(userId) {
         return !!relation;
     }
 
-    // ─── Group Chat Management ──────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Group Chat Management 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     function createGroup(id, name, memberIds, avatar = null) {
         db.prepare('INSERT INTO group_chats (id, name, avatar, created_at) VALUES (?, ?, ?, ?)').run(id, name, avatar, Date.now());
         const stmt = db.prepare('INSERT OR IGNORE INTO group_members (group_id, member_id, role) VALUES (?, ?, ?)');
@@ -1228,75 +1042,11 @@ function getUserDb(userId) {
         return row ? row.count : 0;
     }
 
-    function getOverflowGroupMessages(groupId, windowLimit = 0, limit = 50) {
-        if (windowLimit <= 0) return [];
-        return db.prepare(`
-            SELECT * FROM group_messages
-            WHERE group_id = ?
-              AND hidden = 0
-              AND is_summarized = 0
-              AND id NOT IN (
-                SELECT id FROM group_messages
-                WHERE group_id = ? AND hidden = 0
-                ORDER BY id DESC
-                LIMIT ?
-              )
-            ORDER BY timestamp ASC
-            LIMIT ?
-        `).all(groupId, groupId, windowLimit, limit);
-    }
-
-    function countOverflowGroupMessages(groupId, windowLimit = 0) {
-        if (windowLimit <= 0) return 0;
-        const row = db.prepare(`
-            SELECT COUNT(*) as count FROM group_messages
-            WHERE group_id = ?
-              AND hidden = 0
-              AND is_summarized = 0
-              AND id NOT IN (
-                SELECT id FROM group_messages
-                WHERE group_id = ? AND hidden = 0
-                ORDER BY id DESC
-                LIMIT ?
-              )
-        `).get(groupId, groupId, windowLimit);
-        return row ? row.count : 0;
-    }
-
-    function markOverflowGroupMessagesSummarized(groupId, windowLimit = 0) {
-        if (windowLimit <= 0) return 0;
-        const info = db.prepare(`
-            UPDATE group_messages
-            SET is_summarized = 1
-            WHERE group_id = ?
-              AND hidden = 0
-              AND is_summarized = 0
-              AND id NOT IN (
-                SELECT id FROM group_messages
-                WHERE group_id = ? AND hidden = 0
-                ORDER BY id DESC
-                LIMIT ?
-              )
-        `).run(groupId, groupId, windowLimit);
-        return info ? info.changes : 0;
-    }
-
     function markGroupMessagesSummarized(messageIds) {
         if (!messageIds || messageIds.length === 0) return 0;
         const placeholders = messageIds.map(() => '?').join(', ');
         const info = db.prepare(`UPDATE group_messages SET is_summarized = 1 WHERE id IN (${placeholders})`).run(...messageIds);
         return info.changes;
-    }
-
-    function initializeSweepBaseline(characterId, privateWindow = 0, groupWindows = []) {
-        let changed = 0;
-        changed += markOverflowMessagesSummarized(characterId, privateWindow);
-        for (const gw of groupWindows || []) {
-            if (!gw || !gw.groupId) continue;
-            changed += markOverflowGroupMessagesSummarized(gw.groupId, gw.windowLimit || 0);
-        }
-        db.prepare('UPDATE characters SET sweep_initialized = 1 WHERE id = ?').run(characterId);
-        return changed;
     }
 
     function addGroupMessage(groupId, senderId, content, senderName = null, senderAvatar = null, metadata = null) {
@@ -1355,7 +1105,7 @@ function getUserDb(userId) {
         return info.changes;
     }
 
-    // ─── Character Management ───────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Character Management 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function deleteCharacter(id) {
         db.prepare('DELETE FROM messages WHERE character_id = ?').run(id);
@@ -1376,7 +1126,7 @@ function getUserDb(userId) {
         db.prepare('DELETE FROM characters WHERE id = ?').run(id);
     }
 
-    // ─── Character Relationships (Inter-char Social System) ────────────────
+    // 鈹€鈹€鈹€ Character Relationships (Inter-char Social System) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function initCharRelationship(sourceId, targetId, affinity, impression, source = 'recommend') {
         const safeImpression = impression || '';
@@ -1387,7 +1137,7 @@ function getUserDb(userId) {
         db.prepare(`INSERT OR REPLACE INTO char_relationships (source_id, target_id, affinity, impression, source) VALUES (?, ?, ?, ?, ?)`)
             .run(sourceId, targetId, affinity, safeImpression, source);
 
-        // Only add history if: impression changed AND (affinity changed by ≥5 OR it's a brand new relationship)
+        // Only add history if: impression changed AND (affinity changed by 鈮? OR it's a brand new relationship)
         const impressionChanged = !existing || existing.impression !== safeImpression;
         const affinityDelta = existing ? Math.abs(affinity - existing.affinity) : 999;
         if (safeImpression.trim() !== '' && impressionChanged && (!existing || affinityDelta >= 5)) {
@@ -1396,7 +1146,7 @@ function getUserDb(userId) {
     }
 
     function getCharRelationship(sourceId, targetId) {
-        // Returns all relationship records between source→target (may have multiple sources)
+        // Returns all relationship records between source鈫抰arget (may have multiple sources)
         const rows = db.prepare('SELECT * FROM char_relationships WHERE source_id = ? AND target_id = ?').all(sourceId, targetId);
         if (rows.length === 0) return null;
         // Merge: total affinity = recommend base + sum of group deltas
@@ -1433,7 +1183,7 @@ function getUserDb(userId) {
                 fields.push('impression = ?');
                 values.push(data.impression);
 
-                // Only log history if impression text actually changed AND affinity shifted by ≥5
+                // Only log history if impression text actually changed AND affinity shifted by 鈮?
                 const affinityDelta = data.affinity !== undefined ? Math.abs(data.affinity - existing.affinity) : 0;
                 if (data.impression !== existing.impression && String(data.impression).trim() !== '' && affinityDelta >= 5) {
                     addCharImpressionHistory(sourceId, targetId, data.impression, `Updated: ${source}`);
@@ -1463,7 +1213,7 @@ function getUserDb(userId) {
         db.prepare('DELETE FROM char_relationships WHERE source = ?').run(`group:${groupId}`);
     }
 
-    // ─── Private Transfer System ──────────────────────────────────────
+    // 鈹€鈹€鈹€ Private Transfer System 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     function createTransfer({ charId, senderId, recipientId, amount, note, messageId }) {
         // Deduct from sender wallet
@@ -1492,7 +1242,7 @@ function getUserDb(userId) {
         const t = db.prepare('SELECT * FROM private_transfers WHERE id = ?').get(transferId);
         if (!t) return { success: false, error: '转账不存在' };
         if (t.claimed) return { success: false, error: '已经领取过了' };
-        if (t.refunded) return { success: false, error: '已退还' };
+        if (t.refunded) return { success: false, error: '已经退回了' };
         if (t.recipient_id !== claimerId) return { success: false, error: '不是这笔转账的收款方' };
 
         db.prepare('UPDATE private_transfers SET claimed = 1, claimed_at = ? WHERE id = ?').run(Date.now(), transferId);
@@ -1519,10 +1269,10 @@ function getUserDb(userId) {
     function refundTransfer(transferId, refunderId) {
         const t = db.prepare('SELECT * FROM private_transfers WHERE id = ?').get(transferId);
         if (!t) return { success: false, error: '转账不存在' };
-        if (t.refunded) return { success: false, error: '已经退还过了' };
+        if (t.refunded) return { success: false, error: '已经退回过了' };
         // Allow sender to refund anytime if still pending, allow recipient to refund anytime
         const canRefund = (refunderId === t.sender_id && !t.claimed) || (refunderId === t.recipient_id);
-        if (!canRefund) return { success: false, error: '无权退还' };
+        if (!canRefund) return { success: false, error: '无权退回' };
 
         db.prepare('UPDATE private_transfers SET refunded = 1, claimed = 0 WHERE id = ?').run(transferId);
 
@@ -1551,7 +1301,7 @@ function getUserDb(userId) {
         return { success: true, amount: t.amount, senderId: t.sender_id };
     }
 
-    // ─── Red Packet System ──────────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Red Packet System 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
     // Generates lucky (拼手气) amounts: random splits of total into N pieces, min 0.01 each
     function generateLuckyAmounts(total, count) {
@@ -1614,7 +1364,7 @@ function getUserDb(userId) {
     function claimRedPacket(packetId, claimerId) {
         const pkt = db.prepare('SELECT * FROM group_red_packets WHERE id = ?').get(packetId);
         if (!pkt) return { success: false, error: '红包不存在' };
-        if (pkt.remaining_count <= 0) return { success: false, error: '红包已被抢光' };
+        if (pkt.remaining_count <= 0) return { success: false, error: '红包已经被抢光' };
 
         const already = db.prepare('SELECT id FROM group_red_packet_claims WHERE packet_id = ? AND claimer_id = ?').get(packetId, claimerId);
         if (already) return { success: false, error: '你已经领过了' };
@@ -1704,9 +1454,6 @@ function getUserDb(userId) {
         getVisibleMessagesSince,
         getUnsummarizedMessages,
         countUnsummarizedMessages,
-        getOverflowMessages,
-        countOverflowMessages,
-        markOverflowMessagesSummarized,
         markMessagesSummarized,
         hideMessagesByRange,
         hideMessagesByIds,
@@ -1723,7 +1470,6 @@ function getUserDb(userId) {
         getMemories,
         getMemory,
         addMemory,
-        markMemoriesRetrieved,
         updateMemory,
         deleteMemory,
         getMoments,
@@ -1743,8 +1489,6 @@ function getUserDb(userId) {
         verifyAndUnlockDiary,
         getUserProfile,
         updateUserProfile,
-        getJealousyState,
-        getTokenUsageSummary,
         addFriend,
         clearFriends,
         clearCharRelationships,
@@ -1765,11 +1509,7 @@ function getUserDb(userId) {
         getVisibleGroupMessages,
         getUnsummarizedGroupMessages,
         countUnsummarizedGroupMessages,
-        getOverflowGroupMessages,
-        countOverflowGroupMessages,
-        markOverflowGroupMessagesSummarized,
         markGroupMessagesSummarized,
-        initializeSweepBaseline,
         hideGroupMessagesByRange,
         hideGroupMessagesByIds,
         unhideGroupMessages,

@@ -22,9 +22,16 @@ function getSchedulerDb(userId) {
             cron_expr TEXT NOT NULL,
             task_prompt TEXT,
             action_type TEXT NOT NULL,
-            is_enabled INTEGER DEFAULT 1
+            is_enabled INTEGER DEFAULT 1,
+            batch_size INTEGER DEFAULT 80
         )
     `);
+
+    const taskColumns = db.prepare("PRAGMA table_info(scheduled_tasks)").all();
+    const hasBatchSize = taskColumns.some((col) => col.name === 'batch_size');
+    if (!hasBatchSize) {
+        db.exec("ALTER TABLE scheduled_tasks ADD COLUMN batch_size INTEGER DEFAULT 80");
+    }
 
     const instance = {
         dbInstance: db,
@@ -40,14 +47,14 @@ function getSchedulerDb(userId) {
             const stmt = db.prepare("SELECT * FROM scheduled_tasks WHERE is_enabled = 1");
             return stmt.all();
         },
-        addTask: (charId, cronExpr, taskPrompt, actionType, isEnabled = 1) => {
-            const stmt = db.prepare("INSERT INTO scheduled_tasks (character_id, cron_expr, task_prompt, action_type, is_enabled) VALUES (?, ?, ?, ?, ?)");
-            const info = stmt.run(charId, cronExpr, taskPrompt, actionType, isEnabled ? 1 : 0);
+        addTask: (charId, cronExpr, taskPrompt, actionType, isEnabled = 1, batchSize = 80) => {
+            const stmt = db.prepare("INSERT INTO scheduled_tasks (character_id, cron_expr, task_prompt, action_type, is_enabled, batch_size) VALUES (?, ?, ?, ?, ?, ?)");
+            const info = stmt.run(charId, cronExpr, taskPrompt, actionType, isEnabled ? 1 : 0, batchSize);
             return info.lastInsertRowid;
         },
-        updateTask: (taskId, charId, cronExpr, taskPrompt, actionType, isEnabled) => {
-            const stmt = db.prepare("UPDATE scheduled_tasks SET character_id = ?, cron_expr = ?, task_prompt = ?, action_type = ?, is_enabled = ? WHERE id = ?");
-            stmt.run(charId, cronExpr, taskPrompt, actionType, isEnabled ? 1 : 0, taskId);
+        updateTask: (taskId, charId, cronExpr, taskPrompt, actionType, isEnabled, batchSize = 80) => {
+            const stmt = db.prepare("UPDATE scheduled_tasks SET character_id = ?, cron_expr = ?, task_prompt = ?, action_type = ?, is_enabled = ?, batch_size = ? WHERE id = ?");
+            stmt.run(charId, cronExpr, taskPrompt, actionType, isEnabled ? 1 : 0, batchSize, taskId);
             return true;
         },
         deleteTask: (taskId) => {

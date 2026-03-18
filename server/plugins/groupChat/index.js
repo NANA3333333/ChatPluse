@@ -1,12 +1,18 @@
 const fs = require('fs');
 const path = require('path');
 const { buildUniversalContext } = require('../../contextBuilder');
+const { getTokenCount } = require('../../utils/tokenizer');
 
 function initGroupChatPlugin(app, context) {
     const {
         wss, getWsClients, authDb, authMiddleware,
         getUserDb, getEngine, getMemory, callLLM
     } = context;
+
+    function recordGroupTokenUsage(db, characterId, contextType, usage) {
+        if (!usage || !characterId || !db?.addTokenUsage) return;
+        db.addTokenUsage(characterId, contextType, usage.prompt_tokens || 0, usage.completion_tokens || 0);
+    }
 
     // We will extract DB from req.db like original index.js did
 
@@ -51,12 +57,13 @@ function initGroupChatPlugin(app, context) {
         try {
             const group = db.getGroup(req.params.id);
             if (!group) return res.status(404).json({ error: 'Group not found' });
-            const { inject_limit, name } = req.body;
+            const { inject_limit, name, context_msg_limit } = req.body;
             // Use raw SQL update since db wrapper doesn't have updateGroup
             const updates = [];
             const values = [];
             if (inject_limit !== undefined) { updates.push('inject_limit = ?'); values.push(Math.max(0, parseInt(inject_limit) || 0)); }
             if (name !== undefined && name.trim()) { updates.push('name = ?'); values.push(name.trim()); }
+            if (context_msg_limit !== undefined) { updates.push('context_msg_limit = ?'); values.push(Math.max(1, parseInt(context_msg_limit) || 60)); }
             if (updates.length > 0) {
                 values.push(req.params.id);
                 db.rawRun(`UPDATE group_chats SET ${updates.join(', ')} WHERE id = ?`, values);
@@ -81,40 +88,6 @@ function initGroupChatPlugin(app, context) {
         }
     });
 
-    // 14.5 Hide/Unhide group messages (context hide mechanic)
-    app.post('/api/groups/:id/messages/hide', authMiddleware, (req, res) => {
-        const db = getUserDb(req.user.id);
-        const engine = getEngine(req.user.id);
-        const memory = getMemory(req.user.id);
-        const wsClients = getWsClients(req.user.id);
-        try {
-            const { messageIds, start, end } = req.body;
-            let hidden = 0;
-            if (messageIds && Array.isArray(messageIds)) {
-                hidden = db.hideGroupMessagesByIds(req.params.id, messageIds);
-            } else if (start !== undefined && end !== undefined) {
-                hidden = db.hideGroupMessagesByRange(req.params.id, start, end);
-            } else {
-                return res.status(400).json({ error: 'Missing start/end or messageIds' });
-            }
-            res.json({ success: true, hidden });
-        } catch (e) {
-            res.status(500).json({ error: e.message });
-        }
-    });
-
-    app.post('/api/groups/:id/messages/unhide', authMiddleware, (req, res) => {
-        const db = getUserDb(req.user.id);
-        const engine = getEngine(req.user.id);
-        const memory = getMemory(req.user.id);
-        const wsClients = getWsClients(req.user.id);
-        try {
-            const unhidden = db.unhideGroupMessages(req.params.id);
-            res.json({ success: true, unhidden });
-        } catch (e) {
-            res.status(500).json({ error: e.message });
-        }
-    });
 
     // 14.6 Add member to group (with system announcement + AI reactions)
     app.post('/api/groups/:id/members', authMiddleware, (req, res) => {
@@ -377,7 +350,7 @@ function initGroupChatPlugin(app, context) {
                     try {
                         // Re-fetch messages RIGHT NOW so this char sees all prior replies
                         const userProfile = db.getUserProfile();
-                        const groupMsgLimit = 20;
+                        const groupMsgLimit = group.context_msg_limit || 60; // Use saved limit or default 60
                         // Filter: new members can only see messages from after they joined
                         const memberEntry = group.members.find(m => m.member_id === char.id);
                         const joinedAt = memberEntry?.joined_at || 0;
@@ -533,13 +506,15 @@ Guidelines:
                             llmMessages.push({ role: 'user', content: '[系统提示：群里现在很安静，请自然地继续发言或开启新话题。]' });
                         }
 
-                        const reply = await callLLM({
+                        const { content: reply, usage } = await callLLM({
                             endpoint: char.api_endpoint,
                             key: char.api_key,
                             model: char.model_name,
                             messages: llmMessages,
-                            maxTokens: char.max_tokens || 500
+                            maxTokens: char.max_tokens || 500,
+                            returnUsage: true
                         });
+                        recordGroupTokenUsage(db, char.id, 'group_chat', usage);
 
 
                         if (reply && reply.trim()) {
@@ -776,13 +751,15 @@ Guidelines:
 
 你是${senderChar.name}。Persona: ${senderChar.persona || '无'}\n${statusLine}\n根据你的性格，用1-2句话在群聊中自然地反应。不要有名字前缀，直接说话。`;
 
-                                const feedbackReply = await callLLM({
+                                const { content: feedbackReply, usage } = await callLLM({
                                     endpoint: senderChar.api_endpoint,
                                     key: senderChar.api_key,
                                     model: senderChar.model_name,
                                     messages: [{ role: 'system', content: feedbackPrompt }],
-                                    maxTokens: 80
+                                    maxTokens: 80,
+                                    returnUsage: true
                                 });
+                                recordGroupTokenUsage(db, senderChar.id, 'group_feedback', usage);
                                 if (feedbackReply?.trim()) {
                                     const clean = feedbackReply.trim().replace(/\[(?:CHAR_AFFINITY|AFFINITY|MOMENT|DIARY|UNLOCK_DIARY|PRESSURE|TIMER|TRANSFER|DIARY_PASSWORD|REDPACKET_SEND)[^\]]*\]/gi, '').trim();
                                     if (clean) {

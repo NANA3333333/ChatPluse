@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { AlertCircle, ArrowRightLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
@@ -21,7 +21,7 @@ function BlockedSystemMessage({ name }) {
     );
 }
 
-/* Interactive Transfer Card — handles both old and new formats */
+/* Interactive Transfer Card 鈥?handles both old and new formats */
 function TransferCardInteractive({ content, isUser, apiUrl }) {
     const { lang } = useLanguage();
     const raw = content.replace('[TRANSFER]', '').trim();
@@ -62,7 +62,7 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
     }, [tid, apiUrl]);
 
     // Auto-update UI when status resolves
-    // DB returns: claimed (0/1), refunded (0/1) — NOT a 'status' string
+    // DB returns: claimed (0/1), refunded (0/1) 鈥?NOT a 'status' string
     const isClaimed = !!(transferInfo?.claimed);
     const isRefunded = !!(transferInfo?.refunded);
     const isPending = transferInfo ? (!isClaimed && !isRefunded) : true;
@@ -100,7 +100,7 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
                     <div style={{ fontSize: '12px', color: '#999' }}>{note}</div>
                 </div>
             </div>
-            {/* Status badge — shown when claimed or refunded */}
+            {/* Status badge 鈥?shown when claimed or refunded */}
             {(isClaimed || isRefunded) && (
                 <div style={{ fontSize: '12px', color: '#999', textAlign: 'center', padding: '4px 0' }}>
                     {isClaimed
@@ -211,7 +211,7 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
                                             <div style={{ fontSize: '16px', fontWeight: '400' }}>{cardName}</div>
                                         </div>
                                         <div style={{ padding: '4px 15px 6px', fontSize: '12px', color: '#999' }}>
-                                            个人名片
+                                            涓汉鍚嶇墖
                                         </div>
                                     </div>
                                 );
@@ -249,7 +249,14 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
                                 <span>🧠</span> {lang === 'en' ? 'Recalled Memory:' : '回忆起：'}
                             </div>
                             {message.metadata.retrievedMemories.map((mem, idx) => (
-                                <div key={idx} style={{ lineHeight: '1.3' }}>- {mem.event}</div>
+                                <div key={idx} style={{ lineHeight: '1.3' }}>
+                                    - {mem.event}
+                                    {mem.retrieval_count > 0 && (
+                                        <span style={{ color: '#aaa', marginLeft: '6px' }}>
+                                            {lang === 'en' ? `(used ${mem.retrieval_count}x)` : `（已调用 ${mem.retrieval_count} 次）`}
+                                        </span>
+                                    )}
+                                </div>
                             ))}
                         </div>
                     )}
@@ -268,3 +275,4 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
 }
 
 export default MessageBubble;
+

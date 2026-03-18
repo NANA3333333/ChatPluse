@@ -18,11 +18,7 @@ function Login({ apiUrl }) {
         const endpoint = isRegistering ? '/api/auth/register' : '/api/auth/login';
 
         try {
-            // Note: Since main.jsx intercepts fetch to append token if available, it will let this pass through.
-            // But we must use the exact URL path without the trailing slash issue.
-            // apiUrl is like http://localhost:8001/api, so we should just use apiUrl + endpoint minus the /api overlap
             const cleanApiUrl = apiUrl.replace(/\/api\/?$/, '');
-
             const payload = isRegistering ? { username, password, inviteCode } : { username, password };
 
             const res = await fetch(`${cleanApiUrl}${endpoint}`, {

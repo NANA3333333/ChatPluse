@@ -18,6 +18,19 @@ server/uploads/
 client/dist/
 client/node_modules/
 
+# Local runtime / logs
+.runtime/
+*.log
+*.out.log
+*.err.log
+changed_files.txt
+full_history.log
+git_log_full.txt
+nul.css
+client/nul.css
+server/public/uploads/
+chatpulse_logo.png
+
 # Test and seed files
 test*.js
 server/test*.js

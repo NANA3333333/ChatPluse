@@ -25,16 +25,17 @@ const API_URL = import.meta.env.VITE_API_URL || `${PROTOCOL}//${HOST}:8000/api`;
 const WS_URL = import.meta.env.VITE_WS_URL || `ws://${HOST}:8000`;
 
 function App() {
-  const { token, logout } = useAuth();
+  const { token, logout, user: authUser } = useAuth();
   const { t, lang, toggleLanguage } = useLanguage();
   const [activeTab, setActiveTab] = useState('chats'); // 'chats', 'contacts', 'settings'
   const [activeContactId, setActiveContactId] = useState(null);
   const [contacts, setContacts] = useState([]);
+  const [activeContactSnapshot, setActiveContactSnapshot] = useState(null);
 
   const [incomingMessageQueue, setIncomingMessageQueue] = useState([]);
   const [activeDrawer, setActiveDrawer] = useState(null); // 'memo', 'diary', or null
-  const [userProfile, setUserProfile] = useState(null);
-  const [isLoaded, setIsLoaded] = useState(false);
+  const [userProfile, setUserProfile] = useState(() => authUser || null);
+  const [isLoaded, setIsLoaded] = useState(() => !!token);
   const [engineState, setEngineState] = useState({});
   const [showAddCharModal, setShowAddCharModal] = useState(false);
   const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
@@ -55,9 +56,57 @@ function App() {
   const activeContactRef = useRef(activeContactId);
   useEffect(() => { activeContactRef.current = activeContactId; }, [activeContactId]);
 
+  useEffect(() => {
+    if (!activeContactId) {
+      setActiveContactSnapshot(null);
+      return;
+    }
+    const latest = contacts.find(c => c.id === activeContactId);
+    if (latest) {
+      setActiveContactSnapshot(latest);
+    }
+  }, [activeContactId, contacts]);
+
   // Use a ref to track which incoming messages we've already processed for unread badges and sounds
   const processedMessagesRef = useRef(new Set());
   const groupMsgSeqRef = useRef(0); // Unique sequence counter to prevent React batching from swallowing rapid WS group_message events
+
+  useEffect(() => {
+    const handleCharacterDataWiped = (event) => {
+      const wipedId = event.detail?.characterId;
+      if (!wipedId) return;
+      setContacts(prev => prev.map(c => c.id === wipedId ? {
+        ...c,
+        lastMessage: '',
+        time: '',
+        unread: 0,
+        affinity: c.initial_affinity ?? 50,
+        pressure_level: 0,
+        jealousy_level: 0,
+        wallet: 200,
+        calories: 2000,
+        city_status: 'idle',
+        location: 'home'
+      } : c));
+      if (activeContactRef.current === wipedId) {
+        setActiveContactSnapshot(prev => prev ? {
+          ...prev,
+          lastMessage: '',
+          time: '',
+          unread: 0,
+          affinity: prev.initial_affinity ?? 50,
+          pressure_level: 0,
+          jealousy_level: 0,
+          wallet: 200,
+          calories: 2000,
+          city_status: 'idle',
+          location: 'home'
+        } : prev);
+      }
+    };
+    window.addEventListener('character_data_wiped', handleCharacterDataWiped);
+    return () => window.removeEventListener('character_data_wiped', handleCharacterDataWiped);
+  }, []);
 
   const fetchContacts = useCallback(() => {
     if (!token) return;
@@ -81,9 +130,6 @@ function App() {
           }
           return newContact;
         }));
-        if (activeContactRef.current && !data.find(c => c.id === activeContactRef.current)) {
-          setActiveContactId(null);
-        }
       })
       .catch(err => console.error('Failed to load contacts:', err));
   }, [token]);
@@ -95,6 +141,7 @@ function App() {
       setIsLoaded(true);
       return;
     }
+    setIsLoaded(true);
     fetchContacts();
     const headers = {
       'Authorization': `Bearer ${token}`
@@ -113,13 +160,9 @@ function App() {
         }
         if (data.custom_css) localStorage.setItem('cp_custom_css', data.custom_css);
         if (data.avatar) localStorage.setItem('cp_avatar', data.avatar);
-
-        // Delaying the loading state slightly to ensure CSS variables have time to apply
-        setTimeout(() => setIsLoaded(true), 50);
       })
       .catch(err => {
         console.error('Failed fetching user profile:', err);
-        setIsLoaded(true); // Always render the app
       });
 
     fetch(`${API_URL}/groups`, { headers })
@@ -383,7 +426,9 @@ function App() {
               activeId={activeContactId}
               engineState={engineState}
               onSelect={(id) => {
+                const selected = contacts.find(c => c.id === id);
                 setActiveContactId(id);
+                if (selected) setActiveContactSnapshot(selected);
                 activeContactRef.current = id;
                 setActiveGroupId(null);
                 // Clear unread badge
@@ -439,7 +484,7 @@ function App() {
                 </button>
               </div>
               {contacts.map(c => (
-                <div key={c.id} className="contact-item" onClick={() => { setActiveContactId(c.id); setActiveTab('chats'); }}>
+                <div key={c.id} className="contact-item" onClick={() => { setActiveContactId(c.id); setActiveContactSnapshot(c); setActiveTab('chats'); }}>
                   <div className="contact-avatar">
                     <img src={resolveAvatarUrl(c.avatar, API_URL)} alt={c.name} style={{ objectFit: 'cover' }} />
                   </div>
@@ -460,7 +505,7 @@ function App() {
                   </button>
                 </div>
                 {groups.map(g => (
-                  <div key={g.id} className="contact-item" onClick={() => { setActiveGroupId(g.id); setActiveContactId(null); setActiveTab('chats'); }}>
+                  <div key={g.id} className="contact-item" onClick={() => { setActiveGroupId(g.id); setActiveContactId(null); setActiveContactSnapshot(null); setActiveTab('chats'); }}>
                     <div className="contact-avatar" style={{ width: 'auto', minWidth: '42px', height: '42px', display: 'flex', alignItems: 'center' }}>
                       {g.members?.slice(0, 3).map((memberObj, idx) => {
                         const memberId = typeof memberObj === 'object' ? memberObj.member_id : memberObj;
@@ -536,7 +581,7 @@ function App() {
             <div style={{ flex: 1, display: 'flex', flexDirection: 'row', height: '100%', minWidth: 0 }}>
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                 <ChatWindow
-                  contact={contacts.find(c => c.id === activeContactId)}
+                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
                   allContacts={contacts}
                   userAvatar={userProfile?.avatar}
                   apiUrl={API_URL}
@@ -545,7 +590,7 @@ function App() {
                   onToggleMemo={() => setActiveDrawer(activeDrawer === 'memo' ? null : 'memo')}
                   onToggleDiary={() => setActiveDrawer(activeDrawer === 'diary' ? null : 'diary')}
                   onToggleSettings={() => setActiveDrawer(activeDrawer === 'settings' ? null : 'settings')}
-                  onBack={() => { setActiveContactId(null); activeContactRef.current = null; }}
+                  onBack={() => { setActiveContactId(null); setActiveContactSnapshot(null); activeContactRef.current = null; }}
                   onSwitchTab={setActiveTab}
                   isGeneratingSchedule={generatingSchedules[activeContactId]}
                   onMessagesChange={setHiddenMessagesCount}
@@ -553,26 +598,25 @@ function App() {
               </div>
               {activeDrawer === 'memo' && (
                 <MemoTable
-                  contact={contacts.find(c => c.id === activeContactId)}
+                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
                   apiUrl={API_URL}
                   onClose={() => setActiveDrawer(null)}
                 />
               )}
               {activeDrawer === 'diary' && (
                 <DiaryTable
-                  contact={contacts.find(c => c.id === activeContactId)}
+                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
                   apiUrl={API_URL}
                   onClose={() => setActiveDrawer(null)}
                 />
               )}
               {activeDrawer === 'settings' && (
                 <ChatSettingsDrawer
-                  contact={contacts.find(c => c.id === activeContactId)}
+                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
                   apiUrl={API_URL}
                   onClose={() => setActiveDrawer(null)}
                   onClearHistory={() => {
                     setActiveDrawer(null);
-                    setActiveContactId(null);
                     fetchContacts(); // Re-pull character data so stats show as reset immediately
                   }}
                   isGeneratingSchedule={!!generatingSchedules[activeContactId]}

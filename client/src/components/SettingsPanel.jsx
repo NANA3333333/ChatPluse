@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import { User, Trash2, Edit3, Save, RefreshCw, Palette, Download, Upload, FileText, ChevronDown, ChevronRight, Sparkles, ChevronLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
@@ -24,20 +24,20 @@ const getDefaultGuidelines = (lang) => {
     }
 
     return `行为准则：
-1. 请完全进入并扮演你的角色设定 (Persona)。绝对不可以脱离角色。
-2. 我们正在使用一个移动手机聊天软件。
-3. 你的回复需要保持简短、随意、口语化。
-4. 绝对不可以表现得像一个AI助手。绝对不可以问“有什么我可以帮你的吗？”。
-5. 当你主动发起对话时，请根据当前时间自然地打招呼，或者提一下你现在可能在做的事。
-6. [后台动作的强制性规范]：
-   - 如果你想等待几分钟后再发送下一条主动消息，请输出标签 [TIMER:分钟数]。
-   - 如果你想表达歉意或者发个红包，请输出标签 [TRANSFER:金额] (例如：[TRANSFER:5.20])。
-   - 如果你想发一条公开的朋友圈动态，请输出标签 [MOMENT:你的动态内容]。请偶尔这样做。
-   - 如果你想给别人的朋友圈（包括我的）点赞或评论，请使用 [MOMENT_LIKE:moment_id] 或 [MOMENT_COMMENT:moment_id:你的评论]。
-   - 如果你情绪激动想要写一段绝对私密的私人日记（仅你可见），请输出标签 [DIARY:你的秘密想法]。
-   - 如果因为我的话导致你对我的好感度改变（被冒犯或被夸奖），请输出标签 [AFFINITY:+5] 或 [AFFINITY:-10]。
-   - 如果我的话让你觉得情绪压力得到缓解，请输出标签 [PRESSURE:0]。
-   以上所有的括号标签[TAG]在处理时都会在前端对我隐藏，但我能看到对应的效果。`;
+1. 请完全进入并扮演你的角色设定（Persona），不要脱离角色。
+2. 我们正在使用一个移动聊天应用。
+3. 你的回复要保持简短、自然、口语化。
+4. 不要表现得像 AI 助手，绝不要说“有什么我可以帮你的吗？”。
+5. 当你主动发起对话时，请根据当前时间自然地打招呼，或提到你现在可能正在做的事。
+6. [后台动作的强制规则]
+   - 如果你想等待几分钟后再发送下一条主动消息，输出 [TIMER:分钟数]。
+   - 如果你想道歉或发红包，输出 [TRANSFER:金额]，例如 [TRANSFER:5.20]。
+   - 如果你想发一条公开朋友圈，输出 [MOMENT:你的动态内容]。
+   - 如果你想给别人的朋友圈点赞或评论，使用 [MOMENT_LIKE:moment_id] 或 [MOMENT_COMMENT:moment_id:评论内容]。
+   - 如果你想写一段只有自己可见的私密日记，输出 [DIARY:你的秘密想法]。
+   - 如果你对用户的好感发生变化，输出 [AFFINITY:+5] 或 [AFFINITY:-10]。
+   - 如果你的压力被缓解，输出 [PRESSURE:0]。
+   以上方括号标签都会在处理时对用户隐藏，但效果会生效。`;
 };
 
 
@@ -206,9 +206,9 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 } else {
                     setEditThemeConfig(json);
                 }
-                alert(lang === 'en' ? 'Theme imported successfully! Please click "Save" to apply.' : '主题导入成功！请点击"保存"先生效。');
+                alert(lang === 'en' ? 'Theme imported successfully! Please click "Save" to apply.' : '主题导入成功，请点击“保存”生效。');
             } catch (err) {
-                alert(lang === 'en' ? "Invalid theme JSON file. Import failed." : "无效的主题 JSON 文件，导入失败。");
+                alert(lang === 'en' ? 'Invalid theme JSON file. Import failed.' : '无效的主题 JSON 文件，导入失败。');
             }
         };
         reader.readAsText(file);
@@ -236,7 +236,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         }
 
         if (!endpoint || !key || !model) {
-            alert(lang === 'en' ? 'Missing API configuration. Please select a valid Contact or enter manual API details.' : '缺少 API 配置。请选择有效的联系人或手动输入 API 信息。');
+            alert(lang === 'en' ? 'Missing API configuration. Please select a valid Contact or enter manual API details.' : '缺少 API 配置，请选择有效联系人或手动输入 API 信息。');
             return;
         }
 
@@ -261,7 +261,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 setEditThemeConfig(data.theme_config);
                 // Automatically open the background tab so they see it
                 setThemeAccordion(prev => ({ ...prev, bg: true, accent: true }));
-                alert(lang === 'en' ? 'Theme generated successfully! Click Save to apply.' : '主题生成成功！点击"保存"先生效。');
+                alert(lang === 'en' ? 'Theme generated successfully! Click Save to apply.' : '主题生成成功，点击保存生效。');
             } else {
                 throw new Error(data.error || 'Unknown error');
             }
@@ -290,7 +290,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     };
 
     const handleWipeData = async (id) => {
-        if (!window.confirm(lang === 'en' ? "Are you sure you want to wipe all data (messages, memories, etc.) for this character?" : "确定要清空该角色的所有数据（消息、记忆等）吗？")) return;
+        if (!window.confirm(lang === 'en' ? 'Are you sure you want to wipe all data (messages, memories, etc.) for this character?' : '确定要清空该角色的所有数据（消息、记忆等）吗？')) return;
         try {
             const res = await fetch(`${apiUrl}/data/${id}`, {
                 method: 'DELETE',
@@ -298,7 +298,28 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             });
             const data = await res.json();
             if (data.success) {
-                alert(lang === 'en' ? "Data wiped successfully." : "数据已清空。");
+                setContacts(prev => prev.map(c => c.id === id ? {
+                    ...c,
+                    lastMessage: '',
+                    time: '',
+                    unread: 0,
+                    affinity: c.initial_affinity ?? 50,
+                    pressure_level: 0,
+                    jealousy_level: 0,
+                    wallet: 200
+                } : c));
+                if (editingContact?.id === id) {
+                    setEditingContact(prev => prev ? {
+                        ...prev,
+                        affinity: prev.initial_affinity ?? 50,
+                        pressure_level: 0,
+                        jealousy_level: 0,
+                        wallet: 200
+                    } : prev);
+                }
+                window.dispatchEvent(new CustomEvent('character_data_wiped', { detail: { characterId: id } }));
+                window.dispatchEvent(new Event('refresh_contacts'));
+                alert(lang === 'en' ? 'Data wiped successfully.' : '数据已清空。');
                 if (onCharactersUpdate) onCharactersUpdate();
             }
         } catch (e) {
@@ -362,13 +383,13 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
 
             if (data.success) {
                 setAvatarCallback(data.url);
-                alert("上传成功 / Upload Success!\n\n文件路径：" + data.url + "\n\n请不要忘记点击下方的【Save / 保存】按钮使头像生效！\n(Please click Save below)");
+                alert(`上传成功 / Upload Success!\n\n文件路径：${data.url}\n\n请不要忘记点击下方的 Save / 保存 按钮使头像生效。\n(Please click Save below)`);
             } else {
-                alert(lang === 'en' ? "Failed to save: " + data.error : "保存失败: " + data.error);
+                alert(lang === 'en' ? 'Failed to save: ' + data.error : '保存失败: ' + data.error);
             }
         } catch (e) {
             console.error('DEBUG Upload Error Exception:', e);
-            alert('上传过程发生错误/Upload Exception: ' + e.message);
+            alert('上传过程中发生错误 / Upload Exception: ' + e.message);
         } finally {
             if (targetInput) targetInput.value = null;
             console.log("DEBUG: Upload process finished.");
@@ -378,7 +399,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const handleImportDatabase = async (event) => {
         const file = event.target.files[0];
         if (!file) return;
-        if (!window.confirm(lang === 'en' ? "Warning! This will overwrite all your current characters and chats. The server will restart. Continue?" : "警告！这将会覆盖你当前所有的聊天记录和角色数据，并且服务器会自动重启。是否继续？")) {
+        if (!window.confirm(lang === 'en' ? "Warning! This will overwrite all your current characters and chats. The server will restart. Continue?" : "警告：这将覆盖你当前所有的聊天记录和角色数据，并且服务器会自动重启。是否继续？")) {
             event.target.value = null;
             return;
         }
@@ -394,7 +415,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             });
             const data = await res.json();
             if (data.success) {
-                alert(lang === 'en' ? "Database restored! Please refresh the page in a few seconds." : "存档恢复成功！服务器正在重启，请在3秒后刷新本页面。");
+                alert(lang === 'en' ? 'Database restored! Please refresh the page in a few seconds.' : '存档恢复成功，服务正在重启，请几秒后刷新页面。');
                 setTimeout(() => window.location.reload(), 3000);
             } else {
                 alert("Failed to restore: " + data.error);
@@ -406,10 +427,10 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     };
 
     const handleSystemWipe = async () => {
-        if (!window.confirm(lang === 'en' ? "DANGER: This will permanently wipe ALL characters, chats, and memories. Your theme settings will remain. Are you absolutely sure?" : "危险：这将永久清空所有角色、聊天记录、群聊和记忆。仅保留主题设置。你确定要执行【恢复出厂设置】吗？")) return;
+        if (!window.confirm(lang === 'en' ? 'DANGER: This will permanently wipe ALL characters, chats, and memories. Your theme settings will remain. Are you absolutely sure?' : '危险：这将永久清空所有角色、聊天、群聊和记忆，仅保留主题设置。你确定要执行吗？')) return;
 
         // Double check
-        if (!window.confirm(lang === 'en' ? "Final confirmation: Wipe everything?" : "最后一次确认：真的要抹除所有数据吗？")) return;
+        if (!window.confirm(lang === 'en' ? 'Final confirmation: Wipe everything?' : '最后一次确认：真的要抹除所有数据吗？')) return;
 
         try {
             const res = await fetch(`${apiUrl}/system/wipe`, {
@@ -418,7 +439,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             });
             const data = await res.json();
             if (data.success) {
-                alert(lang === 'en' ? "All data wiped successfully." : "所有数据已成功清空。");
+                alert(lang === 'en' ? 'All data wiped successfully.' : '所有数据已成功清空。');
                 if (onCharactersUpdate) onCharactersUpdate();
                 window.location.reload();
             } else {
@@ -494,10 +515,10 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                         style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '4px', minHeight: '60px', resize: 'vertical' }}
                                     />
                                     <div style={{ display: 'flex', gap: '10px' }}>
-                                        <button onClick={handleSaveProfile} title={lang === 'en' ? 'Save profile changes' : '保存个人资料修改'} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '6px 12px', backgroundColor: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
+                                        <button onClick={handleSaveProfile} title={lang === 'en' ? 'Save profile changes' : '淇濆瓨涓汉璧勬枡淇敼'} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '6px 12px', backgroundColor: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '4px', cursor: 'pointer' }}>
                                             <Save size={16} /> Save
                                         </button>
-                                        <button onClick={() => setIsEditing(false)} title={lang === 'en' ? 'Cancel editing' : '取消编辑'} style={{ padding: '6px 12px', backgroundColor: '#f5f5f5', color: '#333', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
+                                        <button onClick={() => setIsEditing(false)} title={lang === 'en' ? 'Cancel editing' : '鍙栨秷缂栬緫'} style={{ padding: '6px 12px', backgroundColor: '#f5f5f5', color: '#333', border: '1px solid #ddd', borderRadius: '4px', cursor: 'pointer' }}>Cancel</button>
                                     </div>
                                 </div>
                             ) : (
@@ -510,7 +531,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                                 <p style={{ color: '#666', margin: 0, whiteSpace: 'pre-wrap', fontSize: '14px' }}>{profile.bio || 'Signature...'}</p>
                                             </div>
                                         </div>
-                                        <button onClick={() => setIsEditing(true)} title={lang === 'en' ? 'Edit your profile (name, avatar, bio)' : '编辑个人资料（名字、头像、签名）'} style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                        <button onClick={() => setIsEditing(true)} title={lang === 'en' ? 'Edit your profile (name, avatar, bio)' : '缂栬緫涓汉璧勬枡锛堝悕瀛椼€佸ご鍍忋€佺鍚嶏級'} style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px' }}>
                                             <Edit3 size={16} /> Edit
                                         </button>
                                     </div>
@@ -534,7 +555,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                 style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '15px', background: 'linear-gradient(to right, #f4f7fc, #fff)', border: 'none', cursor: 'pointer', outline: 'none' }}
                             >
                                 <span style={{ fontWeight: 'bold', fontSize: '15px', color: 'var(--accent-color)', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <Sparkles size={18} /> {lang === 'en' ? '✨ Auto-Generate Theme with AI' : '✨ 使用 AI 一键生成主题'}
+                                    <Sparkles size={18} /> {lang === 'en' ? 'Auto-Generate Theme with AI' : '使用 AI 一键生成主题'}
                                 </span>
                                 {themeAccordion.ai_gen ? <ChevronDown size={18} color="var(--accent-color)" /> : <ChevronRight size={18} color="var(--accent-color)" />}
                             </button>
@@ -549,7 +570,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                             onChange={e => setAiProviderId(e.target.value)}
                                             style={{ width: '100%', padding: '8px', borderRadius: '4px', border: '1px solid #ddd', fontSize: '14px', marginBottom: '10px' }}
                                         >
-                                            <option value="manual">{lang === 'en' ? 'Manual API Entry' : '手动输入 API 密钥'}</option>
+                                            <option value="manual">{lang === 'en' ? 'Manual API Entry' : '手动输入 API 配置'}</option>
                                             <optgroup label={lang === 'en' ? 'Use Contact API Settings' : '使用联系人 API 配置'}>
                                                 {contacts.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
                                             </optgroup>
@@ -566,12 +587,12 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
 
                                     <div>
                                         <label style={{ fontSize: '13px', color: '#555', fontWeight: '500', marginBottom: '8px', display: 'block' }}>
-                                            {lang === 'en' ? '2. Describe your desired UI' : '2. 描述您想要的界面风格'}
+                                            {lang === 'en' ? '2. Describe your desired UI' : '2. 鎻忚堪鎮ㄦ兂瑕佺殑鐣岄潰椋庢牸'}
                                         </label>
                                         <div style={{ display: 'flex', gap: '10px' }}>
                                             <input
                                                 type="text"
-                                                placeholder={lang === 'en' ? 'e.g. "Cyberpunk neon city, dark mode with hot pink accents"' : '例如："赛博朋克霓虹光，暗黑背景搭配亮粉色按钮"'}
+                                                placeholder={lang === 'en' ? 'e.g. "Cyberpunk neon city, dark mode with hot pink accents"' : '例如：“赛博朋克霓虹灯城市，暗色背景搭配亮粉色按钮”'}
                                                 value={aiThemeQuery}
                                                 onChange={e => setAiThemeQuery(e.target.value)}
                                                 style={{ flex: 1, padding: '10px', border: '1px solid #ddd', borderRadius: '6px', fontSize: '14px' }}
@@ -592,24 +613,24 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
 
                         {[
                             {
-                                id: 'accent', labelEn: 'Accent Colors', labelZh: '🎨 主题色',
+                                id: 'accent', labelEn: 'Accent Colors', labelZh: '主题颜色',
                                 keys: [
                                     { key: '--accent-color', labelEn: 'Primary Accent', labelZh: '核心主题色' },
                                     { key: '--accent-hover', labelEn: 'Accent Hover', labelZh: '主题悬浮色' }
                                 ]
                             },
                             {
-                                id: 'bg', labelEn: 'Backgrounds', labelZh: '🖼️ 背景颜色',
+                                id: 'bg', labelEn: 'Backgrounds', labelZh: '背景颜色',
                                 keys: [
                                     { key: '--bg-main', labelEn: 'App Background', labelZh: '全局主背景' },
-                                    { key: '--bg-sidebar', labelEn: 'Sidebar Bg', labelZh: '左侧导航栏背景' },
+                                    { key: '--bg-sidebar', labelEn: 'Sidebar Bg', labelZh: '侧边导航栏背景' },
                                     { key: '--bg-contacts', labelEn: 'Contacts List Bg', labelZh: '联系人列表背景' },
                                     { key: '--bg-chat-area', labelEn: 'Chat Area Bg', labelZh: '聊天区背景' },
                                     { key: '--bg-input', labelEn: 'Input Box Bg', labelZh: '输入框背景' }
                                 ]
                             },
                             {
-                                id: 'text', labelEn: 'Text, Borders & Icons', labelZh: '🔤 文字与图标',
+                                id: 'text', labelEn: 'Text, Borders & Icons', labelZh: '文字、边框与图标',
                                 keys: [
                                     { key: '--text-primary', labelEn: 'Primary Text', labelZh: '主要文字颜色' },
                                     { key: '--text-secondary', labelEn: 'Secondary Text', labelZh: '次要文字颜色' },
@@ -619,12 +640,12 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                 ]
                             },
                             {
-                                id: 'bubbles', labelEn: 'Chat Bubbles', labelZh: '💬 聊天气泡',
+                                id: 'bubbles', labelEn: 'Chat Bubbles', labelZh: '聊天气泡',
                                 keys: [
                                     { key: '--bubble-user-bg', labelEn: 'User Bubble Bg', labelZh: '用户气泡背景' },
                                     { key: '--bubble-user-text', labelEn: 'User Bubble Text', labelZh: '用户气泡文字' },
-                                    { key: '--bubble-ai-bg', labelEn: 'AI Bubble Bg', labelZh: 'AI气泡背景' },
-                                    { key: '--bubble-ai-text', labelEn: 'AI Bubble Text', labelZh: 'AI气泡文字' }
+                                    { key: '--bubble-ai-bg', labelEn: 'AI Bubble Bg', labelZh: 'AI 气泡背景' },
+                                    { key: '--bubble-ai-text', labelEn: 'AI Bubble Text', labelZh: 'AI 气泡文字' }
                                 ]
                             }
                         ].map(group => (
@@ -672,7 +693,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             style={{ width: '100%', display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 15px', background: themeAccordion.advanced ? '#f8f9fa' : '#fff', border: 'none', cursor: 'pointer', outline: 'none', transition: 'background 0.2s' }}
                         >
                             <span style={{ fontWeight: '500', fontSize: '14px', color: '#333' }}>
-                                {lang === 'en' ? '🛠️ Custom CSS Injection' : '🛠️ 自定义 CSS 注入'}
+                                {lang === 'en' ? 'Custom CSS Injection' : '自定义 CSS 注入'}
                             </span>
                             {themeAccordion.advanced ? <ChevronDown size={18} color="#888" /> : <ChevronRight size={18} color="#888" />}
                         </button>
@@ -691,7 +712,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                     <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
                         <div style={{ display: 'flex', gap: '10px' }}>
                             <a href={`${apiUrl}/theme-guide`} download="chatpulse-theme-prompt.txt" style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '8px 12px', backgroundColor: '#f0f0f0', color: '#555', textDecoration: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '500' }}>
-                                <FileText size={16} /> {lang === 'en' ? 'AI Theme Prompt' : '下载 AI 主题生成词'}
+                                <FileText size={16} /> {lang === 'en' ? 'AI Theme Prompt' : '下载 AI 主题生成提示词'}
                             </a>
                             <button onClick={handleExportTheme} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '8px 12px', backgroundColor: '#f0f0f0', color: '#555', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}>
                                 <Download size={16} /> {lang === 'en' ? 'Export JSON' : '导出配置'}
@@ -702,7 +723,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             </label>
                         </div>
                         <button onClick={handleSaveTheme} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '8px 16px', backgroundColor: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontWeight: '500' }}>
-                            <Save size={16} /> {lang === 'en' ? 'Save Theme & CSS' : '保存主题与CSS'}
+                            <Save size={16} /> {lang === 'en' ? 'Save Theme & CSS' : '保存主题与 CSS'}
                         </button>
                     </div>
                 </div>
@@ -718,7 +739,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                     <div>
                                         <div style={{ fontWeight: '500' }}>{c.name}</div>
                                         <div style={{ fontSize: '12px', color: '#999' }}>
-                                            {lang === 'en' ? 'Affinity' : '好感度'}: {c.affinity} | 💰 ¥{(c.wallet ?? 0).toFixed(2)} | {c.is_blocked ? (lang === 'en' ? '🚫 Blocked' : '🚫 已拉黑') : (lang === 'en' ? 'Active' : '正常')}
+                                            {lang === 'en' ? 'Affinity' : '好感度'}: {c.affinity} | 金币 {(c.wallet ?? 0).toFixed(2)} | {c.is_blocked ? (lang === 'en' ? 'Blocked' : '已拉黑') : (lang === 'en' ? 'Active' : '正常')}
                                         </div>
                                     </div>
                                 </div>
@@ -735,23 +756,23 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                                 } catch (e) { console.error(e); }
                                             }}
                                             style={{ background: 'none', border: '1px solid #ddd', borderRadius: '4px', color: 'var(--accent-color)', cursor: 'pointer', padding: '3px 8px', fontSize: '12px' }}
-                                            title={lang === 'en' ? 'Admin Unblock & Reset Affinity' : '管理员解封 & 重置好感度'}>
-                                            🔓
+                                            title={lang === 'en' ? 'Admin Unblock & Reset Affinity' : '管理员解除拉黑并重置好感度'}>
+                                            🔁
                                         </button>
                                     )}
                                     <button
                                         onClick={() => handleWipeData(c.id)}
-                                        style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Wipe all data (Memories, Messages, etc)' : '清空数据（记忆、消息等）'}>
+                                        style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Wipe all data (Memories, Messages, etc)' : '清空全部数据（记忆、消息等）'}>
                                         <RefreshCw size={18} />
                                     </button>
                                     <button
                                         onClick={() => setEditingContact({ ...c, system_prompt: c.system_prompt || getDefaultGuidelines(lang) })}
-                                        style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Edit API endpoint, model, persona, prompt' : '编辑 API 接口、模型、人设、提示词'}>
+                                        style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Edit API endpoint, model, persona, prompt' : '编辑 API 接口、模型、人设和提示词'}>
                                         <Edit3 size={18} />
                                     </button>
                                     <button
                                         onClick={() => handleDeleteContact(c.id)}
-                                        style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Delete this character permanently' : '永久删除此角色'}>
+                                        style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Delete this character permanently' : '永久删除这个角色'}>
                                         <Trash2 size={18} />
                                     </button>
                                 </div>
@@ -763,34 +784,8 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 {/* Group Chat Settings */}
                 <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee' }}>
                     <h2 style={{ margin: '0 0 20px 0', fontSize: '18px' }}>
-                        {lang === 'en' ? '🎯 Group Chat Settings' : '🎯 群聊设置'}
+                        {lang === 'en' ? 'Group Chat Settings' : '群聊设置'}
                     </h2>
-
-
-
-                    {/* Private Context Limit in Group */}
-                    <div style={{ marginBottom: '18px' }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
-                            <span>{lang === 'en' ? 'Private Context Mapped in Group' : '群聊自动映射私聊内心戏条数'}</span>
-                            <span>{profile.private_msg_limit_for_group ?? 3} <span style={{ fontSize: '12px', color: '#999' }}>{lang === 'en' ? '(secret memory)' : '（潜意识暗线）'}</span></span>
-                        </div>
-                        <input type="range" min="0" max="100" value={profile.private_msg_limit_for_group ?? 3}
-                            onChange={e => {
-                                const v = parseInt(e.target.value);
-                                setProfile(p => ({ ...p, private_msg_limit_for_group: v }));
-                                fetch(`${apiUrl}/user`, {
-                                    method: 'PUT',
-                                    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` },
-                                    body: JSON.stringify({ private_msg_limit_for_group: v })
-                                });
-                            }}
-                            style={{ width: '100%', backgroundSize: `${((profile.private_msg_limit_for_group ?? 3) - 0) * 100 / (100 - 0)}% 100%` }} />
-                        <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
-                            {lang === 'en' ? 'Number of recent private messages injected into group chat context. 0 = disabled.'
-                                : '控制 AI 在群聊中被隐秘注入的近期私聊条数上限，用于生成“心照不宣”的暧昧感。0 = 关闭私聊映射。'}
-                        </div>
-                    </div>
-
                     {/* Skip Reply Chance */}
                     <div style={{ marginBottom: '18px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
@@ -810,11 +805,11 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             style={{ width: '100%', backgroundSize: `${(Math.round((profile.group_skip_rate || 0) * 100) - 0) * 100 / (50 - 0)}% 100%` }} />
                         <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
                             {lang === 'en' ? 'Probability each character randomly skips replies. 0% = always reply, 50% = skip ~every other.'
-                                : '每个角色随机跳过回复的概率。0% = 每条必回，50% = 约每2条跳1条。'}
+                                : '每个角色随机跳过回复的概率。0% 表示总是回复，50% 表示大约每两条跳过一条。'}
                         </div>
                     </div>
 
-                    {/* Proactive Group Messaging — frequency slider */}
+                    {/* Proactive Group Messaging 鈥?frequency slider */}
                     <div style={{ marginBottom: '18px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
                             <span>{lang === 'en' ? 'Proactive Messaging Frequency' : '群聊主动发消息频率'}</span>
@@ -861,7 +856,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                     {/* Jealousy Chance */}
                     <div style={{ marginBottom: '10px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
-                            <span>{lang === 'en' ? '💚 Jealousy Chance' : '💚 嫉妒概率'}</span>
+                            <span>{lang === 'en' ? 'Jealousy Chance' : '嫉妒概率'}</span>
                             <span>{Math.round((profile.jealousy_chance ?? 0.3) * 100)}%</span>
                         </div>
                         <input type="range" min="0" max="100" value={Math.round((profile.jealousy_chance ?? 0.3) * 100)}
@@ -877,7 +872,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             style={{ width: '100%', backgroundSize: `${(Math.round((profile.jealousy_chance ?? 0.3) * 100) - 0) * 100 / (100 - 0)}% 100%` }} />
                         <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
                             {lang === 'en' ? 'Probability that a character gets jealous when you chat with someone else. 0% = never, 100% = always.'
-                                : '当你和别人聊天时，角色产生嫉妒的概率。0% = 从不，100% = 总是。'}
+                                : '当你和别人聊天时，角色产生嫉妒的概率。0% 表示从不，100% 表示总是。'}
                         </div>
                     </div>
                 </div>
@@ -888,7 +883,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 {/* Wallet */}
                 <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee' }}>
                     <h2 style={{ margin: '0 0 15px 0', fontSize: '18px' }}>
-                        {lang === 'en' ? '💰 Wallet' : '💰 钱包'}
+                        {lang === 'en' ? 'Wallet' : '钱包'}
                     </h2>
                     <div style={{ fontSize: '14px', color: '#666' }}>
                         {lang === 'en' ? 'Wallet Balance (¥):' : '钱包余额（元）：'}
@@ -901,7 +896,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 {/* Moments Feed Settings */}
                 <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee', marginTop: '20px' }}>
                     <h2 style={{ margin: '0 0 20px 0', fontSize: '18px' }}>
-                        {lang === 'en' ? '📲 Moments Settings' : '📲 朋友圈设置'}
+                        {lang === 'en' ? 'Moments Settings' : '朋友圈设置'}
                     </h2>
 
                     {/* Moments Context Limit */}
@@ -924,7 +919,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             style={{ width: '100%', backgroundSize: `${(editMomentsTokenLimit - 0) * 100 / (10000 - 0)}% 100%` }} />
                         <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
                             {lang === 'en' ? 'How much of the recent Moments feed to inject into the AI memory. Larger values cost more tokens but allow AI to read more posts.'
-                                : '每次私聊/群聊回复时，给 AI 提供多少字的最新朋友圈动态（包含你的和它认识的角色的朋友圈）。0 = 关闭。'}
+                                : '每次私聊或群聊回复时，为 AI 提供多少近期朋友圈内容。数值越大，消耗的 token 越多，但角色能读到的动态也越多。0 表示关闭。'}
                         </div>
                     </div>
 
@@ -948,7 +943,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             style={{ width: '100%', backgroundSize: `${(editMomentsReactionRate - 0) * 100 / (100 - 0)}% 100%` }} />
                         <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
                             {lang === 'en' ? 'Probability that a character naturally reacts/replies in private chat when you like or comment on their Moment.'
-                                : '当你给角色的朋友圈点赞或评论时，该角色主动在私聊中找你互动的概率。'}
+                                : '当你给角色的朋友圈点赞或评论时，该角色在私聊里主动来找你互动的概率。'}
                         </div>
                     </div>
                 </div>
@@ -959,11 +954,11 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                         <Save size={20} /> {lang === 'en' ? 'Data Backup & Restore' : '数据备份与恢复'}
                     </h2>
                     <p style={{ fontSize: '13px', color: '#666', marginBottom: '15px', lineHeight: 1.5 }}>
-                        {lang === 'en' ? 'Backup your entire ChatPulse database (chats, memories, settings) as a single SQLite file, or restore from a previous backup.' : '将你整个 ChatPulse 的所有聊天记录、AI记忆、角色和设置打包下载为一个专属存档（SQLite数据库文件），或者随时上传恢复。'}
+                        {lang === 'en' ? 'Backup your entire ChatPulse database (chats, memories, settings) as a single SQLite file, or restore from a previous backup.' : '将整个 ChatPulse 数据库（聊天、记忆、设置）备份为单个 SQLite 文件，或从之前的备份中恢复。'}
                     </p>
                     <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap', alignItems: 'center' }}>
                         <a href={`${apiUrl}/system/export?token=${localStorage.getItem('cp_token') || ''}`} download="chatpulse.db" style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: 'var(--accent-color)', color: '#fff', textDecoration: 'none', borderRadius: '6px', fontSize: '14px', fontWeight: 'bold' }}>
-                            <Download size={18} /> {lang === 'en' ? 'Download Full Backup (.db)' : '下载完整备份 (.db)'}
+                            <Download size={18} /> {lang === 'en' ? 'Download Full Backup (.db)' : '下载完整备份（.db）'}
                         </a>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: '#f0f0f0', color: '#333', border: '1px solid #ddd', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
                             <Upload size={18} /> {lang === 'en' ? 'Restore from Backup' : '上传并恢复存档'}
@@ -971,7 +966,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                         </label>
                         <div style={{ width: '1px', height: '24px', backgroundColor: '#ddd', margin: '0 5px' }}></div>
                         <button onClick={handleSystemWipe} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: '#fff', color: 'var(--danger)', border: '1px solid var(--danger)', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
-                            <Trash2 size={18} /> {lang === 'en' ? 'Factory Reset (Wipe All)' : '恢复出厂设置 (清空所有数据)'}
+                            <Trash2 size={18} /> {lang === 'en' ? 'Factory Reset (Wipe All)' : '恢复出厂设置（清空所有数据）'}
                         </button>
                     </div>
                 </div>
@@ -1025,7 +1020,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                 {mainModels.length > 0 && (
                                     <select defaultValue="" onChange={e => setEditingContact({ ...editingContact, model_name: e.target.value })}
                                         style={{ marginTop: '4px', padding: '6px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '13px' }}>
-                                        <option value="" disabled>── 选择模型 ──</option>
+                                        <option value="" disabled>-- 选择模型 --</option>
                                         {mainModels.map(m => <option key={m} value={m}>{m}</option>)}
                                     </select>
                                 )}
@@ -1069,31 +1064,35 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                 <input type="checkbox" checked={editingContact.sys_jealousy !== 0} onChange={(e) => setEditingContact({ ...editingContact, sys_jealousy: e.target.checked ? 1 : 0 })} />
                                 {t('Toggle Jealousy System')}
                             </label>
-                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#333', cursor: 'pointer' }} title={lang === 'en' ? 'Enable/disable this character in City DLC simulation' : '开启/关闭该角色参与商业街模拟活动'}>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#333', cursor: 'pointer' }} title={lang === 'en' ? 'Enable/disable this character in City DLC simulation' : '开启或关闭该角色参与商业街模拟活动'}>
                                 <input type="checkbox" checked={editingContact.sys_survival !== 0} onChange={(e) => setEditingContact({ ...editingContact, sys_survival: e.target.checked ? 1 : 0 })} />
-                                {lang === 'en' ? '🏙️ City Activity' : '🏙️ 参与商业街活动'}
+                                {lang === 'en' ? 'City Activity' : '参与商业街活动'}
+                            </label>
+                            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#333', cursor: 'pointer' }} title={lang === 'en' ? 'Allow this character to join City social encounters when sharing a location' : '控制这个角色在同地时是否参与商业街相遇'}>
+                                <input type="checkbox" checked={editingContact.sys_city_social !== 0} onChange={(e) => setEditingContact({ ...editingContact, sys_city_social: e.target.checked ? 1 : 0 })} />
+                                {lang === 'en' ? 'City Encounters' : '商业街相遇'}
                             </label>
                         </div>
 
                         {/* Base Stats Panel */}
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginTop: '10px', padding: '10px', background: '#f0f4f8', borderRadius: '4px', border: '1px solid #dce4ec' }}>
-                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响工作收益或学习效率">
+                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响工作收益和学习效率">
                                 <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span>🧠 {t('Intelligence', '智力 (决定打工赚钱多少)')}</span>
+                                    <span>🧠 {t('Intelligence', '智力（决定打工赚钱多少）')}</span>
                                     <span style={{ fontWeight: '600', color: '#2196f3' }}>{editingContact.stat_int ?? 50}</span>
                                 </span>
                                 <input type="range" min="0" max="100" value={editingContact.stat_int ?? 50} onChange={(e) => setEditingContact({ ...editingContact, stat_int: parseInt(e.target.value) || 50 })} style={{ width: '100%' }} />
                             </label>
                             <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响体力上限和抗饥饿能力">
                                 <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span>💪 {t('Stamina', '体力 (更高则不容易饿晕)')}</span>
+                                    <span>💪 {t('Stamina', '体力（越高越不容易饥饿）')}</span>
                                     <span style={{ fontWeight: '600', color: '#4caf50' }}>{editingContact.stat_sta ?? 50}</span>
                                 </span>
                                 <input type="range" min="0" max="100" value={editingContact.stat_sta ?? 50} onChange={(e) => setEditingContact({ ...editingContact, stat_sta: parseInt(e.target.value) || 50 })} style={{ width: '100%' }} />
                             </label>
                             <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响社交好感度加成">
                                 <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span>✨ {t('Charm', '魅力 (影响社交互动效果)')}</span>
+                                    <span>✨ {t('Charm', '魅力（影响社交互动效果）')}</span>
                                     <span style={{ fontWeight: '600', color: '#e91e63' }}>{editingContact.stat_cha ?? 50}</span>
                                 </span>
                                 <input type="range" min="0" max="100" value={editingContact.stat_cha ?? 50} onChange={(e) => setEditingContact({ ...editingContact, stat_cha: parseInt(e.target.value) || 50 })} style={{ width: '100%' }} />
@@ -1123,7 +1122,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                 {memModels.length > 0 && (
                                     <select defaultValue="" onChange={e => setEditingContact({ ...editingContact, memory_model_name: e.target.value })}
                                         style={{ marginTop: '4px', padding: '6px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '13px' }}>
-                                        <option value="" disabled>── 选择模型 ──</option>
+                                        <option value="" disabled>-- 选择模型 --</option>
                                         {memModels.map(m => <option key={m} value={m}>{m}</option>)}
                                     </select>
                                 )}

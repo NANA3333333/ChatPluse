@@ -22,8 +22,11 @@ window.fetch = async (...args) => {
   }
 
   const response = await originalFetch(...args);
-  // Auto logout if token expires or is invalid (skip /auth/login so we don't loop on bad passwords)
-  if (response.status === 401 && !resource.includes('/api/auth/')) {
+  const resourceUrl = typeof resource === 'string' ? resource : (resource?.url || '');
+  const shouldForceLogout = resourceUrl.includes('/api/user');
+  // Only force logout on the bootstrap auth/profile endpoint.
+  // Do not wipe local login state just because some secondary request returned 401.
+  if (response.status === 401 && shouldForceLogout) {
     localStorage.removeItem('cp_token');
     localStorage.removeItem('cp_user');
     window.location.reload();

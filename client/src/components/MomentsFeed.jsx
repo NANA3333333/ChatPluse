@@ -16,6 +16,7 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
     // Comment State (keyed by moment id)
     const [commentTexts, setCommentTexts] = useState({});
     const [activeCommentBox, setActiveCommentBox] = useState(null);
+    const feedRef = React.useRef(null);
 
     const fetchMomentsData = React.useCallback(() => {
         // Fetch characters for mapping avatars/names
@@ -41,6 +42,12 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
     useEffect(() => {
         fetchMomentsData();
     }, [fetchMomentsData]);
+
+    useEffect(() => {
+        if (feedRef.current) {
+            feedRef.current.scrollTo({ top: 0, behavior: 'auto' });
+        }
+    }, [userProfile?.id]);
 
     const handlePostMoment = async () => {
         if (!newPostText.trim()) return;
@@ -134,7 +141,7 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
     if (loading) return <div className="placeholder-text">Loading Moments...</div>;
 
     return (
-        <div className="moments-feed" style={{ paddingBottom: '80px' }}>
+        <div ref={feedRef} className="moments-feed" style={{ paddingBottom: '80px' }}>
             {/* Cover Photo Area */}
             <div className="moments-cover" style={{ marginBottom: '20px', backgroundImage: userProfile?.banner ? `url(${userProfile.banner})` : undefined, position: 'relative' }}>
                 {onBack && (

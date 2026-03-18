@@ -51,7 +51,7 @@ async function getVectorIndex(userId, characterId) {
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
     }
-    const index = new LocalIndex(path.join(dir, 'index.json'));
+    const index = new LocalIndex(dir);
     // Create if not exists OR if it exists but is corrupted
     try {
         const isCreated = await index.isIndexCreated();
@@ -85,6 +85,44 @@ function getMemory(userId) {
     // Instantiates this user's specific sqlite DB instance
     const db = getUserDb(userId);
 
+    function resolveMemoryModelConfig(character) {
+        return {
+            endpoint: character.memory_api_endpoint || '',
+            key: character.memory_api_key || '',
+            model: character.memory_model_name || ''
+        };
+    }
+
+    function updateSweepStatus(characterId, patch = {}) {
+        if (!characterId || typeof db.rawRun !== 'function') return;
+        const fields = [];
+        const values = [];
+        if (Object.prototype.hasOwnProperty.call(patch, 'sweep_last_error')) {
+            fields.push('sweep_last_error = ?');
+            values.push(patch.sweep_last_error || '');
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, 'sweep_last_run_at')) {
+            fields.push('sweep_last_run_at = ?');
+            values.push(patch.sweep_last_run_at || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, 'sweep_last_success_at')) {
+            fields.push('sweep_last_success_at = ?');
+            values.push(patch.sweep_last_success_at || 0);
+        }
+        if (Object.prototype.hasOwnProperty.call(patch, 'sweep_last_saved_count')) {
+            fields.push('sweep_last_saved_count = ?');
+            values.push(patch.sweep_last_saved_count || 0);
+        }
+        if (fields.length === 0) return;
+        values.push(characterId);
+        db.rawRun(`UPDATE characters SET ${fields.join(', ')} WHERE id = ?`, values);
+    }
+
+    function recordMemoryTokenUsage(characterId, contextType, usage) {
+        if (!usage || !characterId || !db?.addTokenUsage) return;
+        db.addTokenUsage(characterId, contextType, usage.prompt_tokens || 0, usage.completion_tokens || 0);
+    }
+
     async function wipeIndex(characterId) {
         const key = `${userId}_${characterId}`;
         indices.delete(key);
@@ -95,6 +133,23 @@ function getMemory(userId) {
             } catch (e) {
                 console.error(`[Memory] Failed to physically wipe vector dir for ${characterId}:`, e.message);
             }
+        }
+    }
+
+    async function rebuildIndex(characterId) {
+        await wipeIndex(characterId);
+        const rows = db.getMemories ? db.getMemories(characterId) : [];
+        if (!rows || rows.length === 0) return;
+
+        const index = await getVectorIndex(userId, characterId);
+        for (const mem of rows) {
+            const textToEmbed = `${mem.event || ''} People: ${mem.people || ''}.Items: ${mem.items || ''}.`;
+            const embeddingArray = await getEmbedding(textToEmbed);
+            await index.insertItem({
+                id: String(mem.id),
+                vector: embeddingArray,
+                metadata: { memory_id: mem.id, surprise_score: mem.surprise_score || 5 }
+            });
         }
     }
 
@@ -121,14 +176,17 @@ function getMemory(userId) {
             // Map results back to sqlite memory rows using metadata.memory_id
             const memories = [];
             for (const res of weightedResults.slice(0, limit)) {
-                // Threshold filtering (e.g., > 0.5 original similarity)
-                if (res.score > 0.68 && res.item.metadata && res.item.metadata.memory_id) {
+                // Threshold filtering
+                if (res.score > 0.35 && res.item.metadata && res.item.metadata.memory_id) {
                     const memRow = db.getMemory(res.item.metadata.memory_id);
                     if (memRow) {
                         memRow._search_score = res.finalScore.toFixed(3);
                         memories.push(memRow);
                     }
                 }
+            }
+            if (memories.length > 0 && db.markMemoriesRetrieved) {
+                db.markMemoriesRetrieved(memories.map(m => m.id));
             }
             return memories;
         } catch (e) {
@@ -138,7 +196,8 @@ function getMemory(userId) {
     }
 
     async function extractMemoryFromContext(character, recentMessages, groupId = null) {
-        if (!character.memory_api_endpoint || !character.memory_api_key || !character.memory_model_name) {
+        const memoryConfig = resolveMemoryModelConfig(character);
+        if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
             // Skip memory extraction if memory AI is not configured
             return null;
         }
@@ -190,17 +249,19 @@ Output exactly in this JSON format (and nothing else):
 `;
 
         try {
-            const responseText = await callLLM({
-                endpoint: character.memory_api_endpoint,
-                key: character.memory_api_key,
-                model: character.memory_model_name,
+            const { content: responseText, usage } = await callLLM({
+                endpoint: memoryConfig.endpoint,
+                key: memoryConfig.key,
+                model: memoryConfig.model,
                 messages: [
                     { role: 'system', content: 'You extract structured JSON facts from conversations. You lean toward extracting memories rather than returning none.' },
                     { role: 'user', content: extractionPrompt }
                 ],
                 maxTokens: 300,
-                temperature: 0.3
+                temperature: 0.3,
+                returnUsage: true
             });
+            recordMemoryTokenUsage(character.id, 'memory_extract', usage);
 
             // Parse JSON safely
             const startIdx = responseText.indexOf('{');
@@ -221,7 +282,8 @@ Output exactly in this JSON format (and nothing else):
     }
 
     async function extractHiddenState(character, recentMessages) {
-        if (!character.memory_api_endpoint || !character.memory_api_key || !character.memory_model_name) {
+        const memoryConfig = resolveMemoryModelConfig(character);
+        if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
             return null;
         }
 
@@ -242,17 +304,19 @@ Output only the summary sentence, without quotes or extra explanation.
 `;
 
         try {
-            const responseText = await callLLM({
-                endpoint: character.memory_api_endpoint,
-                key: character.memory_api_key,
-                model: character.memory_model_name,
+            const { content: responseText, usage } = await callLLM({
+                endpoint: memoryConfig.endpoint,
+                key: memoryConfig.key,
+                model: memoryConfig.model,
                 messages: [
                     { role: 'system', content: 'You are an internal mood analyzer. You output ONLY the summarized first-person mindset.' },
                     { role: 'user', content: extractionPrompt }
                 ],
                 maxTokens: 100,
-                temperature: 0.3
+                temperature: 0.3,
+                returnUsage: true
             });
+            recordMemoryTokenUsage(character.id, 'memory_hidden_state', usage);
 
             const hiddenState = responseText.trim();
             if (hiddenState && hiddenState.length > 0 && hiddenState.length < 200) {
@@ -266,46 +330,202 @@ Output only the summary sentence, without quotes or extra explanation.
         return null;
     }
 
-    async function aggregateDailyMemories(character, hoursAgo = 24) {
-        if (!character.memory_api_endpoint || !character.memory_api_key || !character.memory_model_name) {
+    function parseMemoryArrayFromResponse(responseText) {
+        const startIdx = responseText.indexOf('[');
+        const endIdx = responseText.lastIndexOf(']');
+        if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
+        try {
+            const parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    async function aggregateDailyMemoriesChunked(character, hoursAgo = 24, options = {}) {
+        const memoryConfig = resolveMemoryModelConfig(character);
+        if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
             return 0;
         }
 
         const sinceMs = Date.now() - hoursAgo * 60 * 60 * 1000;
+        const batchSize = Math.max(10, Math.min(500, Number(options.batchSize) || 80));
+        const activityEntries = [];
+
+        const privateMsgs = db.getVisibleMessagesSince(character.id, sinceMs);
+        privateMsgs.forEach((m) => {
+            activityEntries.push({
+                timestamp: m.timestamp || 0,
+                text: `[Private Chat] ${m.role === 'user' ? 'User' : character.name}: ${m.content}`
+            });
+        });
+
+        const groups = db.getGroups().filter(g => g.members.some(m => m.member_id === character.id));
+        for (const g of groups) {
+            const msgs = db.getVisibleGroupMessages(g.id, 1000, sinceMs);
+            msgs.forEach((m) => {
+                const sName = m.sender_id === 'user' ? 'User' : (m.sender_name || 'Unknown');
+                activityEntries.push({
+                    timestamp: m.timestamp || 0,
+                    text: `[Group Chat: ${g.name}] ${sName}: ${m.content}`
+                });
+            });
+        }
+
+        const moments = db.getMomentsSince(character.id, sinceMs);
+        moments.forEach((m) => {
+            const author = m.character_id === 'user' ? 'User' : (db.getCharacter(m.character_id)?.name || m.character_id);
+            activityEntries.push({
+                timestamp: m.created_at || m.timestamp || 0,
+                text: `[Moment by ${author}] ${m.content}`
+            });
+        });
+
+        try {
+            const initCityDb = require('./plugins/city/cityDb');
+            const cityDb = initCityDb(typeof db.getRawDb === 'function' ? db.getRawDb() : db);
+            if (cityDb) {
+                const logs = cityDb.getCharacterTodayLogs(character.id, 100);
+                const recentLogs = (logs || []).filter((l) => l.timestamp >= sinceMs);
+                recentLogs.forEach((l) => {
+                    activityEntries.push({
+                        timestamp: l.timestamp || 0,
+                        text: `[City Activity] ${l.message}`
+                    });
+                });
+            }
+        } catch (e) { /* ignore */ }
+
+        if (activityEntries.length === 0) return 0;
+
+        activityEntries.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+
+        const engineContextWrapper = { getUserDb, getMemory: () => getMemory(userId) };
+        const universalResult = await buildUniversalContext(engineContextWrapper, character, '', false);
+        const totalBatches = Math.ceil(activityEntries.length / batchSize);
+        let savedCount = 0;
+
+        for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
+            const batchEntries = activityEntries.slice(batchIndex * batchSize, (batchIndex + 1) * batchSize);
+            const batchText = batchEntries.map((entry) => entry.text).join('\n');
+            const extractionPrompt = `[Global Context]
+${universalResult?.preamble || ''}
+
+[Current Task]
+You are a memory aggregation assistant. Analyze batch ${batchIndex + 1} of ${totalBatches} from ${character.name}'s daily activity log over the past ${hoursAgo} hours.
+This chunk may include private chats with User, group chats, social media moments, and city activities.
+Identify noteworthy events, facts, relationship developments, preferences, plans, emotional shifts, or recurring themes worth remembering long-term.
+Return a structured JSON ARRAY of memory objects.
+
+IMPORTANT:
+- Process only this chunk.
+- If importance >= 3, include it.
+- If nothing meaningful happened in this chunk, return [].
+- Do not explain your answer outside the JSON array.
+
+Importance scale:
+- 1-3: Casual preferences, routine activities
+- 4-6: Personal events, expressed emotions, shared plans
+- 7-8: Deep emotional moments, conflicts
+- 9-10: Life-changing events, major relationship shifts
+
+Chunk Activities:
+---
+${batchText}
+---
+
+Output exactly in this JSON format (and nothing else):
+[
+  {
+    "time": "e.g. today",
+    "location": "...",
+    "people": "...",
+    "event": "...",
+    "relationships": "...",
+    "items": "...",
+    "importance": <number 1-10>
+  }
+]`;
+
+            try {
+                const { content: responseText, usage } = await callLLM({
+                    endpoint: memoryConfig.endpoint,
+                    key: memoryConfig.key,
+                    model: memoryConfig.model,
+                    messages: [
+                        { role: 'system', content: 'You extract structured JSON arrays of facts from diverse daily logs. Lean toward extracting memories.' },
+                        { role: 'user', content: extractionPrompt }
+                    ],
+                    maxTokens: 1500,
+                    temperature: 0.3,
+                    returnUsage: true
+                });
+                recordMemoryTokenUsage(character.id, 'memory_daily_aggregate', usage);
+
+                const parsed = parseMemoryArrayFromResponse(responseText);
+                if (Array.isArray(parsed)) {
+                    for (const mem of parsed) {
+                        if (mem.importance >= 3 && mem.event) {
+                            await saveExtractedMemory(character.id, mem, null);
+                            savedCount++;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error(`[Memory] Daily aggregation batch ${batchIndex + 1}/${totalBatches} failed for ${character.id}:`, e.message);
+            }
+        }
+
+        console.log(`[Memory] Daily aggregation completed for ${character.name}, saved ${savedCount} memories across ${totalBatches} batch(es).`);
+        return savedCount;
+    }
+
+    async function aggregateDailyMemories(character, hoursAgo = 24, options = {}) {
+        const memoryConfig = resolveMemoryModelConfig(character);
+        if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
+            return 0;
+        }
+
+        return aggregateDailyMemoriesChunked(character, hoursAgo, options);
+
+        const sinceMs = Date.now() - hoursAgo * 60 * 60 * 1000;
+        const batchSize = Math.max(10, Math.min(500, Number(options.batchSize) || 80));
 
         // 1. Private messages
         const privateMsgs = db.getVisibleMessagesSince(character.id, sinceMs);
-        let privateText = privateMsgs.length > 0 ? privateMsgs.map(m => `${m.role === 'user' ? 'User' : character.name}: ${m.content}`).join('\n') : 'No private messages.';
+        const activityEntries = privateMsgs.map((m) => ({
+            timestamp: m.timestamp || 0,
+            text: `[Private Chat] ${m.role === 'user' ? 'User' : character.name}: ${m.content}`
+        }));
 
         // 2. Group messages
         const groups = db.getGroups().filter(g => g.members.some(m => m.member_id === character.id));
-        let groupText = '';
         for (const g of groups) {
             const msgs = db.getVisibleGroupMessages(g.id, 1000, sinceMs);
             if (msgs.length > 0) {
-                groupText += `== Group: ${g.name} ==\n`;
-                groupText += msgs.map(m => {
+                msgs.forEach((m) => {
                     const sName = m.sender_id === 'user' ? 'User' : (m.sender_name || 'Unknown');
-                    return `${sName}: ${m.content}`;
-                }).join('\n') + '\n';
+                    activityEntries.push({
+                        timestamp: m.timestamp || 0,
+                        text: `[Group Chat: ${g.name}] ${sName}: ${m.content}`
+                    });
+                });
             }
         }
-        if (!groupText) groupText = 'No group messages.';
 
         // 3. Moments
         const moments = db.getMomentsSince(character.id, sinceMs);
-        let momentText = '';
         if (moments.length > 0) {
-            momentText += moments.map(m => {
+            moments.forEach((m) => {
                 const author = m.character_id === 'user' ? 'User' : (db.getCharacter(m.character_id)?.name || m.character_id);
-                return `[Moment by ${author}] ${m.content}`;
-            }).join('\n');
-        } else {
-            momentText = 'No new moments.';
+                activityEntries.push({
+                    timestamp: m.created_at || m.timestamp || 0,
+                    text: `[Moment by ${author}] ${m.content}`
+                });
+            });
         }
 
         // 4. City Logs
-        let cityText = 'No city activities.';
         try {
             const initCityDb = require('./plugins/city/cityDb');
             const cityDb = initCityDb(typeof db.getRawDb === 'function' ? db.getRawDb() : db);
@@ -314,15 +534,22 @@ Output only the summary sentence, without quotes or extra explanation.
                 if (logs && logs.length > 0) {
                     const recentLogs = logs.filter(l => l.timestamp >= sinceMs);
                     if (recentLogs.length > 0) {
-                        cityText = recentLogs.map(l => `- ${l.message}`).join('\n');
+                        recentLogs.forEach((l) => {
+                            activityEntries.push({
+                                timestamp: l.timestamp || 0,
+                                text: `[City Activity] ${l.message}`
+                            });
+                        });
                     }
                 }
             }
         } catch (e) { /* ignore */ }
 
-        if (privateMsgs.length === 0 && !groupText.includes('==') && moments.length === 0 && cityText === 'No city activities.') {
+        if (activityEntries.length === 0) {
             return 0; // Nothing happened
         }
+
+        activityEntries.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
 
         const engineContextWrapper = { getUserDb, getMemory: () => getMemory(userId) };
         const universalResult = await buildUniversalContext(engineContextWrapper, character, '', false);
@@ -381,17 +608,19 @@ Output exactly in this JSON format (and nothing else):
 `;
 
         try {
-            const responseText = await callLLM({
-                endpoint: character.memory_api_endpoint,
-                key: character.memory_api_key,
-                model: character.memory_model_name,
+            const { content: responseText, usage } = await callLLM({
+                endpoint: memoryConfig.endpoint,
+                key: memoryConfig.key,
+                model: memoryConfig.model,
                 messages: [
                     { role: 'system', content: 'You extract structured JSON arrays of facts from diverse daily logs. Lean toward extracting memories.' },
                     { role: 'user', content: extractionPrompt }
                 ],
                 maxTokens: 1500,
-                temperature: 0.3
+                temperature: 0.3,
+                returnUsage: true
             });
+            recordMemoryTokenUsage(character.id, 'memory_daily_aggregate', usage);
 
             const startIdx = responseText.indexOf('[');
             const endIdx = responseText.lastIndexOf(']');
@@ -419,20 +648,29 @@ Output exactly in this JSON format (and nothing else):
     }
 
     async function sweepOverflowMemories(character) {
-        if (!character.memory_api_endpoint || !character.memory_api_key || !character.memory_model_name) return 0;
+        const memoryConfig = resolveMemoryModelConfig(character);
+        const now = Date.now();
+        updateSweepStatus(character.id, {
+            sweep_last_run_at: now,
+            sweep_last_saved_count: 0
+        });
+        if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
+            updateSweepStatus(character.id, {
+                sweep_last_error: '未配置记忆小模型，无法执行长时记忆整理。',
+                sweep_last_saved_count: 0
+            });
+            return 0;
+        }
 
-        // Only summarize messages older than 3 hours (well outside typical sliding window)
-        const olderThanMs = Date.now() - (3 * 60 * 60 * 1000);
-
-        // Fetch up to W (sweep_limit) messages. Fallback to 30.
         const sweepLimit = character.sweep_limit || 30;
-
-        const privateMsgs = db.getUnsummarizedMessages(character.id, olderThanMs, sweepLimit);
+        const privateWindow = character.context_msg_limit || 60;
+        const privateMsgs = db.getOverflowMessages(character.id, privateWindow, sweepLimit);
         let groupText = '';
         let groupMsgIds = [];
         const groups = db.getGroups().filter(g => g.members.some(m => m.member_id === character.id));
         for (const g of groups) {
-            const msgs = db.getUnsummarizedGroupMessages(g.id, olderThanMs, sweepLimit);
+            const groupWindow = g.inject_limit ?? 5;
+            const msgs = db.getOverflowGroupMessages(g.id, groupWindow, sweepLimit);
             if (msgs.length > 0) {
                 groupMsgIds.push(...msgs.map(m => m.id));
                 groupText += `== Group: ${g.name} ==\n` + msgs.map(m => {
@@ -442,7 +680,13 @@ Output exactly in this JSON format (and nothing else):
             }
         }
 
-        if (privateMsgs.length === 0 && groupMsgIds.length === 0) return 0;
+        if (privateMsgs.length === 0 && groupMsgIds.length === 0) {
+            updateSweepStatus(character.id, {
+                sweep_last_error: '',
+                sweep_last_saved_count: 0
+            });
+            return 0;
+        }
 
         let privateText = privateMsgs.length > 0 ? privateMsgs.map(m => `${m.role === 'user' ? 'User' : character.name}: ${m.content}`).join('\n') : 'No private messages.';
 
@@ -481,17 +725,19 @@ Output exactly in this JSON format (and nothing else):
 `;
 
         try {
-            const responseText = await callLLM({
-                endpoint: character.memory_api_endpoint,
-                key: character.memory_api_key,
-                model: character.memory_model_name,
+            const { content: responseText, usage } = await callLLM({
+                endpoint: memoryConfig.endpoint,
+                key: memoryConfig.key,
+                model: memoryConfig.model,
                 messages: [
                     { role: 'system', content: 'You extract structured JSON arrays of facts from chat logs, including a surprise_score.' },
                     { role: 'user', content: extractionPrompt }
                 ],
                 maxTokens: 1500,
-                temperature: 0.3
+                temperature: 0.3,
+                returnUsage: true
             });
+            recordMemoryTokenUsage(character.id, 'memory_sweep', usage);
             const startIdx = responseText.indexOf('[');
             const endIdx = responseText.lastIndexOf(']');
             if (startIdx !== -1 && endIdx !== -1) {
@@ -514,10 +760,23 @@ Output exactly in this JSON format (and nothing else):
                 if (privateMsgs.length > 0) db.markMessagesSummarized(privateMsgs.map(m => m.id));
                 if (groupMsgIds.length > 0) db.markGroupMessagesSummarized(groupMsgIds);
 
+                updateSweepStatus(character.id, {
+                    sweep_last_error: savedCount > 0 ? '' : '本次整理未提取出有效长期记忆。',
+                    sweep_last_success_at: savedCount > 0 ? Date.now() : character.sweep_last_success_at || 0,
+                    sweep_last_saved_count: savedCount
+                });
                 console.log(`[Memory] Sweep completed for ${character.name}, saved ${savedCount} memories.`);
                 return savedCount;
             }
+            updateSweepStatus(character.id, {
+                sweep_last_error: '小模型返回结果无法解析，未完成长时记忆整理。',
+                sweep_last_saved_count: 0
+            });
         } catch (e) {
+            updateSweepStatus(character.id, {
+                sweep_last_error: e.message || '长时记忆整理失败。',
+                sweep_last_saved_count: 0
+            });
             console.error(`[Memory] Sweep failed for ${character.id}:`, e.message);
         }
         return 0;
@@ -539,6 +798,7 @@ Output exactly in this JSON format (and nothing else):
             // 3. Save to Vectra store
             const index = await getVectorIndex(userId, characterId);
             await index.insertItem({
+                id: String(memoryId),
                 vector: embeddingArray,
                 metadata: { memory_id: memoryId, surprise_score: memoryData.surprise_score || 5 }
             });
@@ -562,6 +822,7 @@ Output exactly in this JSON format (and nothing else):
 
     const instance = {
         wipeIndex,
+        rebuildIndex,
         searchMemories,
         extractMemoryFromContext,
         extractHiddenState,

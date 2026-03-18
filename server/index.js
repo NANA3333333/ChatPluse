@@ -35,6 +35,7 @@ function getJwtSecret() {
 const JWT_SECRET = getJwtSecret();
 const { getEngine } = require('./engine');
 const { getMemory, extractMemoryFromContext, setWsClientsResolver } = require('./memory');
+const { getTokenCount } = require('./utils/tokenizer');
 const multer = require('multer');
 const { callLLM } = require('./llm');
 const helmet = require('helmet');
@@ -58,10 +59,17 @@ const authLimiter = rateLimit({
 const apiLimiter = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minute
     max: 120, // limit each IP to 120 api requests per minute
+    skip: (req) => {
+        const ip = req.ip || req.socket?.remoteAddress || '';
+        return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    },
     message: { error: 'API rate limit exceeded.' }
 });
 
-app.use('/api/', apiLimiter); // Apply general API limiter
+app.use('/api/', (req, res, next) => {
+    if (req.path.startsWith('/auth/')) return next();
+    return apiLimiter(req, res, next);
+}); // Apply general API limiter to non-auth API routes
 
 
 // Serve static uploaded files with CORP header to bypass browser COEP blocks
@@ -462,8 +470,8 @@ app.post('/api/messages', authMiddleware, (req, res) => {
         engine.triggerJealousyCheck(characterId, wsClients);
 
         // Asynchronously trigger memory extraction using the small AI
+        // (Memory extraction is handled by engine.js AFTER the AI replies to ensure full context)
         const recentMessages = db.getMessages(characterId, 10);
-        memory.extractMemoryFromContext(charObj, recentMessages).catch(e => console.error('[Memory] Background extraction error:', e));
         memory.extractHiddenState(charObj, recentMessages).catch(e => console.error('[Memory] Background hidden state error:', e));
 
         res.json({ success: true, message: savedMessage });
@@ -692,6 +700,9 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
         db.clearCharRelationships(id); // Also wipe inter-char social bonds
         db.clearTransfers(id);         // Wipe all private transfers (sent & received)
         db.clearMomentInteractions(id); // Wipe likes & comments on/by this char
+        if (db.city && typeof db.city.clearCharacterCityData === 'function') {
+            db.city.clearCharacterCityData(id);
+        }
         await memory.wipeIndex(id);
 
         // Reset core emotional stats, wallet, AND diary lock state
@@ -704,6 +715,9 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
             is_blocked: 0,
             is_diary_unlocked: 0,
             wallet: 200,
+            calories: 2000,
+            city_status: 'idle',
+            location: 'home',
             diary_password: null,
             hidden_state: '',
             jealousy_level: 0,
@@ -791,6 +805,40 @@ app.post('/api/memories/:characterId/extract', authMiddleware, async (req, res) 
     }
 });
 
+app.post('/api/memories/:characterId/sweep', authMiddleware, async (req, res) => {
+    const db = req.db;
+    const memory = req.memory;
+    try {
+        const charObj = db.getCharacter(req.params.characterId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
+
+        if (!charObj.memory_api_endpoint || !charObj.memory_api_key || !charObj.memory_model_name) {
+            return res.status(400).json({ error: 'Memory AI (Small Model) is not fully configured for this character.' });
+        }
+
+        const savedCount = await memory.sweepOverflowMemories(charObj);
+        const refreshed = db.getCharacter(req.params.characterId);
+        const lastError = refreshed?.sweep_last_error || '';
+
+        if (lastError) {
+            return res.status(400).json({
+                success: false,
+                error: lastError,
+                savedCount
+            });
+        }
+
+        res.json({
+            success: true,
+            savedCount,
+            message: savedCount > 0 ? 'Long-term memory sweep completed.' : 'No new long-term memories were extracted.'
+        });
+    } catch (e) {
+        console.error('Manual sweep failed:', e);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // 6. Delete a Memory manually
 app.delete('/api/memories/:id', authMiddleware, (req, res) => {
     const db = req.db;
@@ -798,7 +846,14 @@ app.delete('/api/memories/:id', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
+        const mem = db.getMemory(req.params.id);
+        if (!mem) return res.status(404).json({ error: 'Memory not found' });
         db.deleteMemory(req.params.id);
+        if (memory?.rebuildIndex) {
+            memory.rebuildIndex(mem.character_id).catch(err => {
+                console.error('[Memory] Rebuild after delete failed:', err.message);
+            });
+        }
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1015,55 +1070,8 @@ app.post('/api/diaries/:characterId/unlock', authMiddleware, (req, res) => {
     }
 });
 
-// 10.5 Hide an array of messages for a character (context hide mechanic)
-app.post('/api/messages/:characterId/hide', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const { messageIds, startIdx, endIdx } = req.body;
-        let count = 0;
-        if (messageIds && Array.isArray(messageIds)) {
-            count = db.hideMessagesByIds(req.params.characterId, messageIds);
-        } else if (startIdx !== undefined && endIdx !== undefined) {
-            count = db.hideMessagesByRange(req.params.characterId, Number(startIdx), Number(endIdx));
-        } else {
-            return res.status(400).json({ error: 'Missing startIdx/endIdx or messageIds' });
-        }
-        res.json({ success: true, hidden: count });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
 
-// 10.6 Unhide all messages for a character
-app.post('/api/messages/:characterId/unhide', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const count = db.unhideMessages(req.params.characterId);
-        res.json({ success: true, unhidden: count });
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// 11. User Profile
-app.get('/api/user', authMiddleware, (req, res) => {
-    const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
-    try {
-        const profile = db.getUserProfile();
-        res.json(profile);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+// 11. User Profile (GET handler is already registered above at route 0.5)
 
 app.put('/api/user', authMiddleware, (req, res) => {
     const db = req.db;
@@ -1114,22 +1122,58 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         const { buildUniversalContext } = require('./contextBuilder');
         const { breakdown } = await buildUniversalContext(engineContextWrapper, character, '', false, activeTargets);
 
-        // Calculate X (Recent Chat History - default 20)
-        // Filter out hidden messages matching the engine's behavior
-        const recentMsgs = db.getMessages(charId, 20).filter(m => m.hidden !== 1 && m.hidden !== true);
-        let x_chat_len = 0;
-        recentMsgs.forEach(m => x_chat_len += (m.content || '').length);
-        breakdown.x_chat = Math.ceil(x_chat_len / 2);
+        // Calculate X (Recent Chat History - based on context_msg_limit)
+        const contextLimit = character.context_msg_limit || 60;
+        const recentMsgs = db.getVisibleMessages(charId, contextLimit);
+        const x_chat_text = recentMsgs.map(m => m.content || '').join('\n');
+        breakdown.x_chat = getTokenCount(x_chat_text);
 
-        // Include W sweep limit info M
-        const unsummarizedCount = db.countUnsummarizedMessages ? db.countUnsummarizedMessages(charId, 0) : 0;
+        let unsummarizedCount = 0;
+        if (!character.sweep_initialized && typeof db.initializeSweepBaseline === 'function' && typeof db.getGroups === 'function') {
+            const groups = db.getGroups().filter(g => g.members.some(m => m.member_id === character.id));
+            const groupWindows = groups.map(g => ({ groupId: g.id, windowLimit: g.inject_limit ?? 5 }));
+            db.initializeSweepBaseline(charId, contextLimit, groupWindows);
+        } else if (character.sweep_initialized) {
+            const privateWindow = character.context_msg_limit || 60;
+            unsummarizedCount = typeof db.countOverflowMessages === 'function'
+                ? db.countOverflowMessages(charId, privateWindow)
+                : 0;
+
+            if (typeof db.countOverflowGroupMessages === 'function' && typeof db.getGroups === 'function') {
+                const groups = db.getGroups().filter(g => g.members.some(m => m.member_id === character.id));
+                for (const g of groups) {
+                    const groupWindow = g.inject_limit ?? 5;
+                    unsummarizedCount += db.countOverflowGroupMessages(g.id, groupWindow);
+                }
+            }
+        }
+
+        // Calculate total tokens
+        let total = 0;
+        if (breakdown) {
+            total = Object.values(breakdown).reduce((sum, val) => sum + (typeof val === 'number' ? val : 0), 0);
+        }
+
+        const actualUsage = typeof db.getTokenUsageSummary === 'function'
+            ? db.getTokenUsageSummary(charId)
+            : { request_count: 0, prompt_tokens: 0, completion_tokens: 0, by_context: [] };
 
         res.json({
             success: true,
             stats: {
                 ...breakdown,
+                total,
                 w_unsummarized_count: unsummarizedCount,
-                w_sweep_limit: character.sweep_limit || 30
+                w_sweep_limit: character.sweep_limit || 30,
+                w_last_error: character.sweep_last_error || '',
+                w_last_run_at: character.sweep_last_run_at || 0,
+                w_last_success_at: character.sweep_last_success_at || 0,
+                w_last_saved_count: character.sweep_last_saved_count || 0,
+                actual_prompt_tokens_total: actualUsage?.prompt_tokens || 0,
+                actual_completion_tokens_total: actualUsage?.completion_tokens || 0,
+                actual_request_count: actualUsage?.request_count || 0,
+                actual_total_tokens: (actualUsage?.prompt_tokens || 0) + (actualUsage?.completion_tokens || 0),
+                actual_by_context: actualUsage?.by_context || []
             }
         });
     } catch (e) {

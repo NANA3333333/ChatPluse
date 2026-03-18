@@ -2,17 +2,17 @@ import AdminDashboard from './components/AdminDashboard';
 import CityLog from './plugins/city/CityLog';
 import { Shield, Activity } from 'lucide-react';
 
-// Centralised registry for Frontend DLCs
+// Centralized registry for frontend plugins that are currently wired into the app.
 export const plugins = [
     {
         id: 'admin',
         name_en: 'Admin Dashboard',
-        name_zh: '管理后台',
+        name_zh: '管理员后台',
         icon: Shield,
         component: AdminDashboard,
         color: 'var(--accent-color)',
         condition: (userProfile) => userProfile?.username === 'Nana',
-        position: 'bottom' // 'top' or 'bottom' nav group
+        position: 'bottom'
     },
     {
         id: 'city',
@@ -21,6 +21,6 @@ export const plugins = [
         icon: Activity,
         component: CityLog,
         color: '#ff9800',
-        position: 'top' // shows up with Chats, Contacts, Moments
+        position: 'top'
     }
 ];

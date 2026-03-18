@@ -9,6 +9,7 @@ module.exports = function initCityDb(db) {
     try { db.exec("ALTER TABLE characters ADD COLUMN location TEXT DEFAULT 'home';"); } catch (e) { }
     try { db.exec("ALTER TABLE characters ADD COLUMN education TEXT DEFAULT 'none';"); } catch (e) { }
     try { db.exec("ALTER TABLE characters ADD COLUMN sys_survival INTEGER DEFAULT 1;"); } catch (e) { }
+    try { db.exec("ALTER TABLE characters ADD COLUMN sys_city_social INTEGER DEFAULT 1;"); } catch (e) { }
     try { db.exec("ALTER TABLE characters ADD COLUMN is_scheduled INTEGER DEFAULT 1;"); } catch (e) { }
     try { db.exec("ALTER TABLE characters ADD COLUMN city_action_frequency INTEGER DEFAULT 1;"); } catch (e) { }
 
@@ -28,6 +29,15 @@ module.exports = function initCityDb(db) {
         );
     `);
     try { db.exec("ALTER TABLE city_logs ADD COLUMN location TEXT DEFAULT '';"); } catch (e) { }
+
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS city_action_guard (
+            character_id TEXT NOT NULL,
+            minute_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (character_id, minute_key)
+        );
+    `);
 
     // ═══════════════════════════════════════════════════════════════════════
     //  3. City Districts
@@ -161,7 +171,7 @@ module.exports = function initCityDb(db) {
             const defaults = [
                 { id: 'factory', name: '工厂', emoji: '🏭', type: 'work', desc: '辛苦搬砖赚金币', action: '打工', calCost: 300, calReward: 0, moneyCost: 0, moneyReward: 20, dur: 2, sort: 1 },
                 { id: 'restaurant', name: '餐厅', emoji: '🍜', type: 'food', desc: '吃一顿热饭', action: '就餐', calCost: 0, calReward: 1000, moneyCost: 15, moneyReward: 0, dur: 1, sort: 2 },
-                { id: 'convenience', name: '便利店', emoji: '🏪', type: 'food', desc: '买点零食垫肚子', action: '购物', calCost: 0, calReward: 400, moneyCost: 5, moneyReward: 0, dur: 1, sort: 3 },
+                { id: 'convenience', name: '便利店', emoji: '🏪', type: 'food', desc: '买点速食和饮料', action: '购物', calCost: 0, calReward: 0, moneyCost: 5, moneyReward: 0, dur: 1, sort: 3 },
                 { id: 'park', name: '中央公园', emoji: '🌳', type: 'leisure', desc: '散步放松心情', action: '散步', calCost: 50, calReward: 0, moneyCost: 0, moneyReward: 0, dur: 1, sort: 4 },
                 { id: 'mall', name: '商场', emoji: '🛍️', type: 'shopping', desc: '逛街买东西', action: '逛街', calCost: 100, calReward: 0, moneyCost: 30, moneyReward: 0, dur: 1, sort: 5 },
                 { id: 'school', name: '夜校', emoji: '📚', type: 'education', desc: '上课提升技能', action: '上课', calCost: 200, calReward: 0, moneyCost: 10, moneyReward: 0, dur: 2, sort: 6 },
@@ -223,6 +233,7 @@ module.exports = function initCityDb(db) {
             ['gambling_payout', '3.0'],
             ['city_self_log_limit', '5'],          // X: Own log limit
             ['city_social_log_limit', '3'],        // Y: Familiar log limit
+            ['city_global_log_limit', '5'],        // Shared city/world log limit
             ['city_stranger_meet_prob', '20'],     // Z: Stranger encounter probability (%)
             ['mayor_enabled', '0'],
             ['mayor_interval_hours', '6'],
@@ -233,7 +244,6 @@ module.exports = function initCityDb(db) {
             ['city_chat_probability', '0'],
             ['city_moment_probability', '30'],
             ['city_diary_probability', '100'],
-            ['city_memory_probability', '100'],
             ['mayor_prompt', `你是这座城市的"市长AI"（The Mayor），拥有上帝视角，负责管理整座城市的经济、天气、突发事件和悬赏任务。\n\n你必须根据以下实时数据来做出决策：\n1. 查看昨天的商品销量和库存，决定今天的物价涨跌\n2. 随机生成1-3个城市事件（天气变化、限时活动、突发事故等）\n3. 在布告栏发布1-2个悬赏任务供市民接单\n\n请严格按照以下JSON格式回复，不要添加任何其他文字：\n{\n  "price_changes": [{"item_id": "bread", "new_price": 5, "reason": "供不应求"}],\n  "events": [{"type": "weather|economy|random|disaster", "title": "事件标题", "emoji": "🌧️", "description": "具体描述", "effect": {"district": "park", "cal_bonus": -50, "money_bonus": 0}, "duration_hours": 12}],\n  "quests": [{"title": "任务名", "emoji": "📜", "description": "任务描述", "reward_gold": 50, "reward_cal": 0, "difficulty": "easy|normal|hard"}],\n  "announcement": "今日城市广播内容（一句话）"\n}`]
         ];
 
@@ -264,22 +274,22 @@ module.exports = function initCityDb(db) {
         db.prepare("INSERT INTO city_config (key, value) VALUES ('city_chat_probability', '0')").run();
         db.prepare("INSERT INTO city_config (key, value) VALUES ('city_moment_probability', '30')").run();
         db.prepare("INSERT INTO city_config (key, value) VALUES ('city_diary_probability', '100')").run();
-        db.prepare("INSERT INTO city_config (key, value) VALUES ('city_memory_probability', '100')").run();
         console.log('[City DB] 已添加城市-聊天桥接概率配置');
     }
-    // Migration: ensure diary/memory probability keys exist (added later)
+    // Migration: ensure diary probability key exists
     const hasDiaryProb = db.prepare("SELECT value FROM city_config WHERE key = 'city_diary_probability'").get();
     if (!hasDiaryProb) {
         db.prepare("INSERT INTO city_config (key, value) VALUES ('city_diary_probability', '100')").run();
-        db.prepare("INSERT INTO city_config (key, value) VALUES ('city_memory_probability', '100')").run();
         console.log('[City DB] 已添加日记/记忆概率配置');
     }
+
+    try { db.prepare("DELETE FROM city_config WHERE key = 'city_memory_probability'").run(); } catch (e) { }
 
     // Migration: rename old English district names to Chinese
     const districtNameMap = {
         'factory': { name: '工厂', desc: '辛苦搬砖赚金币', action: '打工' },
         'restaurant': { name: '餐厅', desc: '吃一顿热饭', action: '就餐' },
-        'convenience': { name: '便利店', desc: '买点零食垫肚子', action: '购物' },
+        'convenience': { name: '便利店', desc: '买点速食和饮料', action: '购物' },
         'park': { name: '中央公园', desc: '散步放松心情', action: '散步' },
         'mall': { name: '商场', desc: '逛街买东西', action: '逛街' },
         'school': { name: '夜校', desc: '上课提升技能', action: '上课' },
@@ -318,17 +328,16 @@ module.exports = function initCityDb(db) {
         `).all(limit);
     }
 
-    // Get recent city logs for a specific character (restricted by today)
-    function getCharacterTodayLogs(charId, limit = 5) {
-        const startOfDay = new Date();
-        startOfDay.setHours(0, 0, 0, 0);
+    // Get recent city logs for a specific character, regardless of day.
+    // This is used as the character's own commercial-street memory window.
+    function getCharacterRecentLogs(charId, limit = 5) {
         return db.prepare(`
             SELECT content as message, action_type, timestamp, location 
             FROM city_logs 
-            WHERE character_id = ? AND timestamp >= ?
+            WHERE character_id = ?
             ORDER BY timestamp DESC 
             LIMIT ?
-        `).all(charId, startOfDay.getTime(), limit);
+        `).all(charId, limit);
     }
 
     // Get recent city logs for someone else at a specific location
@@ -348,6 +357,25 @@ module.exports = function initCityDb(db) {
         db.prepare('DELETE FROM city_logs').run();
         // Reset sqlite autoincrement for city_logs if needed
         try { db.prepare("DELETE FROM sqlite_sequence WHERE name='city_logs'").run(); } catch (e) { }
+    }
+    function clearCharacterCityData(charId) {
+        db.prepare('DELETE FROM city_logs WHERE character_id = ?').run(charId);
+        db.prepare('DELETE FROM city_inventory WHERE character_id = ?').run(charId);
+        db.prepare('DELETE FROM city_schedules WHERE character_id = ?').run(charId);
+        db.prepare('DELETE FROM city_action_guard WHERE character_id = ?').run(charId);
+        db.prepare("UPDATE city_quests SET claimed_by = '' WHERE claimed_by = ?").run(charId);
+    }
+
+    function claimActionSlot(charId, minuteKey) {
+        const info = db.prepare(`
+            INSERT OR IGNORE INTO city_action_guard (character_id, minute_key, created_at)
+            VALUES (?, ?, ?)
+        `).run(charId, minuteKey, Date.now());
+        return (info?.changes || 0) > 0;
+    }
+
+    function clearExpiredActionGuards(beforeTs) {
+        return db.prepare('DELETE FROM city_action_guard WHERE created_at < ?').run(beforeTs).changes;
     }
 
     function wipeAllData() {
@@ -559,7 +587,7 @@ module.exports = function initCityDb(db) {
         );
     }
     function claimQuest(questId, charId) {
-        db.prepare('UPDATE city_quests SET claimed_by = ? WHERE id = ? AND claimed_by = ""').run(charId, questId);
+        db.prepare("UPDATE city_quests SET claimed_by = ? WHERE id = ? AND claimed_by = ''").run(charId, questId);
     }
     function completeQuest(questId) {
         db.prepare('UPDATE city_quests SET is_completed = 1 WHERE id = ?').run(questId);
@@ -570,7 +598,9 @@ module.exports = function initCityDb(db) {
 
     // ═══════════════════════════════════════════════════════════════════════
     return {
-        logAction, getCityLogs, getCharacterTodayLogs, getOtherCharacterLocationTodayLogs, clearAllLogs, wipeAllData,
+        logAction, getCityLogs, getCharacterRecentLogs, getOtherCharacterLocationTodayLogs, clearAllLogs, wipeAllData,
+        clearCharacterCityData,
+        claimActionSlot, clearExpiredActionGuards,
         getDistricts, getDistrict, getEnabledDistricts, upsertDistrict, deleteDistrict,
         getConfig, setConfig, getEconomyStats,
         getItems, getItem, getItemsAtDistrict, upsertItem, deleteItem, decreaseItemStock,

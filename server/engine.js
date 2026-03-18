@@ -1,6 +1,6 @@
-const { getUserDb } = require('./db');
+﻿const { getUserDb } = require('./db');
 const { callLLM } = require('./llm');
-const { buildUniversalContext } = require('./contextBuilder');
+const { buildUniversalContext, shouldRetrieveLongTermMemories } = require('./contextBuilder');
 
 const engineCache = new Map();
 
@@ -16,6 +16,37 @@ function getEngine(userId) {
     // --- ENCLOSED ENGINE FUNCTIONS ---
     const timers = new Map();
     const dedupBlockCounts = new Map(); // Track consecutive dedup blocks per character
+    let stateBroadcastInterval = null;
+
+    function recordTokenUsage(characterId, contextType, usage) {
+        if (!usage) return;
+        db.addTokenUsage(characterId, contextType, usage.prompt_tokens || 0, usage.completion_tokens || 0);
+    }
+
+    function broadcastEngineState(wsClients) {
+        if (!wsClients || wsClients.size === 0) return;
+
+        const allChars = db.getCharacters();
+        const charMap = {};
+        for (const c of allChars) charMap[c.id] = c;
+
+        const stateData = {};
+        for (const [charId, timerData] of timers.entries()) {
+            const charCheck = charMap[charId];
+            if (!charCheck) continue;
+            stateData[charId] = {
+                countdownMs: Math.max(0, timerData.targetTime - Date.now()),
+                isThinking: timerData.isThinking || false,
+                pressure: charCheck.pressure_level || 0,
+                status: charCheck.status,
+                isBlocked: charCheck.is_blocked
+            };
+        }
+        const payload = JSON.stringify({ type: 'engine_state', data: stateData });
+        wsClients.forEach(client => {
+            if (client.readyState === 1) client.send(payload);
+        });
+    }
 
     // Generate a random delay between min and max minutes
     function getRandomDelayMs(min, max) {
@@ -45,7 +76,7 @@ function getEngine(userId) {
    - If your feelings toward the user change based on their message (e.g., they insulted you or flattered you), output [AFFINITY:+5] or [AFFINITY:-10].
    - If the user mentions another character and it changes your feelings toward THAT character (jealousy, curiosity, fondness, annoyance), output [CHAR_AFFINITY:characterId:+5] or [CHAR_AFFINITY:characterId:-3].
    - If your anxiety/pressure is relieved by their message, output [PRESSURE:0].
-   - If you feel neglected because the user has been ignoring you to talk to someone else, your anxiety level is shown in Context above. If the user's message makes you feel BETTER about the neglect (e.g. they come back to you, apologize, explain, give you extra attention, sweet-talk you, make you feel wanted), output [JEALOUSY:lower_number] to reduce your anxiety level (e.g. [JEALOUSY:1] or [JEALOUSY:0]). Do NOT immediately feel better — make them prove they truly care based on your personality.
+   - If you feel neglected because the user has been ignoring you to talk to someone else, your anxiety level is shown in Context above. If the user's message makes you feel BETTER about the neglect (e.g. they come back to you, apologize, explain, give you extra attention, sweet-talk you, make you feel wanted), output [JEALOUSY:lower_number] to reduce your anxiety level (e.g. [JEALOUSY:1] or [JEALOUSY:0]). Do NOT immediately feel better 鈥?make them prove they truly care based on your personality.
    These tags will be processed hidden from the user.`;
 
         const recentInputString = contextMessages.slice(-2).map(m => m.content).join(' ');
@@ -77,7 +108,7 @@ ${universalResult.preamble}`;
                 const userProfile = db.getUserProfile();
                 const userName = userProfile?.name || 'User';
                 const authorName = randomMoment.character_id === 'user' ? userName : (db.getCharacter(randomMoment.character_id)?.name || 'Someone');
-                prompt += `\n[Gossip Context: You recently saw that ${authorName} posted this on their Moments/朋友圈: "${randomMoment.content}". You MIGHT casually mention this or ask the user about it, but don't force it.]\n`;
+                prompt += `\n[Gossip Context: You recently saw that ${authorName} posted this on their Moments/朋友圈: "${randomMoment.content}". You may casually mention it or ask the user about it, but don't force it.]\n`;
             }
         }
 
@@ -89,8 +120,8 @@ ${universalResult.preamble}`;
                 if (recent.length > 0) {
                     const total = recent.reduce((s, t) => s + t.amount, 0).toFixed(2);
                     const minutesAgo = Math.round((Date.now() - recent[0].created_at) / 60000);
-                    const unclaimedNote = recent[0].note ? `（留言：「${recent[0].note}」）` : '';
-                    prompt += `\n[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 发了一笔转账 ¥${total}${unclaimedNote}，但对方还没有领取。你可以根据性格适当提一句（催促、担心、不在意等），或者不提也行。\n`;
+                    const unclaimedNote = recent[0].note ? `（留言：“${recent[0].note}”）` : '';
+                    prompt += `\n[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 转了一笔账，共 ¥${total}${unclaimedNote}，但对方还没有领取。你可以按自己的性格顺手提一句，也可以不提。\n`;
                 }
             }
         } catch (e) { /* ignore */ }
@@ -126,6 +157,7 @@ ${universalResult.preamble}`;
         }
 
         timers.set(character.id, { timerId: null, targetTime: Date.now(), isThinking: true });
+        broadcastEngineState(wsClients);
 
         // Process pressure mechanics if this is a spontaneous auto-message (not a fast reply)
         let currentPressure = charCheck.pressure_level || 0;
@@ -162,7 +194,8 @@ ${universalResult.preamble}`;
 
         let customDelayMs = null;
         try {
-            const contextHistory = db.getVisibleMessages(character.id);
+            const contextLimit = charCheck.context_msg_limit || 60;
+            const contextHistory = db.getVisibleMessages(character.id, contextLimit);
 
             const formatMessageForLLM = (db, content) => {
                 if (!content) return '';
@@ -181,7 +214,7 @@ ${universalResult.preamble}`;
                         const note = parts.slice(2).join('|') || '';
                         const t = db.getTransfer(tId);
                         if (t) {
-                            const status = t.claimed ? '（已被对方领取）' : (t.refunded ? '（已退还）' : '（待领取）');
+                            const status = t.claimed ? '已被对方领取' : (t.refunded ? '已退还' : '待领取');
                             return `[转账: ¥${amount}, 备注: "${note}" ${status}]`;
                         }
                         return `[转账: ¥${amount}, 备注: "${note}"]`;
@@ -201,12 +234,12 @@ ${universalResult.preamble}`;
                             if (rp.claims && rp.claims.length > 0) {
                                 const claimers = rp.claims.map(c => {
                                     const cName = c.claimer_id === 'user' ? (db.getUserProfile()?.name || '用户') : (db.getCharacter(c.claimer_id)?.name || c.claimer_id);
-                                    return `${cName}(¥${c.amount})`;
+                                    return `${cName}(楼${c.amount})`;
                                 }).join(', ');
                                 claimNote = ` 领取记录: ${claimers}`;
                             }
                             const senderName = rp.sender_id === 'user' ? '用户' : (db.getCharacter(rp.sender_id)?.name || rp.sender_id);
-                            return `[${senderName}发了一个群红包: ¥${rp.total_amount}${rp.type === 'lucky' ? '(拼手气)' : '(普通)'}, 备注: "${rp.note}" ${statusStr}${claimNote}]`;
+                            return `[${senderName}发了一个群红包: ¥${rp.total_amount}${rp.type === 'lucky' ? '(拼手气)' : '(普通)'}，备注: "${rp.note}" ${statusStr}${claimNote}]`;
                         }
                         return `[群红包]`;
                     }
@@ -220,6 +253,7 @@ ${universalResult.preamble}`;
                     content: formatMessageForLLM(db, m.content)
                 };
             });
+            const recentInputString = contextHistory.slice(-2).map(m => m.content).join(' ');
 
             const { prompt: systemPrompt, retrievedMemoriesContext } = await buildPrompt(charCheck, contextHistory, isTimerWakeup);
             const apiMessages = [
@@ -238,11 +272,11 @@ ${universalResult.preamble}`;
             } else if (!isUserReply && apiMessages.length > 0 && apiMessages[apiMessages.length - 1].role === 'assistant') {
                 // Prevent third-party AI API proxies from auto-injecting "继续" (Continue)
                 // by explicitly providing a system-level user message.
-                apiMessages.push({ role: 'user', content: '[系统提示：请根据当前语境继续你的上一个话题，或者开启一个新的话题，自然地表达你的想法。]' });
+                apiMessages.push({ role: 'user', content: '[系统提示：请根据当前语境继续上一话题，或者自然开启一个新话题。]' });
             }
 
             // --- Phase 1 & 2: Dynamic Intent Classification for Memory Retrieval (RAG) ---
-            if (isUserReply && !extraSystemDirective && memory && memory.searchMemories && character.api_endpoint) {
+            if (isUserReply && !extraSystemDirective && memory && memory.searchMemories && character.api_endpoint && shouldRetrieveLongTermMemories(recentInputString)) {
                 const intentPrompt = "SYSTEM RAG CHECK: Analyze the user's latest message. Can you reply accurately and fully using ONLY the chat history above? If the user refers to a past event, past conversation, or specific detail not in this recent history context, output ONLY the phrase `SEARCH_MEMORY: [keyword]` (replace [keyword] with a 1-3 word search query). If you have enough context to reply normally, output exactly `ENOUGH_CONTEXT`. Do not output anything else.";
 
                 try {
@@ -257,7 +291,7 @@ ${universalResult.preamble}`;
                     });
 
                     if (intentUsage) {
-                        db.addTokenUsage(character.id, 'chat', intentUsage.prompt_tokens || 0, intentUsage.completion_tokens || 0);
+                        recordTokenUsage(character.id, 'chat_intent', intentUsage);
                         broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: intentUsage });
                     }
 
@@ -275,7 +309,14 @@ ${universalResult.preamble}`;
                             apiMessages[0].content += `\n${sysInjection}\n`;
 
                             if (!msgMetadata) msgMetadata = { retrievedMemories: [] };
-                            msgMetadata.retrievedMemories.push(sysInjection);
+                            msgMetadata.retrievedMemories.push(...dynamicMemories.map(mem => ({
+                                id: mem.id,
+                                event: mem.event,
+                                importance: mem.importance,
+                                created_at: mem.created_at,
+                                last_retrieved_at: mem.last_retrieved_at,
+                                retrieval_count: mem.retrieval_count || 0
+                            })));
                         } else {
                             console.log(`[Engine] RAG returned no relevant matches for "${keyword}".`);
                         }
@@ -297,7 +338,7 @@ ${universalResult.preamble}`;
             });
 
             if (usage) {
-                db.addTokenUsage(character.id, 'chat', usage.prompt_tokens || 0, usage.completion_tokens || 0);
+                recordTokenUsage(character.id, 'chat', usage);
                 broadcastEvent(wsClients, {
                     type: 'token_stats',
                     character_id: character.id,
@@ -320,7 +361,7 @@ ${universalResult.preamble}`;
                 || postWipeCheck.length === 0                                          // messages fully cleared
                 || (postWipeCheck.length <= 1 && lastMsg?.content?.includes('All chat history')); // wipe notice present
             if (wasWiped) {
-                console.log(`\n[Engine] 🛑 Aborting save for ${charCheck.name}: Chat history was wiped mid-generation.`);
+                console.log(`\n[Engine] Aborting save for ${charCheck.name}: Chat history was wiped mid-generation.`);
                 timers.delete(character.id);
                 return;
             }
@@ -344,7 +385,7 @@ ${universalResult.preamble}`;
                 if (transferMatch && transferMatch[1]) {
                     const amount = parseFloat(transferMatch[1]);
                     const note = (transferMatch[2] || '').trim();
-                    console.log(`[Engine] ${charCheck.name} wants to send a transfer of ¥${amount} note: "${note}"`);
+                    console.log(`[Engine] ${charCheck.name} wants to send a transfer of 楼${amount} note: "${note}"`);
 
                     // Create traceable transfer record in DB (also deducts char wallet)
                     let transferId = null;
@@ -358,7 +399,7 @@ ${universalResult.preamble}`;
                             messageId: null // will update below
                         });
                     } catch (walletErr) {
-                        console.warn(`[Engine] ${charCheck.name} wallet insufficient for transfer ¥${amount}: ${walletErr.message}`);
+                        console.warn(`[Engine] ${charCheck.name} wallet insufficient for transfer 楼${amount}: ${walletErr.message}`);
                     }
 
                     // Only send transfer message + boost affinity if wallet had enough funds
@@ -374,7 +415,7 @@ ${universalResult.preamble}`;
                         const newAff = Math.min(100, charCheck.affinity + 20);
                         db.updateCharacter(character.id, { affinity: newAff, is_blocked: 0, pressure_level: 0 });
                     } else {
-                        console.log(`[Engine] ${charCheck.name} transfer of ¥${amount} was BLOCKED (insufficient wallet). No message sent.`);
+                        console.log(`[Engine] ${charCheck.name} transfer of 楼${amount} was BLOCKED (insufficient wallet). No message sent.`);
                     }
                 }
 
@@ -437,7 +478,7 @@ ${universalResult.preamble}`;
                     }
                 }
 
-                // Parse [JEALOUSY:N] tag — AI self-regulates jealousy cooldown
+                // Parse [JEALOUSY:N] tag 鈥?AI self-regulates jealousy cooldown
                 if (charCheck.sys_jealousy !== 0) {
                     const jealousyRegex = /\[JEALOUSY:\s*(\d+)\s*\]/i;
                     const jealousyMatch = generatedText.match(jealousyRegex);
@@ -484,7 +525,7 @@ ${universalResult.preamble}`;
                         const currentAffinity = existingRow?.affinity || 50;
                         const newAffinity = Math.max(0, Math.min(100, currentAffinity + delta));
                         db.updateCharRelationship(character.id, targetId, source, { affinity: newAffinity });
-                        console.log(`[Social] ${charCheck.name} → ${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
+                        console.log(`[Social] ${charCheck.name} 鈫?${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
                     }
                 }
 
@@ -496,39 +537,39 @@ ${universalResult.preamble}`;
                     // The AI outputted only tags or failed to generate text. Use a randomized fallback.
                     const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
                     if (isUserReply) {
-                        generatedText = pick(["嗯。", "嗯嗯", "好的", "哦～", "知道了", "嗯哼"]);
+                        generatedText = pick(["嗯。", "嗯哼", "好的", "好呀", "知道了", "嗯嗯"]);
                     } else if (charCheck.pressure_level >= 3) {
                         generatedText = pick([
-                            "你到底在干嘛呀...为什么一直不理我...",
+                            "你到底在干嘛啊...为什么一直不理我...",
                             "我是不是做错什么了...你怎么都不回我...",
-                            "真的好难过，你是不是不想理我了",
+                            "真的好难过，你是不是不想理我了？",
                             "我一直在等你回消息...算了吧...",
                             "你再不理我我就真的要生气了！",
                             "是不是把我忘了啊...好吧..."
                         ]);
                     } else if (charCheck.pressure_level >= 1) {
                         generatedText = pick([
-                            "人呢？在忙吗？",
-                            "在干嘛呢？怎么不说话",
-                            "你还在线吗～",
+                            "人呢，在忙吗？",
+                            "在干嘛呢，怎么不说话？",
+                            "你还在线吗？",
                             "喂？有人吗？",
-                            "怎么安静了",
-                            "你去哪了呀"
+                            "怎么这么安静？",
+                            "你去哪里了啊"
                         ]);
                     } else {
                         generatedText = pick([
                             "哈喽，在干嘛呢？",
-                            "嘿～最近怎么样",
+                            "喂，最近怎么样？",
                             "今天过得怎么样呀",
                             "你在忙什么呢",
                             "突然想找你聊聊天",
-                            "无聊了来找你说说话"
+                            "无聊了，来找你说说话。"
                         ]);
                     }
                 }
 
                 if (generatedText.length > 0) {
-                    // ── Server-side deduplication: reject identical/near-identical messages ──
+                    // 鈹€鈹€ Server-side deduplication: reject identical/near-identical messages 鈹€鈹€
                     const recentCharMsgs = db.getMessages(character.id, 15)
                         .filter(m => m.role === 'character')
                         .slice(-8)
@@ -548,7 +589,7 @@ ${universalResult.preamble}`;
                         }
                         if ((matches / longer) > 0.5) return true;
 
-                        // Layer 3: Prefix pattern — if first 40% of message is same, it's a structural repeat
+                        // Layer 3: Prefix pattern 鈥?if first 40% of message is same, it's a structural repeat
                         const prefixLen = Math.max(4, Math.floor(Math.min(prev.length, normalizedNew.length) * 0.4));
                         if (prev.substring(0, prefixLen) === normalizedNew.substring(0, prefixLen)) return true;
 
@@ -559,13 +600,13 @@ ${universalResult.preamble}`;
                         // Track consecutive dedup blocks per character
                         const blockCount = (dedupBlockCounts.get(character.id) || 0) + 1;
                         dedupBlockCounts.set(character.id, blockCount);
-                        console.log(`[Engine] 🔁 DEDUP: ${charCheck.name} generated duplicate message (block #${blockCount}), SKIPPING: "${generatedText.substring(0, 60)}..."`);
+                        console.log(`[Engine] DEDUP: ${charCheck.name} generated duplicate message (block #${blockCount}), SKIPPING: "${generatedText.substring(0, 60)}..."`);
 
                         if (blockCount >= 2) {
                             // After 2 consecutive blocks, inject a context-breaking system message
-                            const topicResetMsg = `[System Notice: Your previous messages were too repetitive and were blocked. You MUST talk about something COMPLETELY DIFFERENT now. Do NOT reply to the user's last message again — instead, share what you're doing, talk about something random, express a new emotion, or bring up an unrelated memory. Be creative and surprising.]`;
+                            const topicResetMsg = `[System Notice: Your previous messages were too repetitive and were blocked. You MUST talk about something COMPLETELY DIFFERENT now. Do NOT reply to the user's last message again - instead, share what you're doing, talk about something random, express a new emotion, or bring up an unrelated memory. Be creative and surprising.]`;
                             db.addMessage(character.id, 'system', topicResetMsg);
-                            console.log(`[Engine] 📝 Injected topic-reset notice for ${charCheck.name} after ${blockCount} dedup blocks.`);
+                            console.log(`[Engine] Injected topic-reset notice for ${charCheck.name} after ${blockCount} dedup blocks.`);
                             dedupBlockCounts.set(character.id, 0); // Reset counter
                         }
 
@@ -609,10 +650,10 @@ ${universalResult.preamble}`;
             console.error(`[Engine] Failed to trigger message for ${character.id}:`, e.message);
             // Show the error visibly in the chat so the user knows what went wrong
             const errText = e.message || 'Unknown error';
-            const { id: msgId, timestamp: msgTs } = db.addMessage(character.id, 'system', `[System] ⚠️ API Error: ${errText}`);
+            const { id: msgId, timestamp: msgTs } = db.addMessage(character.id, 'system', `[System] API Error: ${errText}`);
             broadcastNewMessage(wsClients, {
                 id: msgId, character_id: character.id, role: 'system',
-                content: `[System] ⚠️ API Error: ${errText}`, timestamp: msgTs
+                content: `[System] API Error: ${errText}`, timestamp: msgTs
             });
         }
 
@@ -664,13 +705,15 @@ ${universalResult.preamble}`;
         }, delay);
 
         timers.set(character.id, { timerId, targetTime: Date.now() + delay, isThinking: false });
+        broadcastEngineState(wsClients);
     }
 
     // Explicitly stop a character's engine
-    function stopTimer(characterId) {
+    function stopTimer(characterId, wsClients = null) {
         if (timers.has(characterId)) {
             clearTimeout(timers.get(characterId).timerId);
             timers.delete(characterId);
+            if (wsClients) broadcastEngineState(wsClients);
         }
     }
 
@@ -682,7 +725,7 @@ ${universalResult.preamble}`;
             if (char.status !== 'active') continue;
 
             if (char.sys_proactive === 0) {
-                // Proactive messaging is OFF — don't trigger startup message, just keep timer silent
+                // Proactive messaging is OFF 鈥?don't trigger startup message, just keep timer silent
                 console.log(`[Engine] ${char.name}: sys_proactive=OFF, skipping startup message.`);
                 continue;
             }
@@ -691,36 +734,13 @@ ${universalResult.preamble}`;
             // This prevents echoing the character's own last message on every server restart.
             scheduleNext(char, wsClients);
         }
+        broadcastEngineState(wsClients);
         // Broadcast live engine state every second
-        setInterval(() => {
-            // Skip if no clients are connected
-            if (!wsClients || wsClients.size === 0) return;
-
-            // Batch: single query for all characters instead of N individual lookups
-            const allChars = db.getCharacters();
-            const charMap = {};
-            for (const c of allChars) charMap[c.id] = c;
-
-            const stateData = {};
-            for (const [charId, timerData] of timers.entries()) {
-                const charCheck = charMap[charId];
-                if (charCheck) {
-                    stateData[charId] = {
-                        countdownMs: Math.max(0, timerData.targetTime - Date.now()),
-                        isThinking: timerData.isThinking || false,
-                        pressure: charCheck.pressure_level || 0,
-                        status: charCheck.status,
-                        isBlocked: charCheck.is_blocked
-                    };
-                }
-            }
-            const payload = JSON.stringify({ type: 'engine_state', data: stateData });
-            wsClients.forEach(client => {
-                if (client.readyState === 1 /* WebSocket.OPEN */) {
-                    client.send(payload);
-                }
-            });
-        }, 1000);
+        if (!stateBroadcastInterval) {
+            stateBroadcastInterval = setInterval(() => {
+                broadcastEngineState(wsClients);
+            }, 1000);
+        }
     }
 
     // Sends the message object to all connected frontend clients
@@ -772,6 +792,15 @@ ${universalResult.preamble}`;
         if (!char || char.status !== 'active' || char.is_blocked) return;
 
         console.log(`[Engine] User sent message to ${char.name}. Resetting timer.`);
+        const hadPendingCityReply = !!char.city_reply_pending;
+        const cityIgnoreStreak = Math.max(0, char.city_ignore_streak || 0);
+
+        if (hadPendingCityReply) {
+            db.updateCharacter(characterId, {
+                city_reply_pending: 0,
+                city_post_ignore_reaction: cityIgnoreStreak > 0 ? 1 : 0
+            });
+        }
 
         // We optionally trigger an immediate response. Wait 1-3 seconds for realism.
         setTimeout(() => {
@@ -779,10 +808,15 @@ ${universalResult.preamble}`;
             const freshChar = db.getCharacter(characterId);
             if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) return;
             // Trigger a reply. We leave pressure AND jealousy as-is for this reply so it generates the Return Reaction
-            // Jealousy is NOT zeroed out — the AI decides via [JEALOUSY:N] tag when to forgive
-            triggerMessage(freshChar, wsClients, true).then(() => {
-                // Zero out pressure, but keep jealousy (AI will self-regulate via [JEALOUSY:0] tag)
-                db.updateCharacter(characterId, { pressure_level: 0, last_user_msg_time: Date.now() });
+            // Jealousy is NOT zeroed out 鈥?the AI decides via [JEALOUSY:N] tag when to forgive
+            triggerMessage(freshChar, wsClients, true).finally(() => {
+                // The model must explicitly relax via [PRESSURE]/[JEALOUSY] tags.
+                const cleanupPatch = { last_user_msg_time: Date.now() };
+                if (hadPendingCityReply) {
+                    cleanupPatch.city_post_ignore_reaction = 0;
+                    cleanupPatch.city_ignore_streak = 0;
+                }
+                db.updateCharacter(characterId, cleanupPatch);
             });
         }, 1500);
 
@@ -797,18 +831,18 @@ ${universalResult.preamble}`;
      */
     function triggerJealousyCheck(activeCharacterId, wsClients) {
         const characters = db.getCharacters();
-        const activeChar = db.getCharacter(activeCharacterId);
-        const rivalName = activeChar ? activeChar.name : 'someone';
+        const activeCharacter = db.getCharacter(activeCharacterId);
+        const rivalName = activeCharacter?.name || activeCharacterId || 'someone else';
 
         for (const char of characters) {
             if (char.id !== activeCharacterId && char.status === 'active' && char.sys_jealousy !== 0) {
                 const userProfile = db.getUserProfile();
                 const jealousyChance = userProfile?.jealousy_chance ?? 0.05;
                 if (Math.random() < jealousyChance) {
-                    // Accumulate jealousy_level (0→1→2→3→4 max)
+                    // Accumulate jealousy_level (0鈫?鈫?鈫?鈫? max)
                     const newLevel = Math.min(4, (char.jealousy_level || 0) + 1);
-                    db.updateCharacter(char.id, { jealousy_level: newLevel, jealousy_target: rivalName });
-                    console.log(`[Engine] Jealousy for ${char.name} → level ${newLevel} (rival: ${rivalName})`);
+                    db.updateCharacter(char.id, { jealousy_level: newLevel, jealousy_target: activeCharacterId });
+                    console.log(`[Engine] Jealousy for ${char.name} 鈫?level ${newLevel} (rival: ${rivalName})`);
 
                     stopTimer(char.id);
                     const delayMs = getRandomDelayMs(0.5, 2);
@@ -816,7 +850,7 @@ ${universalResult.preamble}`;
                     setTimeout(() => {
                         // Re-fetch to get updated jealousy_level
                         const freshChar = db.getCharacter(char.id);
-                        if (freshChar) triggerJealousyMessage(freshChar, wsClients, rivalName);
+                        if (freshChar) triggerJealousyMessage(freshChar, wsClients, activeCharacterId);
                     }, delayMs);
                 }
             }
@@ -824,12 +858,13 @@ ${universalResult.preamble}`;
     }
 
     /**
-     * Specialized message trigger for Jealousy — delegates to triggerMessage
+     * Specialized message trigger for Jealousy 鈥?delegates to triggerMessage
      * since buildPrompt already injects jealousy context (level + rival name).
      * This ensures jealousy messages get the full chat window, memories, anti-repeat, etc.
      */
-    async function triggerJealousyMessage(character, wsClients, rivalName = 'someone') {
-        console.log(`[Engine] Jealousy message for ${character.name} (rival: ${rivalName}, level: ${character.jealousy_level})`);
+    async function triggerJealousyMessage(character, wsClients, rivalId = null) {
+        const rivalLabel = rivalId ? (db.getCharacter(rivalId)?.name || rivalId) : 'someone else';
+        console.log(`[Engine] Jealousy message for ${character.name} (rival: ${rivalLabel}, level: ${character.jealousy_level})`);
         // triggerMessage with isUserReply=false so it also escalates pressure
         await triggerMessage(character, wsClients, false);
     }
@@ -857,7 +892,7 @@ ${universalResult.preamble}`;
         await triggerMessage(character, wsClients, false, false, sysDirective);
     }
 
-    // ─── Group Proactive Messaging ───────────────────────────────────────────────
+    // 鈹€鈹€鈹€ Group Proactive Messaging 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     const groupProactiveTimers = new Map(); // Store group proactive timers { groupId: handle }
     let groupChainCallback = null;
 
@@ -919,35 +954,33 @@ ${universalResult.preamble}`;
         const tod = hour < 6 ? '深夜' : hour < 10 ? '早上' : hour < 14 ? '中午' : hour < 18 ? '下午' : '晚上';
 
         // 1+2 Hybrid Hidden Context Injection
-        const hiddenState = db.getCharacterHiddenState(picked.id);
-        const privateLimit = profile?.private_msg_limit_for_group ?? 3;
-        const recentPrivateMsgs = privateLimit > 0 ? db.getMessages(picked.id, privateLimit).reverse() : [];
-        let secretContextStr = '';
-        if (hiddenState || recentPrivateMsgs.length > 0) {
-            const pmLines = recentPrivateMsgs.map(m => `${m.role === 'user' ? userName : picked.name}: ${m.content}`).join('\n');
-            secretContextStr = `\n\n====== [CRITICAL: ABSOLUTELY SECRET PRIVATE CONTEXT] ======`;
-            if (hiddenState) secretContextStr += `\n[YOUR HIDDEN MOOD/SECRET THOUGHT]: ${hiddenState}`;
-            if (pmLines) secretContextStr += `\n[RECENT PRIVATE CHAT INBOX (For Context ONLY)]:\n${pmLines}`;
-            secretContextStr += `\n\n[CRITICAL PRIVATE CONTEXT]: The above is your private memory and hidden mood with the User. You can choose whether to keep this a secret, casually mention it, or directly reveal it in the public group, depending entirely on your persona and the conversation flow.\n==========================================================`;
-        }
+        const otherMembers = group.members
+            .filter(m => m.member_id !== 'user' && m.member_id !== picked.id)
+            .map(m => db.getCharacter(m.member_id))
+            .filter(Boolean);
+        const engineContextWrapper = { getUserDb, getMemory: require('./memory').getMemory, userId };
+        const universalResult = await buildUniversalContext(engineContextWrapper, picked, recentTexts, true, otherMembers);
+        const secretContextStr = `\n统一上下文：\n${universalResult?.preamble || ''}`;
 
-        const systemPrompt = `你是${picked.name}，在群聊"${group.name}"里。Persona: ${picked.persona || '无'}
+        const systemPrompt = `你是${picked.name}，正在群聊"${group.name}"中。Persona: ${picked.persona || '普通人'}
 现在是${tod}。你想主动在群里发一条消息，引发一些互动。
 最近的对话：${recentTexts || '（无）'}
 要求：
-1. 说一句全新的话，绝对不能重复或改写上面的任何内容。
-2. 可以发起新话题、聊生活、问问题、分享心情等。
-3. 保持口语化，简短（1-2句）。
+1. 说一句全新的话，不能重复上面的任何内容。
+2. 可以发起新话题、聊生活、问问题、分享心情。
+3. 保持口语化，1-2句。
 4. 不要带名字前缀，直接说话。${secretContextStr}`;
 
         try {
-            const reply = await callLLM({
+            const { content: reply, usage } = await callLLM({
                 endpoint: picked.api_endpoint,
                 key: picked.api_key,
                 model: picked.model_name,
                 messages: [{ role: 'system', content: systemPrompt }, ...historyForPrompt],
-                maxTokens: picked.max_tokens || 300
+                maxTokens: picked.max_tokens || 300,
+                returnUsage: true
             });
+            recordTokenUsage(picked.id, 'group_proactive', usage);
             if (reply && reply.trim()) {
                 const clean = reply.trim().replace(/\[CHAR_AFFINITY:[^\]]*\]/gi, '').trim();
                 if (clean) {
@@ -1014,3 +1047,6 @@ ${universalResult.preamble}`;
 }
 
 module.exports = { getEngine, engineCache };
+
+
+

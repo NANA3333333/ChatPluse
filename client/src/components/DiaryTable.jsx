@@ -31,6 +31,19 @@ function DiaryTable({ contact, apiUrl, onClose }) {
             });
     }, [apiUrl, contact, contact?.id]);
 
+    useEffect(() => {
+        const handleCharacterDataWiped = (event) => {
+            if (event.detail?.characterId !== contact?.id) return;
+            setDiaries([]);
+            setIsUnlocked(false);
+            setPasswordInput('');
+            setPwError('');
+            setLoading(false);
+        };
+        window.addEventListener('character_data_wiped', handleCharacterDataWiped);
+        return () => window.removeEventListener('character_data_wiped', handleCharacterDataWiped);
+    }, [contact?.id]);
+
     const handlePasswordSubmit = async (e) => {
         e.preventDefault();
         if (!passwordInput.trim()) return;

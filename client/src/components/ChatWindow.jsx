@@ -3,23 +3,11 @@ import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
 import TransferModal from './TransferModal';
 import RecommendModal from './RecommendModal';
-import { Send, Smile, Paperclip, Bell, Users, EyeOff, ShieldBan, Trash, BookOpen, Brain, MoreHorizontal, UserPlus, Gift, Heart, UserMinus, ShieldAlert, BadgeInfo, Eye, ChevronLeft } from 'lucide-react';
+import { Send, Smile, Paperclip, Bell, Users, ShieldBan, Trash, BookOpen, Brain, MoreHorizontal, UserPlus, Gift, Heart, UserMinus, ShieldAlert, BadgeInfo, ChevronLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
-// Parse /hide 0-xx, /hide xx, /unhide commands
-function parseHideCommand(text) {
-    const hideRangeMatch = text.match(/^\/hide\s+(\d+)\s*[-~]\s*(\d+)\s*$/i);
-    if (hideRangeMatch) return { cmd: 'hide', start: parseInt(hideRangeMatch[1]), end: parseInt(hideRangeMatch[2]) };
 
-    const hideSingleMatch = text.match(/^\/hide\s+(\d+)\s*$/i);
-    if (hideSingleMatch) return { cmd: 'hide', start: 0, end: parseInt(hideSingleMatch[1]) };
-
-    const unhideMatch = text.match(/^\/unhide\s*$/i);
-    if (unhideMatch) return { cmd: 'unhide' };
-
-    return null;
-}
 
 function SystemMessage({ text }) {
     return (
@@ -42,7 +30,7 @@ function ChatWindow({
     const [isRecommendModalOpen, setIsRecommendModalOpen] = useState(false);
     const [hasMore, setHasMore] = useState(false);
     const [loadingMore, setLoadingMore] = useState(false);
-    const [showHidden, setShowHidden] = useState(false);
+
     const [selectMode, setSelectMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState(new Set());
     const PAGE_SIZE = 100;
@@ -68,6 +56,18 @@ function ChatWindow({
             })
             .catch(err => console.error('Failed to load messages:', err));
     }, [contact?.id, apiUrl]);
+
+    useEffect(() => {
+        const handleCharacterDataWiped = (event) => {
+            if (event.detail?.characterId !== contactRef.current?.id) return;
+            setMessages([]);
+            setHasMore(false);
+            setSelectedIds(new Set());
+            setSelectMode(false);
+        };
+        window.addEventListener('character_data_wiped', handleCharacterDataWiped);
+        return () => window.removeEventListener('character_data_wiped', handleCharacterDataWiped);
+    }, []);
 
     const loadMore = async () => {
         if (loadingMore || messages.length === 0) return;
@@ -125,45 +125,13 @@ function ChatWindow({
         }
     }, [messages]);
 
-    useEffect(() => {
-        if (onMessagesChange) {
-            const count = messages.filter(m => m.hidden).length;
-            console.log('ChatWindow reporting hidden count:', count);
-            onMessagesChange(count);
-        }
-    }, [messages, onMessagesChange]);
+
 
     const handleSend = async (text) => {
         const currentContactId = contactRef.current?.id;
         if (!currentContactId) return;
 
-        // Check for /hide or /unhide slash commands
-        const hideCmd = parseHideCommand(text.trim());
-        if (hideCmd) {
-            if (hideCmd.cmd === 'hide') {
-                const res = await fetch(`${apiUrl}/messages/${currentContactId}/hide`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ startIdx: hideCmd.start, endIdx: hideCmd.end })
-                });
-                const data = await res.json();
-                if (data.success && contactRef.current?.id === currentContactId) {
-                    const updated = await fetch(`${apiUrl}/messages/${currentContactId}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json());
-                    setMessages(updated);
-                }
-            } else if (hideCmd.cmd === 'unhide') {
-                const res = await fetch(`${apiUrl}/messages/${currentContactId}/unhide`, {
-                    method: 'POST',
-                    headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' }
-                });
-                const data = await res.json();
-                if (data.success && contactRef.current?.id === currentContactId) {
-                    const updated = await fetch(`${apiUrl}/messages/${currentContactId}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json());
-                    setMessages(updated);
-                }
-            }
-            return;
-        }
+
 
         try {
             const res = await fetch(`${apiUrl}/messages`, {
@@ -254,10 +222,6 @@ function ChatWindow({
         );
     }
 
-    const hiddenCount = messages.filter(m => m.hidden).length;
-    // Always show all messages to the user. Hidden = dimmed (AI won't see them).
-    // showHidden controls whether the dim effect + badge are visible or not.
-
     return (
         <>
             <div className="chat-header">
@@ -288,16 +252,6 @@ function ChatWindow({
                 </div>
             </div>
 
-            {hiddenCount > 0 && (
-                <div
-                    style={{ display: 'flex', justifyContent: 'center', padding: '5px', background: '#fff9e0', cursor: 'pointer', fontSize: '12px', color: '#888', gap: '5px', alignItems: 'center', borderBottom: '1px solid #f0e8c0' }}
-                    onClick={() => setShowHidden(h => !h)}
-                >
-                    {showHidden ? <Eye size={13} /> : <EyeOff size={13} />}
-                    {hiddenCount} messages hidden from AI context (shown dimmed) — click to {showHidden ? 'show badges' : 'hide badges'}
-                </div>
-            )}
-
             {isCurrentlyBlocked && (
                 <div style={{ textAlign: 'center', padding: '8px', background: '#ffebeb', color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold', borderBottom: '1px solid #ffcccc' }}>
                     You are blocked by {contact.name}. You cannot send messages.
@@ -322,17 +276,29 @@ function ChatWindow({
                 )}
                 {messages.map((msg, idx) => {
                     if (idx > 0 && messages[idx - 1].id === msg.id) return null;
+
+                    const currentLimit = contact?.context_msg_limit || 60;
+                    const isBoundary = idx === Math.max(0, messages.length - currentLimit) && messages.length > currentLimit;
+                    const boundaryElement = isBoundary ? (
+                        <div key={`boundary-${msg.id}`} style={{ textAlign: 'center', margin: '30px 0', position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                            <div style={{ borderBottom: '1px dashed #ccc', position: 'absolute', top: '20px', left: '10%', right: '10%' }}></div>
+                            <span style={{ background: '#f5f5f5', padding: '0 15px', color: '#888', fontSize: '12px', fontWeight: 'bold', position: 'relative', zIndex: 1, textTransform: 'uppercase', letterSpacing: '1px' }}>
+                                👀 {lang === 'en' ? 'AI Vision Boundary' : 'AI 视界边界'} 👀
+                            </span>
+                            <div style={{ fontSize: '11px', color: '#aaa', marginTop: '4px', position: 'relative', zIndex: 1, backgroundColor: '#f5f5f5', padding: '0 10px' }}>
+                                {lang === 'en' ? 'AI can only "see" messages below this line' : '模型只能感知此线以下的消息'}
+                            </div>
+                        </div>
+                    ) : null;
+
                     const isSelected = selectedIds.has(msg.id);
                     return (
-                        <div key={msg.id} style={{
-                            display: 'flex', alignItems: 'flex-start', gap: '0px',
-                            ...(msg.hidden ? {
-                                opacity: 0.4, filter: 'grayscale(0.5)',
-                                borderLeft: '3px solid #f0c060', paddingLeft: '4px',
-                                marginBottom: '2px'
-                            } : {}),
-                            ...(isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {})
-                        }}
+                        <React.Fragment key={msg.id}>
+                            {boundaryElement}
+                            <div style={{
+                                display: 'flex', alignItems: 'flex-start', gap: '0px',
+                                ...(isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {})
+                            }}
                             onClick={selectMode ? () => {
                                 setSelectedIds(prev => {
                                     const next = new Set(prev);
@@ -369,6 +335,7 @@ function ChatWindow({
                                 />
                             </div>
                         </div>
+                        </React.Fragment>
                     );
                 })}
                 {engineState?.[contact.id]?.countdownMs > 0 && engineState?.[contact.id]?.isBlocked !== 1 && (
@@ -463,30 +430,6 @@ function ChatWindow({
                 <InputBar
                     onSend={handleSend}
                     onTransfer={() => setIsTransferModalOpen(true)}
-                    onQuickHide={async () => {
-                        const cid = contactRef.current?.id;
-                        if (!cid) return;
-                        // Only consider visible (non-hidden) messages for halving
-                        const visibleMsgs = messages.filter(m => !m.hidden);
-                        const halfCount = Math.floor(visibleMsgs.length / 2);
-                        if (halfCount === 0) return;
-                        // Get IDs of messages to hide (first half of visible msgs)
-                        const toHideIds = new Set(visibleMsgs.slice(0, halfCount).map(m => m.id));
-                        try {
-                            const res = await fetch(`${apiUrl}/messages/${cid}/hide`, {
-                                method: 'POST',
-                                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ messageIds: Array.from(toHideIds) })
-                            });
-                            const data = await res.json();
-                            if (data.success && contactRef.current?.id === cid) {
-                                // Update locally instead of refetching — preserves hasMore and pagination
-                                setMessages(prev => prev.map(m => toHideIds.has(m.id) ? { ...m, hidden: 1 } : m));
-                            }
-                        } catch (e) {
-                            console.error('Failed to hide old messages:', e);
-                        }
-                    }}
                 />
             )}
             {isTransferModalOpen && (

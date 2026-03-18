@@ -1,8 +1,8 @@
 import React, { useState, useRef } from 'react';
-import { Smile, Paperclip, CreditCard, X, EyeOff } from 'lucide-react';
+import { Smile, Paperclip, CreditCard, X } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 
-function InputBar({ onSend, onTransfer, onQuickHide }) {
+function InputBar({ onSend, onTransfer }) {
     const { t, lang } = useLanguage();
     const [text, setText] = useState('');
     const [showEmojiPicker, setShowEmojiPicker] = useState(false);
@@ -76,17 +76,7 @@ function InputBar({ onSend, onTransfer, onQuickHide }) {
                         <CreditCard size={20} color="var(--accent-color)" />
                     </button>
                 )}
-                {onQuickHide && (
-                    <button
-                        type="button"
-                        onClick={onQuickHide}
-                        title={lang === 'en' ? 'Quick-hide old messages from AI context' : '折叠前半部分的聊天记录（不给AI看到）'}
-                        style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '11px', color: '#888', padding: '4px 8px', borderRadius: '6px', border: '1px solid #ddd', background: '#fafafa' }}
-                    >
-                        <EyeOff size={14} />
-                        <span>{t('Hide Old Messages')}</span>
-                    </button>
-                )}
+
 
                 {showEmojiPicker && (
                     <div className="emoji-picker" style={{
@@ -112,7 +102,7 @@ function InputBar({ onSend, onTransfer, onQuickHide }) {
                     value={text}
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={handleKeyDown}
-                    placeholder={lang === 'en' ? 'Type a message... (try /hide 0-50 or /unhide)' : '输入消息... (支持 /hide 或 /unhide)'}
+                    placeholder={lang === 'en' ? 'Type a message...' : '输入消息...'}
                 />
             </div>
             <div className="input-actions">

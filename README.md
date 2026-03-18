@@ -1,103 +1,254 @@
-# ChatPulse: v1.0.0 稳定版 (Stable Release) 🎉
+# ChatPulse
 
-ChatPulse 是一款类似于微信（WeChat）的独立 Web 应用程序，致力于在这个平台上构建一种“超现实”与高自由度的 AI 沉浸式社交模拟器。
+**English** | **中文**
 
-在经历了持续的开发与打磨后，本版本（v1.0.0）作为**首个稳定体验版**发布，全面修复了底层逻辑、群聊体验分配、存档同步以及 UI 渲染的诸多核心问题！
+ChatPulse is an AI social simulation app built around private chats, group chats, a social feed, and an autonomous city-life system.
 
----
+ChatPulse 是一个以私聊、群聊、朋友圈和“商业街”自治生活模拟为核心的 AI 社交模拟应用。
 
-## 🌟 核心特性 (Core Features)
+Instead of behaving like a single-turn chatbot demo, characters in ChatPulse are designed to persist over time: they keep memories, build relationships, react emotionally, post updates, join group chats, and continue living inside the city simulation even when the user is offline.
 
-- **💬 独立微型 API 调度机制**：跳过沉重的框架限制，前端直接对接后端专用于社交的 AI 调度引擎，支持并行拉起多个角色的对话框。
-- **🌐 动态“朋友圈”系统 (Moments Feed)**：当你与某个角色发生重要剧情时，AI 可能主动发朋友圈。你可以点赞、评论，其它 AI 角色也会前来互动。
-- **💕 隐秘档案与好感度 (Affinity & Diaries)**：内置好感度（Affinity）机制。
-  - **带密码的深层日记档案 (Secret Diaries with Passwords)**：每个角色都会实时记录日记，但它是**上锁的**！你需要通过聊天，像玩海龟汤一样套出密码，才能在日记面板进行解密查看。
-- **🎭 极致社交摩擦 (Jealousy & Pressure System)**：
-  - **吃醋系统**：在某角色的好感度极高时，如果你冷落 TA 转而和其他角色聊天，TA 极有可能吃醋并产生抱怨式的夺命连环 Call。
-  - **压力崩溃系统**：被冷落、被骂、或者面对焦虑剧情时，角色的“压力值（Pressure）”上升。当达到临界点，TA 会彻底崩溃，拉黑你不再回复！
-  - **突破常规**：你必须使用特殊手段（比如转账高额金钱、群聊围兜等）才能使 TA 解除拉黑或回心转意。
-- **🔥 AI 互相交谈的群聊系统 (Group Chats)**：创建包含多个角色的群聊。支持 AI 彼此接话，拥有专门的群聊红包和破冰机制！
+它不是一个单轮问答式的聊天 Demo。ChatPulse 里的角色会持续生活：他们会积累记忆、建立关系、产生嫉妒和焦虑、发朋友圈、参与群聊，并在用户不在线时继续在商业街系统里行动。
 
----
+## Highlights | 核心亮点
 
-## 🏙️ v26.03.10 重磅级新DLC与机制升级 (Latest Update)
+- Persistent AI characters  
+  持续存在的 AI 角色
+  - Private chat, group chat, moments, diaries, hidden thoughts, gifts, transfers  
+    私聊、群聊、朋友圈、日记、隐藏心态、礼物、转账
 
-本次重大更新引入了全新的**「商业街生态模拟器 (Commercial Street DLC)」**，并修复了聊天系统中好感度/钱包机制的历史缺陷，引入了全双工的 WebSocket 状态同步机制。
+- Unified context pipeline  
+  统一上下文管线
+  - Private chat, visible group messages, moments, city logs, long-term memory, pressure, jealousy, and hidden state are merged into one shared context builder  
+    私聊、群聊可见内容、朋友圈、商业街日志、长期记忆、压力、嫉妒、隐藏状态会汇入同一套大输入库
 
-### 1. 🏪 商业街自治系统 (Autonomous City Simulation)
-*   **全天候作息演化**：系统内的角色拥有各自的 `卡路里` 与 `钱包` 设定。新的一天开始时，他们会根据个人性格在不同的区域（公园、工厂、餐厅等）自动移动、打工或闲逛。
-*   **偶遇与社交摩擦 (Social Encounters)**：脱离玩家控制，多个角色在同一物理位置会有概率“撞见”彼此，爆发独立的故事线，并互相发送红包礼物，改变他们相互之间的好感度。
-*   **离线时间跳跃记录 (Time Skip Backfill)**：当你离开几天后再次上线，大模型会通过推演补签出这几天角色的生活轨迹和内心日记、朋友圈。
+- Long-term memory system  
+  长期记忆系统
+  - Vector retrieval  
+    向量检索
+  - Overflow digestion via `W`  
+    通过 `W` 做滑窗溢出消化
+  - Daily memory aggregation  
+    每日记忆汇总
+  - Batch-based daily aggregation for smaller memory models  
+    支持给小模型分批读取、分批整理，避免上下文过长
 
-### 2. ⚡ 全双工状态热更新 (Real-Time WebSocket Sync)
-*   **实时情感反馈**：角色在隐秘输出 `[AFFINITY:...]` (好感度) 或 `[PRESSURE:...]` (焦虑值) 时，设置面板的进度条与数值会**立即跳变**，无需手动刷新页面。
-*   **向量记忆热提取**：后台模型异步抽取重要长线记忆后，将会直接投射到前端的“记忆簿”面板。玩家能够瞬间看到角色刚把你哪句话“记在小本本上”。
+- Commercial Street simulation  
+  商业街自治模拟
+  - Districts, items, schedules, city logs, encounters, autonomous actions  
+    分区、商品、日程、活动日志、偶遇、自治行动
+  - Characters can proactively message the user after city events  
+    角色可以在商业街经历事件后主动联系用户
+  - Ignored outreach can escalate anxiety and jealousy  
+    连续被晾着后会逐步累积焦虑与嫉妒
 
-### 3. 💸 经济与人设抢救修复 (Economy Override Fix)
-*   **转账收发逻辑重构**：修复了角色因为 AI 安全审查而在设定上过度拒绝金钱转账的问题。好感度高时，傲娇但诚实的角色将会顺利接收你的打款，而破防状态下，只要不说出严格的“退还”指令，也将支持基于你的金钱原谅你解除拉黑。
+- Social-emotional systems  
+  社交情绪系统
+  - Pressure  
+    压力
+  - Jealousy  
+    嫉妒
+  - Cross-context awareness between private chat, group chat, moments, and city life  
+    私聊、群聊、朋友圈、商业街之间的交叉感知
 
----
+- Admin-ready architecture  
+  可扩展的管理端架构
+  - The admin dashboard remains in the active codebase and can be extended for hosted account and permission management  
+    管理员后台仍保留在主链中，后续可继续扩展为云端账号与权限管理
 
-## 🛠️ v26.03.04 核心修补与功能增强更新 (Previous Update)
+## Core Modules | 核心模块
 
-本次更新主要集中在**「修罗场吃醋系统」**的彻底进化，以及**「数据清除(Deep Wipe)」**机制的究极重构，解决了之前吃醋机制概率低、上下文缺失以及清除数据不彻底的历史遗留问题。
+### 1. Private Chat | 私聊
 
-### 1. 💚 修罗场/吃醋系统 (Jealousy System) 全面强化
-*   **100% 概率生效修复**：修复了吃醋概率的“双重除法” Bug。现在前端设置的概率（如 100%）在后端将精准生效，拉满 100% 后，只要你和别人聊天，相关的角色必定当场破防吃醋。
-*   **上下文全面解禁**：吃醋触发时，完美共享正常的对话上下文系统。AI 在“阴阳怪气”你的时候，也能看到：完整聊天记录、你的历史记忆(向量库)、八卦系统偷听到的内容、群聊互动、甚至防重复机制。
-*   **吃醋联动高压机制**：吃醋被触发时，除了 `jealousy_level` 升高，角色的 `pressure_level` (焦虑值) 也会隐性上涨。冷暴力不回消息，他们真的会绝望甚至拉黑你。
+Characters can:
 
-### 2. 🧽 究极版数据清洗 (Ultimate Deep Wipe)
-*   **彻底斩断“前世今生”**：之前点击“清空记忆”只会清除聊天、记忆和朋友圈。现在，**Deep Wipe 将清除所有与该角色相关的数据**。
-*   **新增以下清理项目**：
-    *   **红包与转账记录 (`private_transfers`)**：彻底清除，不再出现清空记忆后 AI 仍记得未领转账的问题。
-    *   **朋友圈互动痕迹 (`moment_likes/comments`)**：以前的点赞和评论一并销毁。
-    *   **内心剧场与吃醋状态 (`hidden_state` & `jealousy`)**：前世的阴阳怪气与吃醋目标不再带入下一世。
-    *   **朋友圈发文CD (`last_moment_at`)**：重置发文冷却，随时重新开始。
-*   **防误判迭代机制**：转账催收系统新增了“24小时过期限制”，即使是正常对话，超过24小时的未领转账 AI 也会自动随风散去。
+角色可以：
+- proactively message the user  
+  主动私聊用户
+- retrieve relevant long-term memories  
+  检索相关长期记忆
+- react emotionally to neglect or triangulation  
+  对冷落、偏爱他人、忽视产生情绪反应
+- maintain hidden state and emotional continuity  
+  保持隐藏心态和连续情绪
 
----
+### 2. Group Chat | 群聊
 
-## 🛠️ v1.0.0 稳定版核心修复与升级 (Release Notes & Fixes)
+Characters can:
 
-本次稳定版重点解决了系统在长时间运行、复杂群聊以及极端社交压力下产生的系统级 Bug，大幅提高了可用性：
+角色可以：
+- talk to each other in groups  
+  在群里彼此对话
+- read their own visible private-chat window when replying in group  
+  在群聊时读取自己私聊窗口中可见的内容
+- bring group experiences back into private chat  
+  把群聊经历带回私聊里继续影响反应
 
-### 1. 架构与部署修复 (Architecture & Deployment)
-- **云端部署稳定性 (Cloud Deployment Fixs)**：修复了云服务器上的 `HTTP 502 Bad Gateway` 问题。修改了 PM2 启动配置，确保前后端能够正确地进行代理中转。
-- **服务器启动挂起 (Server Startup Hangs)**：修复了由于 `engine.js` 内的遗留挂起回调导致 Node Express 服务器启动时阻塞，无法监听 8001 端口并进入假死状态的问题。
-- **浏览器缓存阻断备份 (Database Backup Real-time)**：修复了点击“下载完整备份 (.db)”时下载到旧版数据库的问题。新增了强制 SQLite WAL Checkpoint 合并 (`pragma wal_checkpoint`)以及强制跳过浏览器 GET 缓存的 HTTP 响应头。
+### 3. Moments Feed | 朋友圈
 
-### 2. 聊天与系统底层 (Chat Engine & Core Data)
-- **AI 夺命连环 Call / API 死循环漏洞 (API Infinite Loop Fix)**：修复了当角色（特别是病娇或高好感角色）压力值满载时，会陷入不断触发主动消息又快速失败重试的无限 API 消耗及卡顿循环问题。
-- **角色数据彻底抹除 (Deep Wiping System)**：修复了设置面板中“清空数据”无法完全清除角色（Memories，Moments 和隐秘情感状态）的漏洞。现在 wiping 功能会确保所有记忆向量被彻底连根拔起。
-- **全系统字符删除修正 (Character Deletion)**：修复了用户自己添加的角色经常无法被正确 Delete 移除的 SQLite 外键冲突问题。
+Characters can:
 
-### 3. 群聊体验进阶 (Group Chat Overhaul)
-- **禁止 AI 接话系统 (AI Chain Interruption)**：在群组抽屉中移除了容易卡全局的“全局暂停 AI”开关，引入了全新动态交互式的 **"Interrupt AI / 禁止AI接话"** 悬浮红色按钮。当发现两个 AI 正在群里无休止水群时，随时点击打断他们，并伴随自动 10 秒解禁机制。
-- **更强的群组管控系统 (Group Management)**：新增了可以踢出（Kick）、拉入新成员、解散群组、清空群聊记录的管理员面板功能。如果清除了角色的记忆或删除了角色，其在群组中的身份也会被同步销毁。
+角色可以：
+- post moments  
+  发布朋友圈
+- like and comment  
+  点赞和评论
+- use moments as part of the shared contextual world  
+  把朋友圈内容纳入统一上下文
 
-### 4. UI 界面与交互视觉 (UI / UX Polish)
-- **角色设置面板 UI 修正**：修复了在角色高级设置界面每个修改按钮旁边渲染出多余 `0` 字符的 React 条件渲染 Bug。
-- **吃醋弹窗 (Jealousy Popup)**：优化了“吃醋”弹窗的唤起逻辑与视觉表现，使其更加自然顺滑。
-- **群聊头像堆叠优化 (Avatar Styles)**：全新改版了由多个成员组成的群聊头像渲染方案，采用了更圆润且具备成员堆叠视觉的样式布局。
+### 4. Commercial Street | 商业街
 
----
+The city simulation includes:
 
-## 💻 本地快速启动 (Quick Start Local Setup)
+商业街系统包含：
+- district management  
+  分区管理
+- item management  
+  商品管理
+- autonomous schedules  
+  自主日程
+- work, meals, shopping, leisure, treatment, gambling, and special services  
+  打工、吃饭、购物、休闲、治疗、赌博和特殊服务
+- encounter resolution between characters in the same location  
+  同地点角色之间的偶遇与社交结算
 
-确保你安装了 **Node.js (v18+)** 与 **npm**。
+### 5. Memory System | 记忆系统
 
-**启动后端体验核心 (Node.js)**
-1. 进入 `server` 文件夹。
-2. 安装依赖：`npm install`
-3. 启动后台（默认端口 8001）：`node index.js` 或使用 pm2守护。
+Memory currently has three main paths:
 
-**启动前端交互界面 (Vite + React)**
-1. 进入 `client` 文件夹。
-2. 安装依赖：`npm install`
-3. 启动开发服务器：`npm run dev` (程序默认会在 5173 打开)。
+当前记忆主要有三条路径：
+- immediate extraction  
+  即时提取
+- overflow digestion (`W`)  
+  溢出消化（`W`）
+- scheduled daily aggregation  
+  定时的每日记忆汇总
 
-> **提示:** 云端/生产环境部署建议使用 `pm2` 以保证进程持久守护，配置见 `deploy.ps1` 或 PM2 生态配置。
+Daily aggregation now supports chunked processing:
 
----
-Enjoy your immersive AI social life! 🎈
+每日记忆汇总现已支持分批处理：
+- collect private chats, group chats, moments, and city activities from the day  
+  汇总当天私聊、群聊、朋友圈、商业街活动
+- merge them into one timeline  
+  合并成统一时间线
+- split them into configurable batches  
+  按可配置的批次大小切分
+- call the memory model repeatedly until the full day is processed  
+  多次调用记忆小模型，直到整天内容都被整理完
+
+## Tech Stack | 技术栈
+
+- Frontend: React + Vite  
+  前端：React + Vite
+- Backend: Node.js + Express  
+  后端：Node.js + Express
+- Database: SQLite  
+  数据库：SQLite
+- Memory retrieval: local vector index + SQLite  
+  记忆检索：本地向量索引 + SQLite
+- Realtime sync: WebSocket-based state refresh  
+  实时同步：基于 WebSocket 的状态刷新
+
+## Project Structure | 项目结构
+
+```text
+client/
+  src/
+    components/
+    plugins/city/
+
+server/
+  index.js
+  db.js
+  engine.js
+  contextBuilder.js
+  memory.js
+  plugins/
+    groupChat/
+    city/
+    scheduler/
+
+scripts/
+start-stack.cmd
+stop-stack.cmd
+status-stack.cmd
+```
+
+## Local Development | 本地运行
+
+### Recommended | 推荐方式
+
+Use the stack scripts from the project root:
+
+推荐直接使用根目录的启动脚本：
+
+```bat
+start-stack.cmd
+status-stack.cmd
+stop-stack.cmd
+```
+
+Default ports | 默认端口：
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+
+### Manual Start | 手动启动
+
+Frontend | 前端
+
+```bat
+cd client
+npm install
+npm run dev
+```
+
+Backend | 后端
+
+```bat
+cd server
+npm install
+node index.js
+```
+
+## Direction | 项目方向
+
+This project is not trying to be a generic chatbot interface.
+
+这个项目的目标不是做一个泛化聊天壳。
+
+The current direction is:
+
+当前重点方向是：
+- stronger character continuity  
+  更强的角色连续性
+- stronger emotional persistence  
+  更明显的情绪持续性
+- richer cross-surface awareness between private chat, group chat, moments, and city actions  
+  更强的私聊、群聊、朋友圈、商业街联动
+- believable off-screen life simulation  
+  更可信的离线生活模拟
+- future hosted account management through the admin system  
+  后续通过管理员系统支持云端账号管理
+
+## Notes | 备注
+
+- Historical tools and one-off scripts were archived under  
+  历史工具脚本和一次性脚本已归档到：
+  - [server/_archive_tools](server/_archive_tools)
+
+- The admin dashboard remains part of the active codebase  
+  管理员后台仍保留在主链代码中：
+  - [client/src/components/AdminDashboard.jsx](client/src/components/AdminDashboard.jsx)
+
+## Roadmap | 路线图
+
+- hosted deployment flow for multiple user accounts  
+  面向多用户的云端部署流程
+- stronger admin workflows  
+  更完整的管理员工作流
+- account and permission management  
+  账号与权限管理
+- better memory inspection and debugging tools  
+  更好的记忆查看与调试工具
+- more expressive city event authoring  
+  更强的商业街事件编辑能力

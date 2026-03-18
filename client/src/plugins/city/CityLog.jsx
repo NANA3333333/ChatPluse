@@ -25,7 +25,7 @@ export default function CityLog({ apiUrl, userProfile }) {
         try {
             const headers = { 'Authorization': `Bearer ${token}` };
             const [logsRes, charsRes] = await Promise.all([
-                fetch(`${apiUrl}/city/logs`, { headers }),
+                fetch(`${apiUrl}/city/logs?limit=300`, { headers }),
                 fetch(`${apiUrl}/city/characters`, { headers })
             ]);
             const logsData = await logsRes.json();
@@ -112,6 +112,12 @@ export default function CityLog({ apiUrl, userProfile }) {
                                         groupedLogs[tag].push(log);
                                     });
 
+                                    const latestLogDateTag = logs.length > 0
+                                        ? (() => {
+                                            const latest = new Date(logs[0].timestamp);
+                                            return `${latest.getFullYear()}-${String(latest.getMonth() + 1).padStart(2, '0')}-${String(latest.getDate()).padStart(2, '0')}`;
+                                        })()
+                                        : '';
                                     const todayTagFmt = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}-${String(new Date().getDate()).padStart(2, '0')}`;
 
                                     const toggleDate = (tag) => {
@@ -120,7 +126,7 @@ export default function CityLog({ apiUrl, userProfile }) {
 
                                     const isCollapsed = (tag) => {
                                         if (collapsedDates[tag] !== undefined) return collapsedDates[tag];
-                                        return tag !== todayTagFmt; // true if past date
+                                        return tag !== latestLogDateTag; // default-expand the newest log day
                                     };
 
                                     return Object.keys(groupedLogs).sort((a, b) => b.localeCompare(a)).map(dateTag => {

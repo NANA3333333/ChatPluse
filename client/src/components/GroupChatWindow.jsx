@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Send, Users, Smile, Paperclip, X, Settings, Trash2, UserMinus, ArrowRightLeft, Gift, ChevronLeft, Trash, EyeOff, Eye, UserPlus, Edit3 } from 'lucide-react';
+import { Send, Users, Smile, Paperclip, X, Settings, Trash2, UserMinus, ArrowRightLeft, Gift, ChevronLeft, Trash, UserPlus, Edit3 } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
@@ -169,9 +169,10 @@ function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender, claim
 }
 
 /* ─── Right-side Group Management Drawer ─── */
-function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messages, allContacts, onHide, onUnhide, onAddMember, onRename }) {
+function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messages, allContacts, onAddMember, onRename }) {
     const [noChain, setNoChain] = useState(false);
     const [injectLimit, setInjectLimit] = useState(group?.inject_limit ?? 5);
+    const [contextLimit, setContextLimit] = useState(group?.context_msg_limit ?? 60);
     const [editingName, setEditingName] = useState(false);
     const [nameInput, setNameInput] = useState(group?.name || '');
     const [showAddMember, setShowAddMember] = useState(false);
@@ -180,6 +181,7 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messag
     useEffect(() => {
         if (!group) return;
         setInjectLimit(group.inject_limit ?? 5);
+        setContextLimit(group.context_msg_limit ?? 60);
         setNameInput(group.name || '');
         fetch(`${apiUrl}/groups/${group.id}/no-chain`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json()).then(d => setNoChain(!!d.no_chain)).catch(() => { });
     }, [group, apiUrl]);
@@ -191,6 +193,11 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messag
     const updateInjectLimit = (val) => {
         setInjectLimit(val);
         fetch(`${apiUrl}/groups/${group.id}`, { method: 'PUT', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ inject_limit: val }) });
+    };
+    const updateContextLimit = (val) => {
+        setContextLimit(val);
+        fetch(`${apiUrl}/groups/${group.id}`, { method: 'PUT', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ context_msg_limit: val }) });
+        if (group) group.context_msg_limit = val;
     };
     const clearMessages = () => { if (window.confirm(lang === 'en' ? 'Clear all messages?' : '清空所有消息？')) fetch(`${apiUrl}/groups/${group.id}/messages`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(() => window.location.reload()); };
     const dissolveGroup = () => { if (window.confirm(lang === 'en' ? 'Dissolve this group?' : '解散此群？')) fetch(`${apiUrl}/groups/${group.id}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(() => window.location.reload()); };
@@ -208,8 +215,6 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messag
     const memberIds = new Set((group.members || []).map(m => m.member_id || m));
     const availableChars = (allContacts || []).filter(c => !memberIds.has(String(c.id)) && !memberIds.has(c.id));
     const filteredChars = availableChars.filter(c => c.name.toLowerCase().includes(addSearch.toLowerCase()));
-
-    const hiddenCount = (messages || []).filter(m => m.hidden).length;
 
     return (
         <div style={{ width: '280px', minWidth: '280px', backgroundColor: '#f7f7f7', borderLeft: '1px solid #eee', display: 'flex', flexDirection: 'column', height: '100%', overflowY: 'auto' }}>
@@ -294,22 +299,7 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messag
                 )}
             </div>
 
-            {/* Context Hide Controls */}
-            <div style={{ backgroundColor: '#fff', padding: '12px 15px', borderBottom: '1px solid #eee', marginTop: '8px' }}>
-                <div style={{ fontSize: '12px', color: '#999', marginBottom: '10px', textTransform: 'uppercase' }}>
-                    {lang === 'en' ? 'Context Control' : '上下文控制'}
-                </div>
-                <button onClick={onHide}
-                    style={{ width: '100%', padding: '8px', background: '#fafafa', border: '1px solid #ddd', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', marginBottom: '6px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-                    <EyeOff size={14} /> {lang === 'en' ? 'Hide Old Messages' : '隐藏旧消息'}
-                </button>
-                {hiddenCount > 0 && (
-                    <button onClick={onUnhide}
-                        style={{ width: '100%', padding: '8px', background: '#fafafa', border: '1px solid #ddd', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px' }}>
-                        <Eye size={14} /> {lang === 'en' ? `Unhide All (${hiddenCount})` : `取消隐藏 (${hiddenCount})`}
-                    </button>
-                )}
-            </div>
+
 
             {/* AI Controls */}
             <div style={{ backgroundColor: '#fff', padding: '12px 15px', borderBottom: '1px solid #eee', marginTop: '8px' }}>
@@ -334,6 +324,17 @@ function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messag
                         style={{ width: '100%', accentColor: 'var(--accent-color)' }} />
                     <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
                         {lang === 'en' ? 'Messages from this group injected into private chat & other group chats. 0 = disabled.' : '本群消息注入私聊和其他群聊的条数。0 = 关闭注入。'}
+                    </div>
+                </div>
+                <div style={{ marginTop: '14px', borderTop: '1px dashed #eee', paddingTop: '14px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '14px', marginBottom: '6px' }}>
+                        <span>🧠 {lang === 'en' ? 'AI Vision Boundary' : 'AI 记忆视界 (上下文条数)'}</span>
+                        <span style={{ fontWeight: '600', color: 'var(--accent-color)', minWidth: '28px', textAlign: 'right' }}>{contextLimit}</span>
+                    </div>
+                    <input type="range" min="10" max="200" step="10" value={contextLimit} onChange={e => updateContextLimit(parseInt(e.target.value))}
+                        style={{ width: '100%', accentColor: 'var(--accent-color)' }} />
+                    <div style={{ fontSize: '11px', color: '#999', marginTop: '4px' }}>
+                        {lang === 'en' ? 'How many recent messages AI can "see" in this group. Older ones are hidden from AI.' : 'AI 在本群能感知的最近消息条数。超出该线的旧消息将被忽略，节省算力。'}
                     </div>
                 </div>
             </div>
@@ -367,7 +368,6 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
     const textareaRef = useRef(null);
     const [selectMode, setSelectMode] = useState(false);
     const [selectedIds, setSelectedIds] = useState(new Set());
-    const [showHiddenBadges, setShowHiddenBadges] = useState(false);
 
     // Mentions logic
     const [showMentionMenu, setShowMentionMenu] = useState(false);
@@ -442,9 +442,9 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
         const cursor = e.target.selectionStart;
         const textBeforeCursor = val.substring(0, cursor);
         const lastAtIndex = textBeforeCursor.lastIndexOf('@');
-        if (lastAtIndex !== -1 && (lastAtIndex === 0 || /[^\\w]/.test(textBeforeCursor[lastAtIndex - 1]))) {
+        if (lastAtIndex !== -1 && (lastAtIndex === 0 || /\W/.test(textBeforeCursor[lastAtIndex - 1]))) {
             const query = textBeforeCursor.substring(lastAtIndex + 1);
-            if (!/\\s/.test(query)) {
+            if (!/\s/.test(query)) {
                 setMentionFilter(query);
                 setShowMentionMenu(true);
                 setMentionIndex(0);
@@ -499,38 +499,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
         return { type: 'text', text: content };
     };
 
-    // Hide old messages handler (progressive halving, local update)
-    const handleHideOld = async () => {
-        if (!group?.id) return;
-        const visibleMsgs = messages.filter(m => !m.hidden);
-        const halfCount = Math.floor(visibleMsgs.length / 2);
-        if (halfCount === 0) return;
-        const toHideIds = new Set(visibleMsgs.slice(0, halfCount).map(m => m.id));
-        try {
-            const res = await fetch(`${apiUrl}/groups/${group.id}/messages/hide`, {
-                method: 'POST',
-                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ messageIds: Array.from(toHideIds) })
-            });
-            const data = await res.json();
-            if (data.success) {
-                setMessages(prev => prev.map(m => toHideIds.has(m.id) ? { ...m, hidden: 1 } : m));
-            }
-        } catch (e) {
-            console.error('Failed to hide old group messages:', e);
-        }
-    };
 
-    const handleUnhideAll = async () => {
-        if (!group?.id) return;
-        const res = await fetch(`${apiUrl}/groups/${group.id}/messages/unhide`, {
-            method: 'POST',
-            headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' }
-        });
-        if ((await res.json()).success) {
-            setMessages(prev => prev.map(m => ({ ...m, hidden: 0 })));
-        }
-    };
 
     const handleAddMember = async (charId) => {
         try {
@@ -560,7 +529,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
         } catch (e) { console.error('Rename failed:', e); }
     };
 
-    const hiddenCount = messages.filter(m => m.hidden).length;
+
 
     if (!group) return null;
 
@@ -590,31 +559,41 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                     </div>
                 </div>
 
-                {/* Hidden messages banner */}
-                {hiddenCount > 0 && (
-                    <div style={{ display: 'flex', justifyContent: 'center', padding: '5px', background: '#fff9e0', cursor: 'pointer', fontSize: '12px', color: '#888', gap: '5px', alignItems: 'center', borderBottom: '1px solid #f0e8c0' }}
-                        onClick={() => setShowHiddenBadges(prev => !prev)}>
-                        {showHiddenBadges ? <Eye size={13} /> : <EyeOff size={13} />}
-                        {hiddenCount} {lang === 'en' ? 'messages hidden from AI context' : '条消息已从AI上下文中隐藏'}
-                        {' — '}{lang === 'en' ? (showHiddenBadges ? 'click to hide badges' : 'click to show') : (showHiddenBadges ? '点击隐藏标记' : '点击显示')}
-                    </div>
-                )}
+
 
                 {/* Messages */}
                 <div className="chat-history">
-                    {messages.map(msg => {
+                    {messages.map((msg, index) => {
                         const sender = resolveSender(msg.sender_id);
                         const isUser = msg.sender_id === 'user';
                         const parsed = parseContent(msg.content);
 
+                        const currentLimit = group?.context_msg_limit || 60;
+                        const isBoundary = index === Math.max(0, messages.length - currentLimit) && messages.length > currentLimit;
+
+                        const boundaryElement = isBoundary ? (
+                            <div key={`boundary-${msg.id}`} style={{ textAlign: 'center', margin: '30px 0', position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                                <div style={{ borderBottom: '1px dashed #ccc', position: 'absolute', top: '20px', left: '10%', right: '10%' }}></div>
+                                <span style={{ background: '#f5f5f5', padding: '0 15px', color: '#888', fontSize: '12px', fontWeight: 'bold', position: 'relative', zIndex: 1, textTransform: 'uppercase', letterSpacing: '1px' }}>
+                                    👀 {lang === 'en' ? 'AI Vision Boundary' : 'AI 视界边界'} 👀
+                                </span>
+                                <div style={{ fontSize: '11px', color: '#aaa', marginTop: '4px', position: 'relative', zIndex: 1, backgroundColor: '#f5f5f5', padding: '0 10px' }}>
+                                    {lang === 'en' ? 'AI can only "see" messages below this line' : '模型只能感知此线以下的消息'}
+                                </div>
+                            </div>
+                        ) : null;
+
                         // System message
                         if (msg.sender_id === 'system' || parsed.type === 'system') {
                             return (
-                                <div key={msg.id} style={{ textAlign: 'center', margin: '8px 0' }}>
-                                    <span style={{ fontSize: '12px', color: '#aaa', backgroundColor: '#f0f0f0', padding: '3px 10px', borderRadius: '10px' }}>
-                                        {parsed.text || (msg.content || '').replace('[System] ', '')}
-                                    </span>
-                                </div>
+                                <React.Fragment key={msg.id}>
+                                    {boundaryElement}
+                                    <div style={{ textAlign: 'center', margin: '8px 0' }}>
+                                        <span style={{ fontSize: '12px', color: '#aaa', backgroundColor: '#f0f0f0', padding: '3px 10px', borderRadius: '10px' }}>
+                                            {parsed.text || (msg.content || '').replace('[System] ', '')}
+                                        </span>
+                                    </div>
+                                </React.Fragment>
                             );
                         }
 
@@ -631,16 +610,18 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                         // Red packet
                         if (parsed.type === 'redpacket') {
                             return (
-                                <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}
-                                    style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
-                                    onClick={selectionClick}>
-                                    {selectMode && (
-                                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
-                                            <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
-                                                {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                <React.Fragment key={msg.id}>
+                                    {boundaryElement}
+                                    <div className={`message-wrapper ${isUser ? 'user' : 'character'}`}
+                                        style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
+                                        onClick={selectionClick}>
+                                        {selectMode && (
+                                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
+                                                <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
+                                                    {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                                </div>
                                             </div>
-                                        </div>
-                                    )}
+                                        )}
                                     <div className="message-avatar"><img src={resolveAvatarUrl(sender.avatar, apiUrl)} style={{ objectFit: 'cover' }} alt="" /></div>
                                     <div className="message-content">
                                         {!isUser && <div style={{ fontSize: '12px', color: 'var(--accent-color)', marginBottom: '2px', fontWeight: '500' }}>{sender.name}</div>}
@@ -656,6 +637,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                                         )}
                                     </div>
                                 </div>
+                                </React.Fragment>
                             );
                         }
 
@@ -663,12 +645,15 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                         if (parsed.type === 'transfer') {
                             const raw = parsed.content.replace('[TRANSFER]', '').trim();
                             const parts = raw.split('|');
-                            const amount = parts[0].trim();
-                            const note = parts.length > 1 ? parts.slice(1).join('|').trim() : 'Transfer';
+                            // Format is: tid|amount|note — parts[0]=tid, parts[1]=amount, parts[2+]=note
+                            const amount = parts.length > 1 ? parts[1].trim() : parts[0].trim();
+                            const note = parts.length > 2 ? parts.slice(2).join('|').trim() : 'Transfer';
                             return (
-                                <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}
-                                    style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
-                                    onClick={selectionClick}>
+                                <React.Fragment key={msg.id}>
+                                    {boundaryElement}
+                                    <div className={`message-wrapper ${isUser ? 'user' : 'character'}`}
+                                        style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
+                                        onClick={selectionClick}>
                                     {selectMode && (
                                         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
                                             <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
@@ -697,14 +682,17 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                                         )}
                                     </div>
                                 </div>
+                                </React.Fragment>
                             );
                         }
 
                         // Normal message
                         return (
-                            <div key={msg.id} className={`message-wrapper ${isUser ? 'user' : 'character'}`}
-                                style={{ ...(isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}), ...(msg.hidden ? { opacity: 0.4, filter: 'grayscale(0.5)', borderLeft: '3px solid #f0c060', paddingLeft: '4px', marginBottom: '2px' } : {}) }}
-                                onClick={selectionClick}>
+                            <React.Fragment key={msg.id}>
+                                {boundaryElement}
+                                <div className={`message-wrapper ${isUser ? 'user' : 'character'}`}
+                                    style={isSelected ? { backgroundColor: 'rgba(var(--accent-rgb, 74,144,226), 0.08)', borderRadius: '8px' } : {}}
+                                    onClick={selectionClick}>
                                 {selectMode && (
                                     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minWidth: '32px', paddingTop: '12px', cursor: 'pointer' }}>
                                         <div style={{ width: '20px', height: '20px', borderRadius: '50%', border: isSelected ? 'none' : '2px solid #ccc', backgroundColor: isSelected ? 'var(--accent-color, #4a90e2)' : 'transparent', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'all 0.15s ease' }}>
@@ -727,6 +715,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                                     )}
                                 </div>
                             </div>
+                            </React.Fragment>
                         );
                     })}
                     <div ref={messagesEndRef} />
@@ -877,7 +866,6 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                 <GroupManageDrawer group={group} apiUrl={apiUrl} resolveSender={resolveSender}
                     onClose={() => setShowManageDrawer(false)} lang={lang}
                     messages={messages} allContacts={allContacts}
-                    onHide={handleHideOld} onUnhide={handleUnhideAll}
                     onAddMember={handleAddMember} onRename={handleRename} />
             )}
 
