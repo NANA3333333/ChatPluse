@@ -7,6 +7,25 @@ import { Send, Smile, Paperclip, Bell, Users, ShieldBan, Trash, BookOpen, Brain,
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
+function normalizeMessages(list = []) {
+    const byId = new Map();
+    list.forEach((msg, index) => {
+        if (!msg || !msg.id) return;
+        byId.set(msg.id, { ...msg, __fallbackIndex: index });
+    });
+    return Array.from(byId.values())
+        .sort((a, b) => {
+            const aTs = Number(a.timestamp || 0);
+            const bTs = Number(b.timestamp || 0);
+            if (aTs !== bTs) return aTs - bTs;
+            const aId = String(a.id);
+            const bId = String(b.id);
+            if (aId !== bId) return aId.localeCompare(bId, 'en', { numeric: true });
+            return (a.__fallbackIndex || 0) - (b.__fallbackIndex || 0);
+        })
+        .map(({ __fallbackIndex, ...msg }) => msg);
+}
+
 
 
 function SystemMessage({ text }) {
@@ -50,7 +69,7 @@ function ChatWindow({
         fetch(`${apiUrl}/messages/${contact.id}?limit=${PAGE_SIZE}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } })
             .then(res => res.json())
             .then(data => {
-                setMessages(data);
+                setMessages(normalizeMessages(data));
                 // If we got a full page, there are probably more older messages
                 setHasMore(data.length >= PAGE_SIZE);
             })
@@ -79,7 +98,7 @@ function ChatWindow({
                 { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }
             ).then(r => r.json());
             if (data.length > 0) {
-                setMessages(prev => [...data, ...prev]);
+                setMessages(prev => normalizeMessages([...data, ...prev]));
                 setHasMore(data.length >= PAGE_SIZE);
             } else {
                 setHasMore(false);
@@ -95,11 +114,7 @@ function ChatWindow({
         if (incomingMessageQueue && incomingMessageQueue.length > 0 && contact?.id) {
             const relevantMsgs = incomingMessageQueue.filter(m => m.character_id === contact.id);
             if (relevantMsgs.length > 0) {
-                setMessages(prev => {
-                    const newUnique = relevantMsgs.filter(m => !prev.some(pm => pm.id === m.id));
-                    if (newUnique.length === 0) return prev;
-                    return [...prev, ...newUnique];
-                });
+                setMessages(prev => normalizeMessages([...prev, ...relevantMsgs]));
             }
         }
     }, [incomingMessageQueue, contact?.id]);
@@ -108,13 +123,13 @@ function ChatWindow({
     useEffect(() => {
         const isBlocked = engineState?.[contact?.id]?.isBlocked === 1;
         if (isBlocked && !prevBlockedRef.current) {
-            setMessages(prev => [...prev, {
+            setMessages(prev => normalizeMessages([...prev, {
                 id: `block - event - ${Date.now()} `,
                 character_id: contact?.id,
                 role: 'system',
                 content: `[System] ${contact?.name} 将你拉黑了。`,
                 timestamp: Date.now()
-            }]);
+            }]));
         }
         prevBlockedRef.current = isBlocked;
     }, [engineState, contact?.id, contact?.name]);
@@ -143,7 +158,7 @@ function ChatWindow({
             // Only update state if we're still looking at the same contact
             if (contactRef.current?.id !== currentContactId) return;
             if (data.blocked && data.message) {
-                setMessages(prev => [...prev, { ...data.message, isBlocked: true }]);
+                setMessages(prev => normalizeMessages([...prev, { ...data.message, isBlocked: true }]));
             }
         } catch (e) {
             console.error('Failed to send:', e);
@@ -182,7 +197,7 @@ function ChatWindow({
             if (data.success && contactRef.current?.id === currentContactId) {
                 // Refresh messages to pick up the new transfer message with tid
                 const updated = await fetch(`${apiUrl}/messages/${currentContactId}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json());
-                setMessages(updated);
+                setMessages(normalizeMessages(updated));
             }
         } catch (e) {
             console.error('Transfer failed:', e);
@@ -200,7 +215,7 @@ function ChatWindow({
             const data = await res.json();
             if (data.success) {
                 const updated = await fetch(`${apiUrl}/messages/${contactRef.current?.id}`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json());
-                setMessages(updated);
+                setMessages(normalizeMessages(updated));
             } else {
                 alert(lang === 'en' ? 'Failed to recommend contact: ' + data.error : '推荐联系人失败: ' + data.error);
             }

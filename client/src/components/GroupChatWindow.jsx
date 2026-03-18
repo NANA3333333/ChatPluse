@@ -3,6 +3,25 @@ import { Send, Users, Smile, Paperclip, X, Settings, Trash2, UserMinus, ArrowRig
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
+function normalizeGroupMessages(list = []) {
+    const byId = new Map();
+    list.forEach((msg, index) => {
+        if (!msg || !msg.id) return;
+        byId.set(msg.id, { ...msg, __fallbackIndex: index });
+    });
+    return Array.from(byId.values())
+        .sort((a, b) => {
+            const aTs = Number(a.timestamp || 0);
+            const bTs = Number(b.timestamp || 0);
+            if (aTs !== bTs) return aTs - bTs;
+            const aId = String(a.id);
+            const bId = String(b.id);
+            if (aId !== bId) return aId.localeCompare(bId, 'en', { numeric: true });
+            return (a.__fallbackIndex || 0) - (b.__fallbackIndex || 0);
+        })
+        .map(({ __fallbackIndex, ...msg }) => msg);
+}
+
 const quickEmojis = ['😀', '😂', '🥺', '😡', '🥰', '👍', '🙏', '💔', '🔥', '✨', '🥳', '😭', '😎', '🙄', '🤔'];
 
 /* ─── Red Packet Send Modal ─── */
@@ -377,7 +396,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
     useEffect(() => {
         if (!group?.id) return;
         setMessages([]); setShowManageDrawer(false);
-        fetch(`${apiUrl}/groups/${group.id}/messages`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json()).then(setMessages).catch(console.error);
+        fetch(`${apiUrl}/groups/${group.id}/messages`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } }).then(r => r.json()).then(data => setMessages(normalizeGroupMessages(data))).catch(console.error);
     }, [group?.id, apiUrl]);
 
     useEffect(() => {
@@ -385,9 +404,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
             const relevantMsgs = incomingGroupMessageQueue.filter(m => m.group_id === group.id);
             if (relevantMsgs.length > 0) {
                 setMessages(prev => {
-                    const newUnique = relevantMsgs.filter(m => !prev.some(pm => pm.id === m.id));
-                    if (newUnique.length === 0) return prev;
-                    return [...prev, ...newUnique];
+                    return normalizeGroupMessages([...prev, ...relevantMsgs]);
                 });
             }
         }
