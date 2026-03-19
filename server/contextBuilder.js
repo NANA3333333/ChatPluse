@@ -28,6 +28,40 @@ function shouldRetrieveLongTermMemories(recentInput = '') {
     return false;
 }
 
+function buildRelationshipAnchorContext(db, character, userName, activeTargets = []) {
+    if (!activeTargets || activeTargets.length === 0 || !db.getCharRelationship) return '';
+
+    let relationContext = '\n[关系锚点与情绪对象边界]\n';
+    relationContext += `你对 ${userName} 的占有欲、被忽视感、嫉妒、索求安抚、委屈和依赖，默认只指向 ${userName}，不能自动套到其他角色身上。\n`;
+    relationContext += '除非当前场景里明确发生了迁怒、投射、误会或吃醋转移，否则你面对其他角色时，必须按你和该角色各自的关系历史分别反应。\n';
+
+    let hasRelations = false;
+    for (const target of activeTargets) {
+        if (!target || target.id === character.id) continue;
+        const rel = db.getCharRelationship(character.id, target.id);
+        if (!rel) continue;
+        hasRelations = true;
+        const affinity = rel.affinity ?? 50;
+        const impression = String(rel.impression || '').trim();
+        let tone = '态度中性';
+        if (affinity >= 80) tone = '明显亲近、信任、愿意主动靠近';
+        else if (affinity >= 65) tone = '比较友好，有好感';
+        else if (affinity <= 20) tone = '明显排斥、警惕或厌烦';
+        else if (affinity <= 35) tone = '有戒备、不太喜欢';
+
+        relationContext += `- 你对 ${target.name}：好感 ${affinity}/100，${tone}`;
+        if (impression) relationContext += `，当前印象是“${impression}”`;
+        relationContext += '。\n';
+    }
+
+    if (!hasRelations) {
+        relationContext += '你和当前在场其他角色没有足够稳定的关系锚点。请保持陌生人或普通熟人的边界，不要把你对用户的强烈情绪错投到他们身上。\n';
+    }
+
+    relationContext += '[执行规则] 对每个角色分别判断态度，不要把“我想要用户安慰我”“我嫉妒用户和别人说话”直接说成你对其他角色本人的情绪。\n';
+    return relationContext;
+}
+
 async function buildUniversalContext(context, character, recentInput = '', isGroupContext = false, activeTargets = []) {
     const { getUserDb, getMemory, userId } = context;
     const resolvedUserId = userId || character.user_id || 'default';
@@ -99,6 +133,9 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     }
 
     prompt += pressureContext + jealousyContext + cityBridgeEmotionContext;
+
+    // 4.5 Relationship anchors and emotion target isolation
+    prompt += buildRelationshipAnchorContext(db, character, userName, activeTargets);
 
     // 5. Secret Diary Password
     if (character.diary_password) {

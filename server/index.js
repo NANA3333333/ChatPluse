@@ -836,6 +836,15 @@ app.post('/api/memories/:characterId/sweep', authMiddleware, async (req, res) =>
         const refreshed = db.getCharacter(req.params.characterId);
         const lastError = refreshed?.sweep_last_error || '';
 
+        if (savedCount > 0) {
+            return res.json({
+                success: true,
+                savedCount,
+                warning: lastError || '',
+                message: `Long-term memory sweep completed. Saved ${savedCount} memories.`
+            });
+        }
+
         if (lastError) {
             return res.status(400).json({
                 success: false,

@@ -39,6 +39,15 @@ module.exports = function initCityDb(db) {
         );
     `);
 
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS city_social_guard (
+            encounter_key TEXT PRIMARY KEY,
+            minute_key TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+    `);
+
     // ═══════════════════════════════════════════════════════════════════════
     //  3. City Districts
     // ═══════════════════════════════════════════════════════════════════════
@@ -378,6 +387,23 @@ module.exports = function initCityDb(db) {
         return db.prepare('DELETE FROM city_action_guard WHERE created_at < ?').run(beforeTs).changes;
     }
 
+    function claimSocialEncounter(encounterKey, minuteKey, expiresAt) {
+        const now = Date.now();
+        const tx = db.transaction(() => {
+            db.prepare('DELETE FROM city_social_guard WHERE encounter_key = ? AND expires_at < ?').run(encounterKey, now);
+            const info = db.prepare(`
+                INSERT OR IGNORE INTO city_social_guard (encounter_key, minute_key, created_at, expires_at)
+                VALUES (?, ?, ?, ?)
+            `).run(encounterKey, minuteKey, now, expiresAt);
+            return (info?.changes || 0) > 0;
+        });
+        return tx();
+    }
+
+    function clearExpiredSocialGuards(beforeTs) {
+        return db.prepare('DELETE FROM city_social_guard WHERE expires_at < ?').run(beforeTs).changes;
+    }
+
     function wipeAllData() {
         const tables = [
             'city_logs', 'city_districts', 'city_items', 'city_inventory',
@@ -535,9 +561,24 @@ module.exports = function initCityDb(db) {
     function getSchedule(charId, date) {
         return db.prepare('SELECT * FROM city_schedules WHERE character_id = ? AND plan_date = ?').get(charId, date);
     }
+    function claimScheduleGeneration(charId, date) {
+        const info = db.prepare(`INSERT OR IGNORE INTO city_schedules (character_id, plan_date, schedule_json, created_at)
+            VALUES (?, ?, ?, ?)`).run(charId, date, JSON.stringify([]), Date.now());
+        return info.changes > 0;
+    }
+    function releaseScheduleGeneration(charId, date) {
+        db.prepare(`DELETE FROM city_schedules
+            WHERE character_id = ? AND plan_date = ? AND schedule_json = ?`).run(charId, date, JSON.stringify([]));
+    }
     function saveSchedule(charId, date, scheduleJson) {
-        db.prepare(`INSERT OR REPLACE INTO city_schedules (character_id, plan_date, schedule_json, created_at)
-            VALUES (?, ?, ?, ?)`).run(charId, date, JSON.stringify(scheduleJson), Date.now());
+        const payload = JSON.stringify(scheduleJson);
+        const update = db.prepare(`UPDATE city_schedules
+            SET schedule_json = ?, created_at = ?
+            WHERE character_id = ? AND plan_date = ?`).run(payload, Date.now(), charId, date);
+        if (update.changes === 0) {
+            db.prepare(`INSERT OR REPLACE INTO city_schedules (character_id, plan_date, schedule_json, created_at)
+                VALUES (?, ?, ?, ?)`).run(charId, date, payload, Date.now());
+        }
     }
     function getTodaySchedule(charId) {
         const today = new Date().toISOString().split('T')[0];
@@ -600,12 +641,12 @@ module.exports = function initCityDb(db) {
     return {
         logAction, getCityLogs, getCharacterRecentLogs, getOtherCharacterLocationTodayLogs, clearAllLogs, wipeAllData,
         clearCharacterCityData,
-        claimActionSlot, clearExpiredActionGuards,
+        claimActionSlot, clearExpiredActionGuards, claimSocialEncounter, clearExpiredSocialGuards,
         getDistricts, getDistrict, getEnabledDistricts, upsertDistrict, deleteDistrict,
         getConfig, setConfig, getEconomyStats,
         getItems, getItem, getItemsAtDistrict, upsertItem, deleteItem, decreaseItemStock,
         getInventory, addToInventory, removeFromInventory, getInventoryFoodItems,
-        getSchedule, saveSchedule, getTodaySchedule,
+        getSchedule, claimScheduleGeneration, releaseScheduleGeneration, saveSchedule, getTodaySchedule,
         // ★ Events & Quests
         getActiveEvents, getAllEvents, createEvent, expireEvents, deleteEvent,
         getActiveQuests, getAllQuests, createQuest, claimQuest, completeQuest, deleteQuest,

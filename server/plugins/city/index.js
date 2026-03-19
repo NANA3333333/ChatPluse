@@ -243,6 +243,8 @@ ${universalContextB?.preamble || ''}
 
 请描写他们这次偶遇时的一小段互动，可以寒暄、试探、送礼、尴尬错开，或者简单聊几句。
 同时请分别为 A 和 B 生成发给玩家(${userName})的私聊、朋友圈和日记内容。
+重要：角色对玩家(${userName})的占有欲、被忽视感、嫉妒、索求安抚，默认只指向玩家本人，不能因为当前出现了别的角色，就直接套到对方身上。
+如果 A 或 B 对其他在场角色表现出敌意、委屈、酸意、攻击性，必须有这次互动里的明确触发点；否则他们面对其他角色时，应按双方既有关系和这次现场互动分别反应。
 
 请严格返回以下 JSON，不要输出任何其他文字：
 {
@@ -611,6 +613,9 @@ ${universalContextB?.preamble || ''}
                     if (typeof db.city?.clearExpiredActionGuards === 'function') {
                         db.city.clearExpiredActionGuards(Date.now() - 6 * 60 * 60 * 1000);
                     }
+                    if (typeof db.city?.clearExpiredSocialGuards === 'function') {
+                        db.city.clearExpiredSocialGuards(Date.now());
+                    }
 
                     let actedCount = 0;
                     let actingChars = [];
@@ -658,7 +663,7 @@ ${universalContextB?.preamble || ''}
                         const socialCandidates = db.getCharacters().filter(c =>
                             c.status === 'active' && c.sys_city_social !== 0
                         );
-                        await checkSocialCollisions(socialCandidates, db, user.id, districts, config);
+                        await checkSocialCollisions(socialCandidates, db, user.id, districts, config, minuteKey);
                     }
                 } catch (e) {
                     console.error(`[City] 用户 ${user.username} 出错:`, e.message);
@@ -1068,7 +1073,7 @@ ${universalContextB?.preamble || ''}
 
     // Phase 5: social collision detection
 
-    async function checkSocialCollisions(characters, db, userId, districts, config) {
+    async function checkSocialCollisions(characters, db, userId, districts, config, minuteKey) {
         // Re-read fresh locations from DB
         const freshChars = characters.map(c => {
             const fresh = db.getCharacter(c.id);
@@ -1101,6 +1106,14 @@ ${universalContextB?.preamble || ''}
             const lastTime = socialCooldowns.get(encounterKey) || 0;
             const cooldownMs = 3 * 15 * 60 * 1000; // 45 minutes
             if (Date.now() - lastTime < cooldownMs) continue;
+
+            if (typeof db.city?.claimSocialEncounter === 'function') {
+                const claimed = db.city.claimSocialEncounter(encounterKey, minuteKey, Date.now() + cooldownMs);
+                if (!claimed) {
+                    console.log(`[City/Social] skipped duplicate encounter for ${encounterKey} @ ${minuteKey}`);
+                    continue;
+                }
+            }
 
             const district = districts.find(d => d.id === locId) || { id: locId, name: locId, emoji: '📍' };
 
@@ -1225,7 +1238,12 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
             systemPrompt += `- 姓名: ${c.name}, ID: "${c.id}", 身上携带物品: ${inv}\n`;
         });
 
-        systemPrompt += `\n[重要指令] JSON 的 key 必须严格匹配上面给出的角色 ID，不要使用别的名字或描述。\n`;
+systemPrompt += `\n[重要指令] JSON 的 key 必须严格匹配上面给出的角色 ID，不要使用别的名字或描述。\n`;
+        systemPrompt += `[对象边界]\n`;
+        systemPrompt += `1. 角色对玩家 ${userName} 的嫉妒、被忽视感、占有欲、索求安抚，默认只指向玩家本人。\n`;
+        systemPrompt += `2. 不要把角色对玩家的强烈情绪，直接改写成对在场其他角色的情绪。\n`;
+        systemPrompt += `3. 只有当本次现场互动里出现了明确的挑衅、误会、竞争、迁怒或投射时，才允许把负面情绪落到其他角色身上。\n`;
+        systemPrompt += `4. affinity_deltas 和 impressions 必须基于角色之间这次真实互动本身，而不是基于他们对玩家的私聊情绪。\n`;
         systemPrompt += `[输出偏好]\n如果这次相遇对某个角色来说明显值得私聊玩家、发朋友圈或写日记，请积极填写对应字段，不要过度保守。\n`;
         systemPrompt += `- chat 要像角色真的忍不住想找玩家说话，允许嫉妒、撒娇、试探、炫耀、抱怨。\n`;
         systemPrompt += `- moment 要像真实朋友圈，不要写成“在某地遇到了一群人”这种系统播报。\n`;
@@ -1342,7 +1360,7 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
 
         const today = getCityDate(config).toISOString().split('T')[0];
         const existing = db.city.getSchedule(char.id, today);
-        if (existing) return; // already has a plan for today
+        if (existing && existing.schedule_json && existing.schedule_json !== '[]') return; // already has a real plan for today
 
         // Prevent concurrent generation for the same character (cron fires every minute, LLM may take >1min)
         const lockKey = `${char.id}_${today}`;
@@ -1352,6 +1370,15 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
         try {
             if (!char.api_endpoint || !char.api_key || !char.model_name) {
                 return { success: false, reason: '角色未配置主AI，无法生成日程' };
+            }
+
+            if (!existing) {
+                const claimed = typeof db.city.claimScheduleGeneration === 'function'
+                    ? db.city.claimScheduleGeneration(char.id, today)
+                    : true;
+                if (!claimed) {
+                    return { success: false, reason: '今日计划生成已被其他实例占用' };
+                }
             }
 
             // Broadcast generating state
@@ -1390,11 +1417,17 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
             console.warn(`[City] ${char.name} 日程 JSON 解析失败, LLM 原始回复: ${snippet}`);
             // Broadcast end (if failed validation)
             broadcastCityEvent(context.userId, char.id, 'schedule_updated', []);
+            if (typeof db.city.releaseScheduleGeneration === 'function') {
+                db.city.releaseScheduleGeneration(char.id, today);
+            }
             return { success: false, reason: `LLM 返回内容无法解析为 JSON: ${snippet}` };
         } catch (e) {
             console.error(`[City] ${char.name} 日程生成失败: ${e.message}`);
             // Broadcast end (if fetch threw error)
             broadcastCityEvent(context.userId, char.id, 'schedule_updated', []);
+            if (typeof db.city.releaseScheduleGeneration === 'function') {
+                db.city.releaseScheduleGeneration(char.id, today);
+            }
             return { success: false, reason: e.message };
         } finally {
             scheduleGenLocks.delete(lockKey);

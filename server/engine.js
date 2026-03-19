@@ -77,6 +77,7 @@ function getEngine(userId) {
    - If the user mentions another character and it changes your feelings toward THAT character (jealousy, curiosity, fondness, annoyance), output [CHAR_AFFINITY:characterId:+5] or [CHAR_AFFINITY:characterId:-3].
    - If your anxiety/pressure is relieved by their message, output [PRESSURE:0].
    - If you feel neglected because the user has been ignoring you to talk to someone else, your anxiety level is shown in Context above. If the user's message makes you feel BETTER about the neglect (e.g. they come back to you, apologize, explain, give you extra attention, sweet-talk you, make you feel wanted), output [JEALOUSY:lower_number] to reduce your anxiety level (e.g. [JEALOUSY:1] or [JEALOUSY:0]). Do NOT immediately feel better 鈥?make them prove they truly care based on your personality.
+   - [CRITICAL EMOTION BOUNDARY] Your possessiveness, neglect anxiety, jealousy, and need for comfort toward the user belong to the user by default. Do NOT automatically transfer those feelings onto other characters unless the current scene explicitly shows projection, misdirected anger, or a direct conflict with that character.
    These tags will be processed hidden from the user.`;
 
         const recentInputString = contextMessages.slice(-2).map(m => m.content).join(' ');
@@ -86,7 +87,15 @@ function getEngine(userId) {
         // Since we are inside `getEngine` closure, we have access to context indirectly,
         // but `buildUniversalContext` expects { getUserDb, getMemory, userId }
         const engineContextWrapper = { getUserDb, getMemory: require('./memory').getMemory, userId };
-        const universalResult = await buildUniversalContext(engineContextWrapper, character, recentInputString, false);
+        const allChars = db.getCharacters().filter(c => c.id !== character.id);
+        const mentionedTargets = allChars.filter(c => recentInputString.includes(c.name));
+        if (character.jealousy_target) {
+            const jealousyTarget = db.getCharacter(character.jealousy_target);
+            if (jealousyTarget && jealousyTarget.id !== character.id && !mentionedTargets.some(t => t.id === jealousyTarget.id)) {
+                mentionedTargets.push(jealousyTarget);
+            }
+        }
+        const universalResult = await buildUniversalContext(engineContextWrapper, character, recentInputString, false, mentionedTargets);
 
         let prompt = `You are playing the role of ${character.name}.
 Persona:
@@ -97,20 +106,6 @@ ${character.world_info || 'No specific world info.'}
 
 Context:
 ${universalResult.preamble}`;
-
-        // Gossip System: Potentially tell them about someone else's recent Moment
-        if (Math.random() < 0.25) { // 25% chance to gossip
-            const allMoments = db.getMoments();
-            const friends = db.getFriends(character.id).map(f => f.id);
-            const visibleMoments = allMoments.filter(m => m.character_id !== character.id && (m.character_id === 'user' || friends.includes(m.character_id)));
-            if (visibleMoments.length > 0) {
-                const randomMoment = visibleMoments[Math.floor(Math.random() * visibleMoments.length)];
-                const userProfile = db.getUserProfile();
-                const userName = userProfile?.name || 'User';
-                const authorName = randomMoment.character_id === 'user' ? userName : (db.getCharacter(randomMoment.character_id)?.name || 'Someone');
-                prompt += `\n[Gossip Context: You recently saw that ${authorName} posted this on their Moments/朋友圈: "${randomMoment.content}". You may casually mention it or ask the user about it, but don't force it.]\n`;
-            }
-        }
 
         // Unclaimed transfers: char sent to user but user hasn't claimed yet
         try {

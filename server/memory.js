@@ -684,11 +684,12 @@ Output exactly in this JSON format (and nothing else):
         const now = Date.now();
         updateSweepStatus(character.id, {
             sweep_last_run_at: now,
+            sweep_last_error: '',
             sweep_last_saved_count: 0
         });
         if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
             updateSweepStatus(character.id, {
-                sweep_last_error: '未配置记忆小模型，无法执行长时记忆整理。',
+                sweep_last_error: '????????????????????',
                 sweep_last_saved_count: 0
             });
             return 0;
@@ -699,7 +700,7 @@ Output exactly in this JSON format (and nothing else):
         const db = getDb();
         const privateMsgs = db.getOverflowMessages(character.id, privateWindow, sweepLimit);
         let groupText = '';
-        let groupMsgIds = [];
+        const groupMsgIds = [];
         const groups = db.getGroups().filter(g => g.members.some(m => m.member_id === character.id));
         for (const g of groups) {
             const groupWindow = g.inject_limit ?? 5;
@@ -803,7 +804,7 @@ Output exactly in this JSON format (and nothing else):
                 const endIdx = responseText.lastIndexOf(']');
                 if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
                     updateSweepStatus(character.id, {
-                        sweep_last_error: `小模型第 ${batchIndex + 1}/${totalBatches} 批返回结果无法解析，未完成长时记忆整理。`,
+                        sweep_last_error: `???? ${batchIndex + 1}/${totalBatches} ????????????????????`,
                         sweep_last_saved_count: 0
                     });
                     return 0;
@@ -814,7 +815,7 @@ Output exactly in this JSON format (and nothing else):
                     parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
                 } catch (e) {
                     updateSweepStatus(character.id, {
-                        sweep_last_error: `小模型第 ${batchIndex + 1}/${totalBatches} 批返回了截断或脏 JSON，未完成长时记忆整理。`,
+                        sweep_last_error: `???? ${batchIndex + 1}/${totalBatches} ???????? JSON???????????`,
                         sweep_last_saved_count: 0
                     });
                     return 0;
@@ -838,7 +839,7 @@ Output exactly in this JSON format (and nothing else):
             if (groupMsgIds.length > 0) db.markGroupMessagesSummarized(groupMsgIds);
 
             updateSweepStatus(character.id, {
-                sweep_last_error: savedCount > 0 ? '' : '本次整理未提取出有效长期记忆。',
+                sweep_last_error: savedCount > 0 ? '' : '???????????????',
                 sweep_last_success_at: savedCount > 0 ? Date.now() : character.sweep_last_success_at || 0,
                 sweep_last_saved_count: savedCount
             });
@@ -846,105 +847,12 @@ Output exactly in this JSON format (and nothing else):
             return savedCount;
         } catch (e) {
             updateSweepStatus(character.id, {
-                sweep_last_error: e.message || '长时记忆整理失败。',
+                sweep_last_error: e.message || '?????????',
                 sweep_last_saved_count: 0
             });
             console.error(`[Memory] Sweep failed for ${character.id}:`, e.message);
             return 0;
         }
-
-        let privateText = privateMsgs.length > 0 ? privateMsgs.map(m => `${m.role === 'user' ? 'User' : character.name}: ${m.content}`).join('\n') : 'No private messages.';
-
-        const extractionPrompt = `You are a memory aggregation assistant. Analyze the following overflowed chat logs of ${character.name}.
-Identify noteworthy events, facts, relationship developments, or emotional shifts.
-Return a structured JSON ARRAY of memory objects.
-
-CRITICAL: Score each memory on a "surprise" factor from 1 to 10.
-- Surprise 1-3: Routine, completely expected.
-- Surprise 4-6: Mildly interesting, personal details.
-- Surprise 7-8: Emotional, unexpected events.
-- Surprise 9-10: Mind-blowing, life-changing completely unexpected twists.
-
-Activities:
----
-[Private Chats]
-${privateText}
-
-[Group Chats]
-${groupText || 'No group messages.'}
----
-
-Output exactly in this JSON format (and nothing else):
-[
-  {
-    "time": "recent past",
-    "location": "chat",
-    "people": "...",
-    "event": "...",
-    "relationships": "...",
-    "items": "...",
-    "importance": <number 1-10>,
-    "surprise_score": <number 1-10>
-  }
-]
-`;
-
-        try {
-            const { content: responseText, usage } = await callLLM({
-                endpoint: memoryConfig.endpoint,
-                key: memoryConfig.key,
-                model: memoryConfig.model,
-                messages: [
-                    { role: 'system', content: 'You extract structured JSON arrays of facts from chat logs, including a surprise_score.' },
-                    { role: 'user', content: extractionPrompt }
-                ],
-                maxTokens: 1500,
-                temperature: 0.3,
-                returnUsage: true
-            });
-            recordMemoryTokenUsage(character.id, 'memory_sweep', usage);
-            const startIdx = responseText.indexOf('[');
-            const endIdx = responseText.lastIndexOf(']');
-            if (startIdx !== -1 && endIdx !== -1) {
-                const jsonText = responseText.slice(startIdx, endIdx + 1);
-                let parsed = [];
-                try { parsed = JSON.parse(jsonText); } catch (e) { }
-
-                let savedCount = 0;
-                if (Array.isArray(parsed)) {
-                    for (const mem of parsed) {
-                        if (mem.importance >= 3 && mem.event) {
-                            mem.surprise_score = mem.surprise_score || 5;
-                            await saveExtractedMemory(character.id, mem, null);
-                            savedCount++;
-                        }
-                    }
-                }
-
-                // Mark as summarized
-                if (privateMsgs.length > 0) db.markMessagesSummarized(privateMsgs.map(m => m.id));
-                if (groupMsgIds.length > 0) db.markGroupMessagesSummarized(groupMsgIds);
-
-                updateSweepStatus(character.id, {
-                    sweep_last_error: savedCount > 0 ? '' : '本次整理未提取出有效长期记忆。',
-                    sweep_last_success_at: savedCount > 0 ? Date.now() : character.sweep_last_success_at || 0,
-                    sweep_last_saved_count: savedCount
-                });
-                console.log(`[Memory] Sweep completed for ${character.name}, saved ${savedCount} memories.`);
-                return savedCount;
-            }
-            updateSweepStatus(character.id, {
-                sweep_last_error: '小模型返回结果无法解析，未完成长时记忆整理。',
-                sweep_last_saved_count: 0
-            });
-        } catch (e) {
-            updateSweepStatus(character.id, {
-                sweep_last_error: e.message || '长时记忆整理失败。',
-                sweep_last_saved_count: 0
-            });
-            console.error(`[Memory] Sweep failed for ${character.id}:`, e.message);
-        }
-        return 0;
     }
 
     async function saveExtractedMemory(characterId, memoryData, groupId = null) {
