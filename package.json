@@ -1,4 +1,15 @@
 {
+  "name": "chatpulse",
+  "private": true,
+  "scripts": {
+    "setup": "node scripts/setup-local.js",
+    "doctor": "node scripts/doctor.js",
+    "dev": "node scripts/dev.js",
+    "dev:server": "npm --prefix server run start",
+    "dev:client": "npm --prefix client run dev",
+    "migrate:qdrant": "npm --prefix server run migrate:qdrant",
+    "cleanup:city-memories": "npm --prefix server run cleanup:city-memories"
+  },
   "dependencies": {
     "iconv-lite": "^0.7.2",
     "ws": "^8.19.0"

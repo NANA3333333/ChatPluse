@@ -54,6 +54,11 @@ function Login({ apiUrl }) {
                 </div>
 
                 <form className="login-form" onSubmit={handleSubmit}>
+                    {!isRegistering && (
+                        <div style={{ marginBottom: '12px', color: 'rgba(255,255,255,0.72)', fontSize: '13px', lineHeight: 1.4, textAlign: 'center' }}>
+                            首次部署默认账号 Nana，默认密码 12345
+                        </div>
+                    )}
                     <div className="input-group">
                         <label>账号 (Username)</label>
                         <input

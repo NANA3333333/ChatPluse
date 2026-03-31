@@ -2,6 +2,7 @@
 import { User, Trash2, Edit3, Save, RefreshCw, Palette, Download, Upload, FileText, ChevronDown, ChevronRight, Sparkles, ChevronLeft, Database } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
+import { useAuth } from '../AuthContext';
 import Scheduler from './Scheduler';
 
 const getDefaultGuidelines = (lang) => {
@@ -43,6 +44,7 @@ const getDefaultGuidelines = (lang) => {
 
 function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) {
     const { t, lang } = useLanguage();
+    const { login, updateUser } = useAuth();
     const [profile, setProfile] = useState(null);
     const [isEditing, setIsEditing] = useState(false);
     const [themeAccordion, setThemeAccordion] = useState({ ai_gen: false, accent: true, bg: false, text: false, bubbles: false, advanced: false });
@@ -53,6 +55,13 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const [editMomentsTokenLimit, setEditMomentsTokenLimit] = useState(500);
     const [editMomentsReactionRate, setEditMomentsReactionRate] = useState(30);
     const [memoryStatus, setMemoryStatus] = useState(null);
+    const [accountUsername, setAccountUsername] = useState('');
+    const [accountCurrentPassword, setAccountCurrentPassword] = useState('');
+    const [accountNewPassword, setAccountNewPassword] = useState('');
+    const [accountConfirmPassword, setAccountConfirmPassword] = useState('');
+    const [accountSaving, setAccountSaving] = useState(false);
+    const [accountMessage, setAccountMessage] = useState('');
+    const [accountError, setAccountError] = useState('');
 
     // Theme Editor states
     const [editThemeConfig, setEditThemeConfig] = useState({});
@@ -162,6 +171,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                 setEditAvatar(data.avatar || '');
                 setEditBanner(data.banner || '');
                 setEditBio(data.bio || '');
+                setAccountUsername(data.username || '');
                 setEditMomentsTokenLimit(data.moments_token_limit !== undefined ? data.moments_token_limit : 500);
                 setEditMomentsReactionRate(data.moments_reaction_rate !== undefined ? data.moments_reaction_rate : 30);
 
@@ -235,6 +245,64 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         } catch (e) {
             console.error('Failed to update theme:', e);
             alert('Failed to save theme.');
+        }
+    };
+
+    const handleSaveAccount = async () => {
+        setAccountError('');
+        setAccountMessage('');
+
+        if (!accountCurrentPassword) {
+            setAccountError(lang === 'en' ? 'Current password is required.' : '请输入当前密码。');
+            return;
+        }
+        if (accountNewPassword && accountNewPassword !== accountConfirmPassword) {
+            setAccountError(lang === 'en' ? 'New passwords do not match.' : '两次输入的新密码不一致。');
+            return;
+        }
+
+        setAccountSaving(true);
+        try {
+            const res = await fetch(`${apiUrl}/auth/account`, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
+                },
+                body: JSON.stringify({
+                    username: accountUsername,
+                    currentPassword: accountCurrentPassword,
+                    newPassword: accountNewPassword
+                })
+            });
+            const raw = await res.text();
+            let data = null;
+            try {
+                data = raw ? JSON.parse(raw) : {};
+            } catch (parseErr) {
+                const preview = raw.trim().slice(0, 120);
+                throw new Error(
+                    lang === 'en'
+                        ? `Account update endpoint returned non-JSON (HTTP ${res.status}). ${preview}`
+                        : `账号更新接口返回的不是 JSON（HTTP ${res.status}）。${preview}`
+                );
+            }
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || 'Failed to update account');
+            }
+
+            login(data.token, data.user);
+            updateUser(data.user);
+            setProfile(prev => prev ? { ...prev, username: data.user.username } : prev);
+            if (onProfileUpdate) onProfileUpdate({ ...(profile || {}), username: data.user.username });
+            setAccountCurrentPassword('');
+            setAccountNewPassword('');
+            setAccountConfirmPassword('');
+            setAccountMessage(lang === 'en' ? 'Account updated successfully.' : '账号信息已更新。');
+        } catch (e) {
+            setAccountError(e.message || (lang === 'en' ? 'Failed to update account.' : '账号更新失败。'));
+        } finally {
+            setAccountSaving(false);
         }
     };
 
@@ -601,6 +669,66 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                     </div>
                                 </div>
                             )}
+                        </div>
+                    </div>
+                </div>
+
+                <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee' }}>
+                    <h2 style={{ margin: '0 0 20px 0', fontSize: '18px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <User size={20} /> {lang === 'en' ? 'Account Security' : '账号安全'}
+                    </h2>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                        <div style={{ fontSize: '13px', color: '#666' }}>
+                            {lang === 'en'
+                                ? 'Change your login username or password. Enter your current password to confirm.'
+                                : '你可以修改登录账号或密码。保存前需要先输入当前密码确认。'}
+                        </div>
+                        <label style={{ fontSize: '14px', color: '#666' }}>{lang === 'en' ? 'Login Username' : '登录账号'}</label>
+                        <input
+                            type="text"
+                            value={accountUsername}
+                            onChange={e => setAccountUsername(e.target.value)}
+                            style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '14px' }}
+                        />
+                        <label style={{ fontSize: '14px', color: '#666' }}>{lang === 'en' ? 'Current Password' : '当前密码'}</label>
+                        <input
+                            type="password"
+                            value={accountCurrentPassword}
+                            onChange={e => setAccountCurrentPassword(e.target.value)}
+                            style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '14px' }}
+                        />
+                        <label style={{ fontSize: '14px', color: '#666' }}>{lang === 'en' ? 'New Password' : '新密码'}</label>
+                        <input
+                            type="password"
+                            value={accountNewPassword}
+                            onChange={e => setAccountNewPassword(e.target.value)}
+                            placeholder={lang === 'en' ? 'Leave blank to keep current password' : '留空则不修改密码'}
+                            style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '14px' }}
+                        />
+                        <label style={{ fontSize: '14px', color: '#666' }}>{lang === 'en' ? 'Confirm New Password' : '确认新密码'}</label>
+                        <input
+                            type="password"
+                            value={accountConfirmPassword}
+                            onChange={e => setAccountConfirmPassword(e.target.value)}
+                            placeholder={lang === 'en' ? 'Repeat new password' : '再次输入新密码'}
+                            style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '14px' }}
+                        />
+                        <div style={{ fontSize: '12px', color: '#999' }}>
+                            {lang === 'en' ? 'Minimum password length: 5. Default root password is 12345 on a fresh install.' : '密码最少 5 位。全新部署时默认 root 密码为 12345。'}
+                        </div>
+                        {accountError ? <div style={{ color: '#d63031', fontSize: '13px' }}>{accountError}</div> : null}
+                        {accountMessage ? <div style={{ color: '#2d8a34', fontSize: '13px' }}>{accountMessage}</div> : null}
+                        <div>
+                            <button
+                                onClick={handleSaveAccount}
+                                disabled={accountSaving}
+                                style={{ padding: '8px 14px', backgroundColor: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '4px', cursor: accountSaving ? 'not-allowed' : 'pointer', opacity: accountSaving ? 0.7 : 1 }}
+                            >
+                                {accountSaving
+                                    ? (lang === 'en' ? 'Saving...' : '保存中...')
+                                    : (lang === 'en' ? 'Save Account' : '保存账号设置')}
+                            </button>
                         </div>
                     </div>
                 </div>

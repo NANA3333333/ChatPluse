@@ -12,6 +12,7 @@ if (!fs.existsSync(dataDir)) {
 // master.db is intended strictly for authentication and tracking which user maps to which personal db file
 const dbPath = path.join(dataDir, 'master.db');
 const db = new Database(dbPath);
+const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '12345';
 
 db.pragma('journal_mode = WAL');
 
@@ -83,10 +84,10 @@ function initAuthDb() {
     // Auto-seed root admin account "Nana"
     const rootUser = db.prepare('SELECT id FROM users WHERE username = ?').get('Nana');
     if (!rootUser) {
-        const adminPw = process.env.ADMIN_PASSWORD || crypto.randomBytes(12).toString('base64url');
+        const adminPw = DEFAULT_ADMIN_PASSWORD;
         if (!process.env.ADMIN_PASSWORD) {
             console.log(`[AuthDB] ⚠️  No ADMIN_PASSWORD env var set. Generated random admin password: ${adminPw}`);
-            console.log('[AuthDB] Set ADMIN_PASSWORD environment variable to use a fixed password.');
+            console.log('[AuthDB] Set ADMIN_PASSWORD in server/.env if you want a different first-run password.');
         }
         const id = generateId();
         const hash = bcrypt.hashSync(adminPw, 10);
@@ -106,8 +107,8 @@ function generateId() {
 function createUser(username, password, inviteCode) {
     try {
         // Password strength validation
-        if (!password || password.length < 6) {
-            return { success: false, error: 'Password must be at least 6 characters long' };
+        if (!password || password.length < 5) {
+            return { success: false, error: 'Password must be at least 5 characters long' };
         }
 
         if (!inviteCode) return { success: false, error: 'Invite code is required' };
@@ -163,6 +164,71 @@ function verifyUser(username, password) {
             role: user.role || 'user',
             status: user.status || 'active',
             tokenVersion: user.token_version || 0
+        }
+    };
+}
+
+function updateOwnAccount(id, options = {}) {
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    if (!user) return { success: false, error: 'User not found' };
+
+    const currentPassword = String(options.currentPassword || '');
+    const nextUsername = typeof options.username === 'string' ? options.username.trim() : '';
+    const nextPassword = typeof options.newPassword === 'string' ? options.newPassword : '';
+
+    if (!currentPassword) return { success: false, error: 'Current password is required' };
+    if (!bcrypt.compareSync(currentPassword, user.password_hash)) {
+        return { success: false, error: 'Current password is incorrect' };
+    }
+
+    const updates = [];
+    const values = [];
+    let tokenVersion = Number(user.token_version || 0);
+
+    if (nextUsername && nextUsername !== user.username) {
+        const existing = db.prepare('SELECT id FROM users WHERE username = ? AND id <> ?').get(nextUsername, id);
+        if (existing) return { success: false, error: 'Username already exists' };
+        updates.push('username = ?');
+        values.push(nextUsername);
+        tokenVersion += 1;
+    }
+
+    if (nextPassword) {
+        if (nextPassword.length < 5) {
+            return { success: false, error: 'New password must be at least 5 characters long' };
+        }
+        updates.push('password_hash = ?');
+        values.push(bcrypt.hashSync(nextPassword, 10));
+        tokenVersion += 1;
+    }
+
+    if (updates.length === 0) {
+        return {
+            success: true,
+            user: {
+                id: user.id,
+                username: user.username,
+                role: user.role || 'user',
+                status: user.status || 'active',
+                tokenVersion
+            }
+        };
+    }
+
+    updates.push('token_version = ?');
+    values.push(tokenVersion);
+    values.push(id);
+    db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+
+    const updatedUser = db.prepare('SELECT id, username, role, status, token_version FROM users WHERE id = ?').get(id);
+    return {
+        success: true,
+        user: {
+            id: updatedUser.id,
+            username: updatedUser.username,
+            role: updatedUser.role || 'user',
+            status: updatedUser.status || 'active',
+            tokenVersion: updatedUser.token_version || 0
         }
     };
 }
@@ -271,6 +337,7 @@ module.exports = {
     initAuthDb,
     createUser,
     verifyUser,
+    updateOwnAccount,
     getUserById,
     generateInviteCode,
     getInviteCodes,

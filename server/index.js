@@ -16,6 +16,8 @@ const jwt = require('jsonwebtoken');
 const path = require('path');
 const fs = require('fs');
 
+require('dotenv').config({ path: path.join(__dirname, '.env') });
+
 // Generate or load a persistent JWT secret (never hardcoded in source)
 function getJwtSecret() {
     if (process.env.JWT_SECRET) return process.env.JWT_SECRET;
@@ -278,6 +280,29 @@ app.post('/api/auth/login', authLimiter, (req, res) => {
 
 app.get('/api/auth/me', authMiddleware, (req, res) => {
     res.json({ success: true, user: req.user });
+});
+
+app.put('/api/auth/account', authMiddleware, (req, res) => {
+    try {
+        const { username, currentPassword, newPassword } = req.body || {};
+        const result = authDb.updateOwnAccount(req.user.id, {
+            username,
+            currentPassword,
+            newPassword
+        });
+        if (!result.success) return res.status(400).json({ error: result.error });
+
+        const token = jwt.sign({
+            id: result.user.id,
+            username: result.user.username,
+            role: result.user.role,
+            tokenVersion: result.user.tokenVersion || 0
+        }, JWT_SECRET, { expiresIn: '30d' });
+
+        res.json({ success: true, token, user: result.user });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // 鈹€鈹€鈹€ SYSTEM ROUTES 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
@@ -837,8 +862,8 @@ app.post('/api/messages/:characterId/retry', authMiddleware, (req, res) => {
             db.deleteMessage(failedMessageId);
         }
 
-        // Tell the engine to re-attempt generating a reply based on the existing chat history
-        engine.handleUserMessage(characterId, wsClients);
+        // Re-attempt generation, resuming from the last failed RAG node when available.
+        engine.handleUserMessage(characterId, wsClients, { useRetryResume: true });
 
         res.json({ success: true });
     } catch (e) {
