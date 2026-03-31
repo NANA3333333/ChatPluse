@@ -1,73 +1,244 @@
-
+<p align="center">
+  <img src="chatpulse_logo.png" width="120" />
+</p>
 
 # ChatPulse
 
-ChatPulse is a local-first AI social simulation app built with React, Express, SQLite, WebSocket realtime updates, and optional Qdrant-backed memory retrieval.
+<p align="center">
+  <a href="#简体中文">简体中文</a> |
+  <a href="#english">English</a>
+</p>
 
-中文说明见 [README.zh-CN.md](./README.zh-CN.md)。
+## 简体中文
 
-## Stack
+ChatPulse 是一个本地优先的 AI 社交模拟应用，前端使用 React，后端使用 Express，主存储为 SQLite，并支持接入 Qdrant 做向量记忆检索。
 
-- Frontend: React 19 + Vite
-- Backend: Node.js + Express + ws
-- Primary app storage: SQLite via `better-sqlite3`
-- Vector search: Qdrant when available
-- Local vector fallback: vectra + `@xenova/transformers`
+### 技术栈
 
-## Local Deployment
+- 前端：React 19 + Vite
+- 后端：Node.js + Express + ws
+- 主存储：SQLite（`better-sqlite3`）
+- 向量检索：Qdrant
+- 本地兜底索引：vectra + `@xenova/transformers`
 
-### Requirements
+### 本地部署
 
-- Node.js 18 or newer
-- npm 9 or newer
-- Optional: Docker Desktop if you want Qdrant in a container
+环境要求：
 
-### 1. Clone
+- Node.js 18+
+- npm 9+
+- 可选：Docker Desktop（如果你想本地跑 Qdrant）
+
+克隆仓库：
 
 ```bash
-git clone https://github.com/NANA3333333/no.git
+git clone https://github.com/NANA3333333/ChatPluse.git
 cd ChatPulse
 ```
 
-### 2. Bootstrap the workspace
+初始化：
 
 ```bash
 npm run setup
 ```
 
-Windows one-click install and start:
+Windows 一键安装并启动：
 
 ```bat
 install-and-start.cmd
 ```
 
-macOS / Linux one-click install and start:
+macOS / Linux 一键安装并启动：
 
 ```bash
 chmod +x install-and-start.sh
 ./install-and-start.sh
 ```
 
-What this does:
+`npm run setup` 会自动：
 
-- installs root, server, and client dependencies
-- creates local runtime directories
-- creates `server/.env` from `server/.env.example` if it does not exist
-- prepares folders that are intentionally excluded from Git
+- 安装根目录、`server`、`client` 依赖
+- 创建本地运行目录
+- 自动生成 `server/.env`（如果不存在）
+- 创建运行所需但不会提交到 Git 的目录
 
-### 3. Configure local env
+启动：
 
-Review `server/.env` and update it as needed.
+```bash
+npm run dev
+```
 
-Important values:
+Windows 辅助脚本：
 
-- `ADMIN_PASSWORD`: recommended so first login is predictable
-- `QDRANT_ENABLED`: leave as `1` unless you explicitly want vectra-only mode
-- `QDRANT_URL`: default is `http://127.0.0.1:6333`
+```bat
+install-and-start.cmd
+start-stack.cmd
+status-stack.cmd
+stop-stack.cmd
+```
 
-### 4. Start the app
+macOS / Linux 辅助脚本：
 
-Cross-platform:
+```bash
+chmod +x install-and-start.sh
+./install-and-start.sh
+```
+
+启动后访问：
+
+- 前端：[http://127.0.0.1:5173](http://127.0.0.1:5173)
+- 后端：[http://localhost:8000](http://localhost:8000)
+
+首次登录：
+
+- 用户名：`Nana`
+- 默认密码：`12345`
+
+如果你在 `server/.env` 中设置了 `ADMIN_PASSWORD`，那么全新初始化时会使用你设置的密码。
+
+### 数据库、缓存与向量库初始化
+
+首次启动时会自动创建：
+
+- `data/master.db`：认证库
+- `data/chatpulse_user_<id>.db`：每个用户自己的业务数据库
+- `server/public/uploads/`：上传目录
+- `data/vectors/...`：本地 vectra 索引目录
+- JWT secret 文件（如果环境变量未提供）
+
+Qdrant 行为：
+
+- Qdrant 可用时，优先使用 Qdrant
+- Qdrant 不可用时，自动回退到本地 vectra
+- Qdrant collection 会在首次写入记忆时自动创建
+
+所以即使没有启动 Qdrant，项目也能在本地正常跑起来。
+
+可选启动 Qdrant：
+
+```bash
+docker compose up -d
+```
+
+将已有记忆迁移到 Qdrant：
+
+```bash
+npm run migrate:qdrant
+```
+
+常用参数：
+
+```bash
+npm run migrate:qdrant -- --dry-run
+npm run migrate:qdrant -- --user <userId>
+npm run migrate:qdrant -- --character <characterId>
+```
+
+健康检查：
+
+```bash
+npm run doctor
+```
+
+常用命令：
+
+```bash
+npm run setup
+npm run dev
+npm run doctor
+npm run migrate:qdrant
+npm run cleanup:city-memories
+```
+
+项目结构：
+
+```text
+client/
+  src/
+
+server/
+  index.js
+  db.js
+  memory.js
+  qdrant.js
+  plugins/
+
+scripts/
+  setup-local.js
+  doctor.js
+  dev.js
+  migrate-memories-to-qdrant.js
+```
+
+### 许可证
+
+本项目采用 **CC BY-NC-ND 4.0** 许可。
+
+这意味着：
+
+- 允许转载和分享
+- 必须注明作者 `NANA3333333 / Nana` 以及原始仓库链接
+- 禁止商用
+- 禁止修改后再发布
+
+完整许可说明见 [LICENSE](./LICENSE) 和 [Creative Commons 官方页面](https://creativecommons.org/licenses/by-nc-nd/4.0/)。
+
+---
+
+## English
+
+ChatPulse is a local-first AI social simulation app built with React, Express, SQLite, WebSocket realtime updates, and optional Qdrant-backed memory retrieval.
+
+### Stack
+
+- Frontend: React 19 + Vite
+- Backend: Node.js + Express + ws
+- Primary storage: SQLite via `better-sqlite3`
+- Vector search: Qdrant
+- Local fallback index: vectra + `@xenova/transformers`
+
+### Local Setup
+
+Requirements:
+
+- Node.js 18+
+- npm 9+
+- Optional: Docker Desktop if you want to run Qdrant locally
+
+Clone:
+
+```bash
+git clone https://github.com/NANA3333333/ChatPluse.git
+cd ChatPulse
+```
+
+Bootstrap:
+
+```bash
+npm run setup
+```
+
+One-click install and start on Windows:
+
+```bat
+install-and-start.cmd
+```
+
+One-click install and start on macOS / Linux:
+
+```bash
+chmod +x install-and-start.sh
+./install-and-start.sh
+```
+
+`npm run setup` will:
+
+- install root, `server`, and `client` dependencies
+- create local runtime directories
+- generate `server/.env` if it does not exist
+- prepare runtime-only folders that are intentionally excluded from Git
+
+Start the app:
 
 ```bash
 npm run dev
@@ -89,55 +260,49 @@ chmod +x install-and-start.sh
 ./install-and-start.sh
 ```
 
-App URLs:
+URLs:
 
 - Frontend: [http://127.0.0.1:5173](http://127.0.0.1:5173)
 - Backend: [http://localhost:8000](http://localhost:8000)
 
-### 5. First login
+First login:
 
-On a fresh auth database, ChatPulse auto-seeds a root user:
+- Username: `Nana`
+- Default password: `12345`
 
-- username: `Nana`
-- password: `12345` by default
+If you set `ADMIN_PASSWORD` in `server/.env`, that value will be used for first-run seeding on a brand-new auth database.
 
-If you set `ADMIN_PASSWORD` in `server/.env`, that value becomes the seeded root password for a brand-new auth database.
+### Databases, Cache, and Vector Initialization
 
-## Databases, Cache, and Vector Initialization
-
-Fresh clones do not need committed runtime data.
-
-These are created automatically on first start:
+On first startup, the project automatically creates:
 
 - `data/master.db` for auth
 - `data/chatpulse_user_<id>.db` per user
 - `server/public/uploads/`
 - local vectra indices under `data/vectors/...`
-- JWT secret file when not supplied by env
+- a JWT secret file when not provided by env
 
 Qdrant behavior:
 
-- If Qdrant is reachable, the server uses it as the primary vector backend.
-- If Qdrant is unavailable, the server automatically falls back to local vectra indices.
-- Qdrant collections are created lazily when memory points are first written.
+- Uses Qdrant when reachable
+- Falls back to local vectra when Qdrant is unavailable
+- Creates Qdrant collections lazily on first memory write
 
-That means a new contributor can boot the project without Qdrant and still use the app locally.
+So the project is still runnable locally even without Qdrant.
 
-## Optional Qdrant Setup
-
-Start Qdrant with Docker:
+Optional Qdrant startup:
 
 ```bash
 docker compose up -d
 ```
 
-If you already have memories in SQLite/vectra and want to backfill them into Qdrant:
+Migrate existing memories into Qdrant:
 
 ```bash
 npm run migrate:qdrant
 ```
 
-Useful variants:
+Common options:
 
 ```bash
 npm run migrate:qdrant -- --dry-run
@@ -145,23 +310,13 @@ npm run migrate:qdrant -- --user <userId>
 npm run migrate:qdrant -- --character <characterId>
 ```
 
-## Health Check
-
-Run:
+Health check:
 
 ```bash
 npm run doctor
 ```
 
-This checks:
-
-- Node version
-- installed dependencies
-- local runtime directories
-- `server/.env`
-- Qdrant reachability
-
-## Useful Commands
+Useful commands:
 
 ```bash
 npm run setup
@@ -171,32 +326,15 @@ npm run migrate:qdrant
 npm run cleanup:city-memories
 ```
 
-## Project Structure
+### License
 
-```text
-client/
-  src/
+This project is licensed under **CC BY-NC-ND 4.0**.
 
-server/
-  index.js
-  db.js
-  memory.js
-  qdrant.js
-  plugins/
+That means:
 
-scripts/
-  setup-local.js
-  doctor.js
-  dev.js
-  migrate-memories-to-qdrant.js
-```
+- sharing and redistribution are allowed
+- attribution to `NANA3333333 / Nana` and the original repository is required
+- commercial use is not allowed
+- modified redistribution is not allowed
 
-## Notes for Contributors
-
-- Runtime data is intentionally gitignored.
-- A fresh clone should be considered empty-state and bootstrapped locally.
-- The backend loads `server/.env` automatically on startup.
-
-## License
-
-ISC
+See [LICENSE](./LICENSE) and the [official Creative Commons page](https://creativecommons.org/licenses/by-nc-nd/4.0/) for details.

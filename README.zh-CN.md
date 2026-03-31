@@ -25,7 +25,7 @@ ChatPulse 是一个本地优先的 AI 社交模拟应用，前端使用 React，
 ### 1. 克隆仓库
 
 ```bash
-git clone https://github.com/NANA3333333/no.git
+git clone https://github.com/NANA3333333/ChatPluse.git
 cd ChatPulse
 ```
 
@@ -197,6 +197,15 @@ scripts/
 - 新 clone 的仓库应视为空状态，本地初始化即可
 - 后端启动时会自动加载 `server/.env`
 
-## License
+## 许可证
 
-ISC
+本项目采用 **CC BY-NC-ND 4.0** 许可。
+
+这意味着：
+
+- 允许转载和分享
+- 必须注明作者 `NANA3333333 / Nana` 以及原始仓库链接
+- 禁止商用
+- 禁止修改后再发布
+
+完整许可说明见 [LICENSE](./LICENSE) 和 [Creative Commons 官方页面](https://creativecommons.org/licenses/by-nc-nd/4.0/)。
