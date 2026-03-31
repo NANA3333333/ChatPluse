@@ -4,6 +4,8 @@
 
 ChatPulse is a local-first AI social simulation app built with React, Express, SQLite, WebSocket realtime updates, and optional Qdrant-backed memory retrieval.
 
+中文说明见 [README.zh-CN.md](./README.zh-CN.md)。
+
 ## Stack
 
 - Frontend: React 19 + Vite
