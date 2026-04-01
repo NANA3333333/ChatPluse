@@ -76,6 +76,8 @@ function getUserDb(userId) {
         return {
             ...row,
             memory_type: row.memory_type || 'event',
+            memory_tier: row.memory_tier || 'ambient',
+            memory_focus: row.memory_focus || 'general',
             summary,
             content,
             people_json: peopleList,
@@ -230,6 +232,8 @@ function getUserDb(userId) {
             source_ended_at INTEGER DEFAULT 0,
             source_time_text TEXT DEFAULT '',
             source_message_count INTEGER DEFAULT 0,
+            memory_tier TEXT DEFAULT 'ambient',
+            memory_focus TEXT DEFAULT 'general',
             FOREIGN KEY (character_id) REFERENCES characters(id)
         );
 
@@ -721,6 +725,8 @@ function getUserDb(userId) {
         try { db.prepare("ALTER TABLE memories ADD COLUMN source_ended_at INTEGER DEFAULT 0").run(); } catch (e) { }
         try { db.prepare("ALTER TABLE memories ADD COLUMN source_time_text TEXT DEFAULT ''").run(); } catch (e) { }
         try { db.prepare("ALTER TABLE memories ADD COLUMN source_message_count INTEGER DEFAULT 0").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE memories ADD COLUMN memory_tier TEXT DEFAULT 'ambient'").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE memories ADD COLUMN memory_focus TEXT DEFAULT 'general'").run(); } catch (e) { }
         try {
             db.prepare(`
                 UPDATE memories
@@ -735,7 +741,9 @@ function getUserDb(userId) {
                     source_started_at = CASE WHEN COALESCE(source_started_at, 0) = 0 THEN COALESCE(created_at, 0) ELSE source_started_at END,
                     source_ended_at = CASE WHEN COALESCE(source_ended_at, 0) = 0 THEN COALESCE(updated_at, created_at, 0) ELSE source_ended_at END,
                     source_time_text = CASE WHEN COALESCE(source_time_text, '') = '' AND COALESCE(time, '') <> '' THEN COALESCE(time, '') ELSE source_time_text END,
-                    source_message_count = CASE WHEN COALESCE(source_message_count, 0) = 0 THEN CASE WHEN json_valid(source_message_ids_json) THEN json_array_length(source_message_ids_json) ELSE 0 END ELSE source_message_count END
+                    source_message_count = CASE WHEN COALESCE(source_message_count, 0) = 0 THEN CASE WHEN json_valid(source_message_ids_json) THEN json_array_length(source_message_ids_json) ELSE 0 END ELSE source_message_count END,
+                    memory_tier = CASE WHEN COALESCE(memory_tier, '') = '' THEN 'ambient' ELSE memory_tier END,
+                    memory_focus = CASE WHEN COALESCE(memory_focus, '') = '' THEN 'general' ELSE memory_focus END
             `).run();
         } catch (e) { }
 
@@ -993,18 +1001,33 @@ function getUserDb(userId) {
             .all(characterId, limit);
     }
 
+    function normalizeMessageRow(row) {
+        if (!row) return row;
+        let metadata = row.metadata;
+        if (typeof metadata === 'string' && metadata.trim()) {
+            try {
+                metadata = JSON.parse(metadata);
+            } catch (e) {
+                metadata = null;
+            }
+        }
+        return { ...row, metadata: metadata || null };
+    }
+
     // ─── Message Queries ────────────────────────────────────────────────────
 
     function getMessages(characterId, limit = 100) {
         return db.prepare('SELECT * FROM messages WHERE character_id = ? ORDER BY id DESC LIMIT ?')
             .all(characterId, limit)
-            .reverse();
+            .reverse()
+            .map(normalizeMessageRow);
     }
 
     function getMessagesBefore(characterId, beforeId, limit = 100) {
         return db.prepare('SELECT * FROM messages WHERE character_id = ? AND id < ? ORDER BY id DESC LIMIT ?')
             .all(characterId, beforeId, limit)
-            .reverse();
+            .reverse()
+            .map(normalizeMessageRow);
     }
 
     // Returns messages excluding hidden ones — used for LLM context
@@ -1249,8 +1272,8 @@ function getUserDb(userId) {
         }).join('; ')).trim();
         const info = db.prepare(`
         INSERT INTO memories 
-        (character_id, time, location, people, event, relationships, items, importance, embedding, created_at, group_id, memory_type, summary, content, people_json, items_json, relationship_json, emotion, source_message_ids_json, dedupe_key, updated_at, is_archived, source_started_at, source_ended_at, source_time_text, source_message_count) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (character_id, time, location, people, event, relationships, items, importance, embedding, created_at, group_id, memory_type, summary, content, people_json, items_json, relationship_json, emotion, source_message_ids_json, dedupe_key, updated_at, is_archived, source_started_at, source_ended_at, source_time_text, source_message_count, memory_tier, memory_focus) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
             characterId,
             memoryData.time || '',
@@ -1277,7 +1300,9 @@ function getUserDb(userId) {
             Number(memoryData.source_started_at || 0),
             Number(memoryData.source_ended_at || 0),
             memoryData.source_time_text || '',
-            Number(memoryData.source_message_count || sourceMessageIds.length || 0)
+            Number(memoryData.source_message_count || sourceMessageIds.length || 0),
+            memoryData.memory_tier || 'ambient',
+            memoryData.memory_focus || 'general'
         );
         return info.lastInsertRowid;
     }
@@ -2286,6 +2311,15 @@ function getUserDb(userId) {
         }
     }
 
+    function deleteLlmCache(cacheKey) {
+        try {
+            return db.prepare('DELETE FROM llm_cache WHERE cache_key = ?').run(String(cacheKey || '')).changes || 0;
+        } catch (e) {
+            console.error('[DB] Error deleting llm cache:', e.message);
+            return 0;
+        }
+    }
+
     function pruneExpiredLlmCache(limit = 500) {
         try {
             const now = Date.now();
@@ -2741,6 +2775,7 @@ function getUserDb(userId) {
         getWallet,
         getMomentsContextForChar,
         incrementLlmCacheLookup,
+        deleteLlmCache,
         upsertLlmCache,
         upsertPromptBlockCache,
         upsertHistoryWindowCache,

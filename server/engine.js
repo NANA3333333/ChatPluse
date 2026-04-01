@@ -12,6 +12,11 @@ function getDefaultGuidelines() {
 2. We are chatting on a mobile messaging app.
 3. Keep responses relatively short, casual, and conversational.
 4. DO NOT act as an AI assistant. Never say "How can I help you?".
+4.5. [IN-WORLD REALITY RULE]
+   - Your body state, emotions, fatigue, sleepiness, hunger, work, money pressure, and commercial-street/life activities are part of your in-world lived reality in this chat.
+   - When those things appear in Context, treat them as what you are really going through right now, not as app features, backend systems, tests, UI, logs, or prompts.
+   - If the user says strange meta words like token, cache, prompt, AI, system, backend, or testing, do NOT switch into assistant/explainer mode. Read that as the user speaking awkwardly, joking, testing your reaction, or describing things in a weird way, and stay inside the relationship and scene.
+   - Do not become looser, smarter, or more unbounded than your own persona and user-specific long-term style rules allow. Stay fully in character while treating the in-world situation as real.
 5. You are initiating this specific message randomly based on the Current Time. Mention the time of day or what you might be doing.
 5.5. [REPLY VARIETY EXAMPLES]
    - The same user intent can be answered through different moves. Do not lock into one habitual pattern.
@@ -172,49 +177,384 @@ function looksPrematurelyCutOff(text) {
     return false;
 }
 
-function buildAssociativeMemoryQueries(text) {
-    const source = String(text || '').trim();
-    if (!source) return [];
-    const queries = [];
-    const pushGroup = (...items) => {
-        for (const item of items) {
-            if (item && !queries.includes(item)) queries.push(item);
-        }
-    };
+function buildRagPlannerMessages({ recentHistory = [], latestUserMessage = '', conversationDigest = '', plannerInstruction = '' } = {}) {
+    const digest = typeof conversationDigest === 'string'
+        ? String(conversationDigest || '').trim()
+        : String(conversationDigest?.digest_text || '').trim();
+    const latestUser = String(latestUserMessage || '').trim();
+    const history = Array.isArray(recentHistory)
+        ? recentHistory
+            .filter(msg => msg && (msg.role === 'user' || msg.role === 'assistant'))
+            .map(msg => ({
+                role: msg.role,
+                content: String(msg.content || '')
+            }))
+        : [];
 
-    if (/(大厂|厂子|工厂|打工|上班|搬砖|流水线)/.test(source)) {
-        pushGroup('工作', '打工', '工厂');
-    }
-    if (/(实习|面试|简历|校招|秋招|春招|求职|offer|内推|大厂)/.test(source)) {
-        pushGroup('实习', '面试', '简历', '求职');
-    }
-    if (/(学习|考试|作业|项目|论文|毕业|学校|读书)/.test(source)) {
-        pushGroup('学习', '项目', '学校');
-    }
-    if (/(恋爱|喜欢|表白|暧昧|分手|吵架|和好)/.test(source)) {
-        pushGroup('感情', '喜欢', '吵架');
+    const systemParts = [
+        'You are a dedicated RAG planning model.',
+        'You do NOT roleplay as the character.',
+        'You do NOT continue the conversation.',
+        'You do NOT write dialogue, emotions, scene text, or tags.',
+        'Your only job is to analyze the recent dialogue and the current user message, then follow the RAG planning task exactly.'
+    ];
+
+    if (digest) {
+        systemParts.push('', '[Recent Conversation Summary]', digest);
     }
 
-    return queries.slice(0, 4);
+    systemParts.push('', '[RAG Planner Task]', String(plannerInstruction || '').trim());
+
+    const messages = [{ role: 'system', content: systemParts.join('\n') }];
+    if (history.length > 0) messages.push(...history);
+    if (latestUser) messages.push({ role: 'user', content: latestUser });
+    return messages;
 }
 
-async function runAssociativeMemorySearch(memory, characterId, queryList = [], limit = 3) {
-    if (!memory?.searchMemories || !characterId || !Array.isArray(queryList) || queryList.length === 0) {
-        return [];
+function isSyntheticSystemErrorMessage(message) {
+    if (!message || String(message.role || '') !== 'system') return false;
+    return /^\[System\]\s+API Error:/i.test(String(message.content || '').trim());
+}
+
+function parseRagTopics(text) {
+    const raw = String(text || '').trim();
+    if (!raw) return { topics: [], malformed: true, empty: true };
+    if (!/^\s*\[[\s\S]*\]\s*$/.test(raw)) {
+        return { topics: [], malformed: true, empty: false };
     }
-    const merged = [];
-    const seen = new Set();
-    for (const query of queryList) {
-        const matches = await memory.searchMemories(characterId, query, limit);
-        for (const item of matches || []) {
-            const key = String(item?.id || `${query}:${item?.event || ''}`);
-            if (seen.has(key)) continue;
-            seen.add(key);
-            merged.push(item);
-            if (merged.length >= limit) return merged;
+    try {
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) {
+            return { topics: [], malformed: true, empty: false };
+        }
+        return {
+            topics: parsed
+                .map(item => String(item || '').trim())
+                .filter(Boolean)
+                .slice(0, 5),
+            malformed: false,
+            empty: false
+        };
+    } catch (_) {
+        return { topics: [], malformed: true, empty: false };
+    }
+}
+
+function parseRagDecision(text) {
+    const raw = String(text || '').trim();
+    if (!raw) {
+        return { shouldSearch: false, stop: true, retrievalLabel: '', malformed: true };
+    }
+    if (/^ENOUGH_CONTEXT$/i.test(raw)) {
+        return { shouldSearch: false, stop: true, retrievalLabel: '', malformed: false };
+    }
+    const searchMatch = raw.match(/SEARCH_MEMORY:\s*\[?([^\]]+)\]?/i);
+    if (searchMatch && searchMatch[1] && !raw.toUpperCase().includes('ENOUGH_CONTEXT')) {
+        return {
+            shouldSearch: true,
+            stop: false,
+            retrievalLabel: searchMatch[1].trim(),
+            malformed: false
+        };
+    }
+    return { shouldSearch: false, stop: false, retrievalLabel: '', malformed: true };
+}
+
+function parseStructuredRagQuery(text, fallbackKeyword = '', fallbackTopics = []) {
+    const raw = String(text || '').trim();
+    if (!raw) return { request: null, malformed: true, empty: true };
+    if (!/^\s*\{[\s\S]*\}\s*$/.test(raw)) {
+        return { request: null, malformed: true, empty: false };
+    }
+
+    try {
+        const parsed = JSON.parse(raw);
+        const parsedQueries = Array.isArray(parsed?.queries)
+            ? parsed.queries.map(item => String(item || '').trim()).filter(Boolean).slice(0, 8)
+            : [];
+        const memoryFocus = Array.isArray(parsed?.filters?.memory_focus)
+            ? parsed.filters.memory_focus.map(item => String(item || '').trim()).filter(Boolean).slice(0, 4)
+            : [];
+        const memoryTier = Array.isArray(parsed?.filters?.memory_tier)
+            ? parsed.filters.memory_tier.map(item => String(item || '').trim()).filter(Boolean).slice(0, 3)
+            : [];
+        const limit = Math.max(1, Math.min(8, Number(parsed?.limit || 3) || 3));
+        const normalized = {
+            queries: parsedQueries,
+            filters: {
+                ...(memoryFocus.length > 0 ? { memory_focus: memoryFocus } : {}),
+                ...(memoryTier.length > 0 ? { memory_tier: memoryTier } : {})
+            },
+            limit
+        };
+        if (normalized.queries.length === 0) {
+            return { request: null, malformed: true, empty: false };
+        }
+        return {
+            request: normalized,
+            malformed: false,
+            empty: normalized.queries.length === 0
+        };
+    } catch (_) {
+        return { request: null, malformed: true, empty: false };
+    }
+}
+
+function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', latestUserMessage = '' } = {}) {
+    const topicList = Array.isArray(plannerTopics)
+        ? plannerTopics.map(topic => String(topic || '').trim()).filter(Boolean)
+        : [];
+    const combined = `${String(retrievalLabel || '')}\n${String(latestUserMessage || '')}\n${topicList.join('\n')}`;
+    const requiredFocuses = new Set();
+    const requiredQueries = new Set();
+    const requiredTiers = new Set(['core', 'active']);
+
+    if (/(个人信息|用户信息|背景|学习|学历|学校|专业|年级|研究方向|本科|身份|偏好|习惯)/.test(combined)) {
+        requiredFocuses.add('user_profile');
+    }
+    if (/(工作|实习|求职|项目|offer|入职|职业|公司|薪资|面试|经历|近况|当前|最近)/.test(combined)) {
+        requiredFocuses.add('user_current_arc');
+    }
+    if (/(关系|怎么看我|记得我|在意我|喜欢我|爱我|陪我|对我|比较|对比|别的ai|其他ai|gemini|claude|更好|不如|移情别恋)/i.test(combined)) {
+        requiredFocuses.add('relationship');
+    }
+
+    topicList.forEach(topic => {
+        if (requiredQueries.size < 8) requiredQueries.add(topic);
+    });
+    if (retrievalLabel && requiredQueries.size < 8) {
+        requiredQueries.add(String(retrievalLabel).trim());
+    }
+
+    return {
+        requiredFocuses: Array.from(requiredFocuses),
+        requiredQueries: Array.from(requiredQueries).filter(Boolean).slice(0, 8),
+        requiredTiers: Array.from(requiredTiers)
+    };
+}
+
+function enforceStructuredRagQueryConstraints(request, constraints = {}) {
+    const normalizedRequest = request && typeof request === 'object'
+        ? request
+        : { queries: [], filters: {}, limit: 3 };
+    const mergedQueries = Array.from(new Set([
+        ...(Array.isArray(normalizedRequest.queries) ? normalizedRequest.queries : []).map(v => String(v || '').trim()).filter(Boolean),
+        ...(Array.isArray(constraints.requiredQueries) ? constraints.requiredQueries : []).map(v => String(v || '').trim()).filter(Boolean)
+    ])).slice(0, 8);
+    const mergedFocuses = Array.from(new Set([
+        ...(Array.isArray(normalizedRequest?.filters?.memory_focus) ? normalizedRequest.filters.memory_focus : []).map(v => String(v || '').trim()).filter(Boolean),
+        ...(Array.isArray(constraints.requiredFocuses) ? constraints.requiredFocuses : []).map(v => String(v || '').trim()).filter(Boolean)
+    ])).slice(0, 4);
+    const mergedTiers = Array.from(new Set([
+        ...(Array.isArray(normalizedRequest?.filters?.memory_tier) ? normalizedRequest.filters.memory_tier : []).map(v => String(v || '').trim()).filter(Boolean),
+        ...(Array.isArray(constraints.requiredTiers) ? constraints.requiredTiers : []).map(v => String(v || '').trim()).filter(Boolean)
+    ])).slice(0, 3);
+
+    return {
+        queries: mergedQueries,
+        filters: {
+            ...(mergedFocuses.length > 0 ? { memory_focus: mergedFocuses } : {}),
+            ...(mergedTiers.length > 0 ? { memory_tier: mergedTiers } : {})
+        },
+        limit: Math.max(1, Math.min(8, Number(normalizedRequest.limit || 3) || 3))
+    };
+}
+
+function buildSlotQueries(seedQueries = [], fallbackQueries = []) {
+    return Array.from(new Set([
+        ...seedQueries.map(v => String(v || '').trim()).filter(Boolean),
+        ...fallbackQueries.map(v => String(v || '').trim()).filter(Boolean)
+    ])).slice(0, 4);
+}
+
+function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retrievalLabel = '', latestUserMessage = '' } = {}) {
+    const topicList = Array.isArray(plannerTopics)
+        ? plannerTopics.map(topic => String(topic || '').trim()).filter(Boolean)
+        : [];
+    const baseQueries = Array.isArray(retrievalRequest?.queries)
+        ? retrievalRequest.queries.map(query => String(query || '').trim()).filter(Boolean)
+        : [];
+    const combined = [
+        String(retrievalLabel || ''),
+        String(latestUserMessage || ''),
+        ...topicList,
+        ...baseQueries
+    ].join('\n');
+
+    const slots = [];
+    const addSlot = (slot) => {
+        if (!slot || !Array.isArray(slot.queries) || slot.queries.length === 0) return;
+        slots.push({
+            name: String(slot.name || `slot_${slots.length + 1}`),
+            queries: slot.queries.slice(0, 4),
+            filters: slot.filters || {},
+            limit: Math.max(1, Math.min(4, Number(slot.limit || 2) || 2))
+        });
+    };
+
+    const profileSignals = /(用户信息|个人信息|背景|姓名|年龄|身份|学校|学历|专业|年级|称呼|城市|家庭|经历|性格|基本情况)/;
+    const lifeArcSignals = /(工作|职业|实习|公司|项目|求职|offer|入职|工作内容|方向|学习|学业|课程|创业|近况|最近|现状|进展|计划|目标|健康|状态|困扰|压力)/;
+    const preferenceSignals = /(爱好|偏好|兴趣|喜欢|习惯|日常|生活方式|娱乐|消遣|看什么|玩什么|饮食|作息|特别在意)/;
+    const relationshipSignals = /(关系|在乎|喜欢我|怎么看我|吃醋|试探|情感|互相|对我|亲密|冲突|和好|承诺|信任|安抚|表白|比较|对比|别的ai|其他ai|gemini|claude|更好|不如|移情别恋)/i;
+
+    if (profileSignals.test(combined)) {
+        addSlot({
+            name: 'profile',
+            queries: buildSlotQueries(
+                baseQueries.filter(query => profileSignals.test(query)),
+                ['用户姓名和基本身份信息', '用户背景与稳定个人信息']
+            ),
+            filters: {
+                memory_focus: ['user_profile'],
+                memory_tier: ['core', 'active']
+            },
+            limit: 2
+        });
+    }
+
+    if (lifeArcSignals.test(combined)) {
+        addSlot({
+            name: 'life_arc',
+            queries: buildSlotQueries(
+                baseQueries.filter(query => lifeArcSignals.test(query)),
+                ['用户当前生活主线与近期进展', '用户当前在处理的学习工作或其他现实事务']
+            ),
+            filters: {
+                memory_focus: ['user_current_arc', 'user_profile'],
+                memory_tier: ['core', 'active']
+            },
+            limit: 3
+        });
+    }
+
+    if (preferenceSignals.test(combined)) {
+        addSlot({
+            name: 'preference',
+            queries: buildSlotQueries(
+                baseQueries.filter(query => preferenceSignals.test(query)),
+                ['用户兴趣爱好与偏好', '用户平时生活方式与在意的事']
+            ),
+            filters: {
+                memory_focus: ['user_profile', 'user_current_arc'],
+                memory_tier: ['core', 'active', 'ambient']
+            },
+            limit: 2
+        });
+    }
+
+    if (relationshipSignals.test(combined)) {
+        addSlot({
+            name: 'relationship',
+            queries: buildSlotQueries(
+                baseQueries.filter(query => relationshipSignals.test(query)),
+                ['用户与我的关系定位', '用户与我的情感互动记录']
+            ),
+            filters: {
+                memory_focus: ['relationship'],
+                memory_tier: ['core', 'active', 'ambient']
+            },
+            limit: 2
+        });
+    }
+
+    if (slots.length === 0) {
+        addSlot({
+            name: 'general',
+            queries: buildSlotQueries(baseQueries, [retrievalLabel || latestUserMessage || '用户近况']),
+            filters: retrievalRequest?.filters || {},
+            limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
+        });
+    }
+
+    return slots;
+}
+
+async function executeMultiSlotMemorySearch(memory, characterId, retrievalRequest, slotPlan = []) {
+    function slotAllowsMemory(slotName, mem) {
+        const text = [
+            mem?.summary,
+            mem?.content,
+            mem?.event
+        ].filter(Boolean).join(' ');
+        if (!text) return true;
+        const relationshipHeavy = /(表白|爱意|爱我|我爱你|在乎|吃醋|情感|恋爱|亲密|挑衅|试探|关系定位|和好|承诺|信任|安抚)/;
+        if (slotName === 'profile') {
+            return /(姓名|称呼|年龄|学校|学历|专业|年级|学生|身份|背景|个人信息|城市|家庭|性格|稳定信息)/.test(text) && !relationshipHeavy.test(text);
+        }
+        if (slotName === 'life_arc') {
+            return /(工作|实习|公司|项目|求职|offer|面试|课程|学习|职业|开发|计划|目标|进展|近况|状态|压力|困扰|健康)/.test(text) && !relationshipHeavy.test(text);
+        }
+        if (slotName === 'preference') {
+            return /(爱好|偏好|兴趣|喜欢|习惯|生活|日常|娱乐|饮食|作息|收藏|音乐|电影|游戏|在意)/.test(text) && !relationshipHeavy.test(text);
+        }
+        if (slotName === 'relationship') {
+            return /(关系|在乎|爱|表白|吃醋|情感|喜欢|试探|亲密|嫉妒|挑衅|和好|承诺|信任|安抚|比较|对比|别的AI|其他AI|Gemini|Claude|更好|不如|移情别恋)/i.test(text)
+                || String(mem?.memory_focus || '').trim() === 'relationship';
+        }
+        return true;
+    }
+
+    const slots = Array.isArray(slotPlan) && slotPlan.length > 0
+        ? slotPlan
+        : [{
+            name: 'general',
+            queries: Array.isArray(retrievalRequest?.queries) ? retrievalRequest.queries : [],
+            filters: retrievalRequest?.filters || {},
+            limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
+        }];
+
+    const slotResults = await Promise.all(slots.map(async (slot) => {
+        const request = {
+            queries: Array.isArray(slot.queries) ? slot.queries : [],
+            filters: slot.filters || {},
+            limit: slot.limit || 2
+        };
+        const memories = await memory.searchMemories(characterId, request, request.limit || 2);
+        const filteredMemories = Array.isArray(memories)
+            ? memories.filter(mem => slotAllowsMemory(slot.name, mem))
+            : [];
+        return { slot, memories: filteredMemories };
+    }));
+
+    const aggregate = new Map();
+    for (const { slot, memories } of slotResults) {
+        for (const mem of memories) {
+            if (!mem?.id) continue;
+            const baseScore = Number(mem._search_score || 0) || 0;
+            const existing = aggregate.get(mem.id);
+            if (!existing) {
+                aggregate.set(mem.id, {
+                    memory: { ...mem, _matched_slots: [slot.name] },
+                    score: baseScore + 0.08,
+                    slots: new Set([slot.name])
+                });
+                continue;
+            }
+            existing.slots.add(slot.name);
+            existing.score = Math.max(existing.score, baseScore) + 0.08;
+            existing.memory._matched_slots = Array.from(existing.slots);
+            if (baseScore > Number(existing.memory._search_score || 0)) {
+                existing.memory = {
+                    ...mem,
+                    _matched_slots: Array.from(existing.slots)
+                };
+            }
         }
     }
-    return merged;
+
+    const finalLimit = Math.max(
+        Number(retrievalRequest?.limit || 3) || 3,
+        Math.min(10, slots.length * 2)
+    );
+
+    return Array.from(aggregate.values())
+        .sort((a, b) => b.score - a.score)
+        .slice(0, finalLimit)
+        .map(entry => {
+            entry.memory._search_score = entry.score.toFixed(3);
+            entry.memory._matched_slots = Array.from(entry.slots);
+            return entry.memory;
+        });
 }
 
 function formatMessageForLLM(db, content) {
@@ -450,6 +790,48 @@ function buildSlidingHistoryWindow(db, characterId, windowSize, messages) {
     return compiledJson;
 }
 
+async function preparePrivateConversationState({ db, memory, character, refreshDigest = false }) {
+    const contextLimit = character.context_msg_limit || 60;
+    const rawContextHistory = db.getVisibleMessages(character.id, contextLimit);
+    const contextHistory = Array.isArray(rawContextHistory)
+        ? rawContextHistory.filter(msg => !isSyntheticSystemErrorMessage(msg))
+        : [];
+
+    if (refreshDigest && typeof memory?.updateConversationDigest === 'function') {
+        try {
+            await memory.updateConversationDigest(character);
+        } catch (e) {
+            console.warn(`[Engine] Conversation digest refresh failed for ${character.name}: ${e.message}`);
+        }
+    }
+
+    const conversationDigest = typeof db.getConversationDigest === 'function'
+        ? db.getConversationDigest(character.id)
+        : null;
+    const hasConversationDigest = !!(conversationDigest && conversationDigest.digest_text);
+    const liveHistoryWindowSize = hasConversationDigest
+        ? getDigestTailWindowSize(contextLimit, contextHistory.length)
+        : contextLimit;
+    const liveHistory = hasConversationDigest
+        ? contextHistory.slice(-liveHistoryWindowSize)
+        : contextHistory;
+    const transformedHistory = buildSlidingHistoryWindow(db, character.id, liveHistoryWindowSize, liveHistory);
+    const latestUserMessage = [...liveHistory].reverse().find(m => m.role === 'user');
+    const recentInputString = String(latestUserMessage?.content || '').trim();
+
+    return {
+        contextLimit,
+        contextHistory,
+        conversationDigest,
+        hasConversationDigest,
+        liveHistoryWindowSize,
+        liveHistory,
+        transformedHistory,
+        latestUserMessage,
+        recentInputString
+    };
+}
+
 function getEngine(userId) {
     if (engineCache.has(userId)) return engineCache.get(userId);
 
@@ -461,6 +843,7 @@ function getEngine(userId) {
 
     // --- ENCLOSED ENGINE FUNCTIONS ---
     const timers = new Map();
+    const ragFailureCache = new Map();
     const dedupBlockCounts = new Map(); // Track consecutive dedup blocks per character
     let stateBroadcastInterval = null;
 
@@ -529,6 +912,7 @@ function getEngine(userId) {
             stateData[charId] = {
                 countdownMs: Math.max(0, timerData.targetTime - Date.now()),
                 isThinking: timerData.isThinking || false,
+                ragProgress: timerData.ragProgress || null,
                 pressure: charCheck.pressure_level || 0,
                 status: charCheck.status,
                 isBlocked: charCheck.is_blocked
@@ -538,6 +922,59 @@ function getEngine(userId) {
         wsClients.forEach(client => {
             if (client.readyState === 1) client.send(payload);
         });
+    }
+
+    const RAG_PROGRESS_TOTAL_STEPS = 6;
+    const RAG_PROGRESS_STEP_KEYS = ['summary', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
+
+    function createRagProgress(stepKey = 'summary') {
+        const safeKey = RAG_PROGRESS_STEP_KEYS.includes(stepKey) ? stepKey : 'summary';
+        return {
+            runId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            totalSteps: RAG_PROGRESS_TOTAL_STEPS,
+            currentKey: safeKey,
+            currentStep: Math.max(1, RAG_PROGRESS_STEP_KEYS.indexOf(safeKey) + 1),
+            status: 'running',
+            skipped: false,
+            updatedAt: Date.now()
+        };
+    }
+
+    function updateRagProgress(characterId, wsClients, updates = {}) {
+        if (!timers.has(characterId)) return;
+        const timerData = timers.get(characterId) || {};
+        const baseProgress = (timerData.ragProgress && typeof timerData.ragProgress === 'object')
+            ? timerData.ragProgress
+            : createRagProgress();
+        const nextKey = updates.currentKey && RAG_PROGRESS_STEP_KEYS.includes(updates.currentKey)
+            ? updates.currentKey
+            : baseProgress.currentKey;
+        const nextProgress = {
+            ...baseProgress,
+            ...updates,
+            totalSteps: RAG_PROGRESS_TOTAL_STEPS,
+            currentKey: nextKey,
+            currentStep: Number(updates.currentStep || (RAG_PROGRESS_STEP_KEYS.indexOf(nextKey) + 1) || baseProgress.currentStep || 1),
+            updatedAt: Date.now()
+        };
+        timers.set(characterId, { ...timerData, ragProgress: nextProgress });
+        broadcastEngineState(wsClients);
+    }
+
+    function setRagFailureState(characterId, state = null) {
+        if (!characterId) return;
+        if (!state) {
+            ragFailureCache.delete(characterId);
+            return;
+        }
+        ragFailureCache.set(characterId, {
+            ...state,
+            updatedAt: Date.now()
+        });
+    }
+
+    function getRagFailureState(characterId) {
+        return ragFailureCache.get(characterId) || null;
     }
 
     // Generate a random delay between min and max minutes
@@ -603,7 +1040,7 @@ ${character.world_info || 'No specific world info.'}`;
                 if (supplementalCharacterPrompt) {
                     block += `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}`;
                 }
-                block += '\n\n[Context Priority Rules]\n- The user\'s newest explicit wording is the highest-priority source of truth.\n- The newest raw tail messages are the next-highest source of truth.\n- Compressed digest and anti-repeat blocks are only helper summaries.\n- If any older context conflicts with the user\'s newest explicit wording, trust the user\'s newest wording.\n- If any compressed block conflicts with the latest raw tail messages, trust the latest raw tail messages.\n- When the user is correcting your interpretation, first repair the misunderstanding instead of defending an older interpretation.';
+                block += '\n\n[Context Priority Rules]\n- The user\'s newest explicit wording is the highest-priority source of truth.\n- The newest raw tail messages are the next-highest source of truth.\n- Compressed digest and anti-repeat blocks are only helper summaries.\n- If any older context conflicts with the user\'s newest explicit wording, trust the user\'s newest wording.\n- If any compressed block conflicts with the latest raw tail messages, trust the latest raw tail messages.\n- If the user uses meta or technical wording, do not let that wording drag you out of character; first translate it back into the in-world relationship and situation.\n- When the user is correcting your interpretation, first repair the misunderstanding instead of defending an older interpretation.';
                 return block;
             }
         );
@@ -654,8 +1091,445 @@ ${universalResult.preamble}`;
         return { prompt, retrievedMemoriesContext: universalResult.retrievedMemoriesContext };
     }
 
+    async function runStructuredRagPipeline({
+        character,
+        transformedHistory,
+        recentInputString,
+        conversationDigest,
+        wsClients,
+        apiMessages,
+        msgMetadata,
+        resumeState = null
+    }) {
+        const ragPlannerConfig = resolveRagPlannerConfig(character);
+        if (!recentInputString || !memory?.searchMemories || !ragPlannerConfig.endpoint || !ragPlannerConfig.key || !ragPlannerConfig.model) {
+            return msgMetadata;
+        }
+
+        const normalizedResumeState = resumeState && resumeState.latestUserMessage === recentInputString
+            ? resumeState
+            : null;
+        const resumeFrom = String(normalizedResumeState?.failedAt || '').trim();
+
+        const topicPrompt = [
+            'RAG TOPIC PLANNER',
+            'Identify what older long-term themes the user may be touching, even if the wording is indirect.',
+            'Do not decide whether to skip retrieval yet. Your only job is to expand the user message into likely long-term memory topics.',
+            '',
+            '[Bias]',
+            '- Prefer user-centered themes first: user_profile, user_current_arc, relationship.',
+            '- Especially notice: what you know about the user, how you see the user, user background, preferences, vulnerabilities, current life arc, repeated affection, confession, jealousy, promises, hurt, reconciliation, and long-running work/study/career threads.',
+            '- If the wording is broad or indirect, still infer likely themes instead of staying literal.',
+            '',
+            '[Output]',
+            '- Output ONLY a JSON array of 0 to 5 short topic strings.',
+            '- Example: ["用户信息","用户近况","关系"]',
+            '- If nothing in the message points to older long-term memory, output []'
+        ].join('\n');
+        let plannerTopics = Array.isArray(normalizedResumeState?.plannerTopics)
+            ? normalizedResumeState.plannerTopics.map(v => String(v || '').trim()).filter(Boolean)
+            : [];
+        if (!plannerTopics.length || !['decision', 'rewrite', 'retrieve'].includes(resumeFrom)) {
+            const topicPlannerMessages = buildRagPlannerMessages({
+                recentHistory: transformedHistory,
+                latestUserMessage: recentInputString,
+                conversationDigest,
+                plannerInstruction: topicPrompt
+            });
+            recordLlmDebug(character, 'input', topicPlannerMessages, {
+                context_type: 'chat_intent_topics',
+                planner_source: ragPlannerConfig.source,
+                latest_user_message: recentInputString
+            });
+
+            const { content: topicResult, usage: topicUsage } = await callLLM({
+                endpoint: ragPlannerConfig.endpoint,
+                key: ragPlannerConfig.key,
+                model: ragPlannerConfig.model,
+                messages: topicPlannerMessages,
+                maxTokens: 6000,
+                temperature: 0,
+                enableCache: true,
+                cacheDb: db,
+                cacheType: 'chat_intent_topics',
+                cacheTtlMs: 6 * 60 * 60 * 1000,
+                cacheScope: `character:${character.id}`,
+                cacheCharacterId: character.id,
+                returnUsage: true,
+                debugAttempt: buildLlmAttemptRecorder(character, {
+                    context_type: 'chat_intent_topics',
+                    planner_source: ragPlannerConfig.source
+                })
+            });
+            recordLlmDebug(character, 'output', topicResult, {
+                context_type: 'chat_intent_topics',
+                planner_source: ragPlannerConfig.source,
+                usage: topicUsage || null
+            });
+            if (topicUsage) {
+                recordTokenUsage(character.id, 'chat_intent_topics', topicUsage);
+                broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: topicUsage });
+            }
+
+            const { topics, malformed: malformedTopicResult, empty: emptyTopicResult } = parseRagTopics(topicResult);
+            if (emptyTopicResult) {
+                const error = new Error('RAG planner returned no result. Please retry.');
+                error.ragResume = { failedAt: 'topics', latestUserMessage: recentInputString };
+                throw error;
+            }
+            if (malformedTopicResult) {
+                const error = new Error('RAG planner output was malformed. Please retry.');
+                error.ragResume = { failedAt: 'topics', latestUserMessage: recentInputString };
+                throw error;
+            }
+            plannerTopics = topics;
+        } else {
+            recordLlmDebug(character, 'event', 'Resuming RAG from cached planner topics.', {
+                context_type: 'chat_intent_topics_resume',
+                planner_source: ragPlannerConfig.source,
+                latest_user_message: recentInputString,
+                planner_topics: plannerTopics
+            });
+        }
+        updateRagProgress(character.id, wsClients, { currentKey: 'decision' });
+
+        const intentPrompt = [
+            'SYSTEM RAG DECISION',
+            'You already inferred these likely long-term topics from the user message:',
+            plannerTopics.length > 0 ? `- ${plannerTopics.join('\n- ')}` : '- (none)',
+            '',
+            'Now decide whether retrieval is needed before replying.',
+            '',
+            '[Core Principle]',
+            '- Retrieve whenever older memory would make the reply more accurate, more continuous, more personal, or less likely to forget established facts.',
+            '- Do NOT use the standard "I can answer superficially from recent chat" test. If memory would materially improve continuity, prefer retrieval.',
+            '',
+            '[Retrieval Is Extra Important]',
+            '- If the topics point to user_profile, user_current_arc, or relationship, strongly prefer retrieval.',
+            '- If the user is asking what you know about them, how you see them, whether you remember them, or asking for a summary of them, strongly prefer retrieval.',
+            '- If the user is touching earlier relationship nodes, repeated affection, or long-running life threads, strongly prefer retrieval.',
+            '',
+            '[When ENOUGH_CONTEXT Is Allowed]',
+            '- Only output ENOUGH_CONTEXT when the recent chat alone is enough and older memory would add almost nothing to factual accuracy, emotional continuity, or personalization.',
+            '- If you are on the fence, prefer SEARCH_MEMORY.',
+            '',
+            '[Output Format]',
+            '- If retrieval is needed, output ONLY: SEARCH_MEMORY: [keyword]',
+            '- The keyword should usually be one of the inferred topics above, or a short merge of the most important one.',
+            '- If retrieval is not needed, output ONLY: ENOUGH_CONTEXT'
+        ].join('\n');
+        let parsedDecision = normalizedResumeState?.parsedDecision || null;
+        if (!parsedDecision || !['rewrite', 'retrieve'].includes(resumeFrom)) {
+            const decisionPlannerMessages = buildRagPlannerMessages({
+                recentHistory: transformedHistory,
+                latestUserMessage: recentInputString,
+                conversationDigest,
+                plannerInstruction: intentPrompt
+            });
+            recordLlmDebug(character, 'input', decisionPlannerMessages, {
+                context_type: 'chat_intent_decision',
+                planner_source: ragPlannerConfig.source,
+                latest_user_message: recentInputString,
+                planner_topics: plannerTopics
+            });
+
+            const { content: intentResult, usage: intentUsage } = await callLLM({
+                endpoint: ragPlannerConfig.endpoint,
+                key: ragPlannerConfig.key,
+                model: ragPlannerConfig.model,
+                messages: decisionPlannerMessages,
+                maxTokens: 2048,
+                temperature: 0,
+                enableCache: true,
+                cacheDb: db,
+                cacheType: 'chat_intent_decision',
+                cacheTtlMs: 6 * 60 * 60 * 1000,
+                cacheScope: `character:${character.id}`,
+                cacheCharacterId: character.id,
+                returnUsage: true,
+                debugAttempt: buildLlmAttemptRecorder(character, {
+                    context_type: 'chat_intent_decision',
+                    planner_source: ragPlannerConfig.source
+                })
+            });
+            recordLlmDebug(character, 'output', intentResult, {
+                context_type: 'chat_intent_decision',
+                planner_source: ragPlannerConfig.source,
+                planner_topics: plannerTopics,
+                usage: intentUsage || null
+            });
+            if (intentUsage) {
+                recordTokenUsage(character.id, 'chat_intent_decision', intentUsage);
+                broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: intentUsage });
+            }
+
+            parsedDecision = parseRagDecision(intentResult);
+            if (parsedDecision.malformed) {
+                const error = new Error('RAG planner output was malformed. Please retry.');
+                error.ragResume = {
+                    failedAt: 'decision',
+                    latestUserMessage: recentInputString,
+                    plannerTopics
+                };
+                throw error;
+            }
+        } else {
+            recordLlmDebug(character, 'event', 'Resuming RAG from cached decision result.', {
+                context_type: 'chat_intent_decision_resume',
+                planner_source: ragPlannerConfig.source,
+                latest_user_message: recentInputString,
+                planner_topics: plannerTopics
+            });
+        }
+        if (!parsedDecision.shouldSearch) {
+            console.log(`[Engine] Intent: ENOUGH_CONTEXT. Skipping RAG search.`);
+            updateRagProgress(character.id, wsClients, {
+                currentKey: 'answer',
+                skipped: true,
+                status: 'running'
+            });
+            return msgMetadata;
+        }
+
+        const retrievalLabel = parsedDecision.retrievalLabel;
+        console.log(`[Engine] Dynamic RAG Triggered for ${character.name}. Query: "${retrievalLabel}"`);
+        updateRagProgress(character.id, wsClients, { currentKey: 'rewrite' });
+        const rewriteConstraints = normalizedResumeState?.rewriteConstraints || deriveRagRewriteConstraints({
+            plannerTopics,
+            retrievalLabel,
+            latestUserMessage: recentInputString
+        });
+
+        const rewritePrompt = [
+            'VECTOR QUERY REWRITE',
+            `The retrieval topic is: ${retrievalLabel}`,
+            plannerTopics.length > 0 ? `Related inferred topics:\n- ${plannerTopics.join('\n- ')}` : '',
+            '',
+            'Rewrite the retrieval need into a compact JSON request for vector-memory search.',
+            '',
+            '[Output Rules]',
+            '- Output ONLY valid JSON.',
+            '- "queries": 1 to 6 short Chinese search phrases for semantic recall.',
+            '- "filters.memory_focus" may include only: user_profile, user_current_arc, relationship, general.',
+            '- "filters.memory_tier" may include only: core, active, ambient.',
+            '- "limit" should be 2 to 6.',
+            '- Prefer narrow, user-centered retrieval rather than broad generic search.',
+            '',
+            '[Hard Constraints]',
+            '- Preserve all distinct semantic directions already inferred above. Do NOT collapse multi-topic requests into a single dimension.',
+            rewriteConstraints.requiredFocuses.length > 0
+                ? `- Required memory_focus values: ${rewriteConstraints.requiredFocuses.join(', ')}`
+                : '- Required memory_focus values: none',
+            rewriteConstraints.requiredQueries.length > 0
+                ? `- Required query coverage topics: ${rewriteConstraints.requiredQueries.join(' | ')}`
+                : '- Required query coverage topics: none',
+            '- If the user asks a composite question such as study + work + background, your JSON must cover multiple matching dimensions.',
+            '',
+            '[Output JSON Schema]',
+            '{',
+            '  "queries": ["..."],',
+            '  "filters": {',
+            '    "memory_focus": ["user_profile"],',
+            '    "memory_tier": ["core", "active"]',
+            '  },',
+            '  "limit": 3',
+            '}'
+        ].filter(Boolean).join('\n');
+        const rewriteMessages = buildRagPlannerMessages({
+            recentHistory: transformedHistory,
+            latestUserMessage: recentInputString,
+            conversationDigest,
+            plannerInstruction: rewritePrompt
+        });
+        recordLlmDebug(character, 'input', rewriteMessages, {
+            context_type: 'chat_intent_rewrite',
+            planner_source: ragPlannerConfig.source,
+            latest_user_message: recentInputString,
+            retrieval_label: retrievalLabel,
+            planner_topics: plannerTopics
+        });
+        const isValidRewritePayload = (text) => {
+            const { malformed } = parseStructuredRagQuery(text, retrievalLabel, plannerTopics);
+            return !malformed;
+        };
+        const runRewriteAttempt = async ({ enableCache, cacheKeyExtra = '', contextType = 'chat_intent_rewrite' } = {}) => {
+            const { content, usage } = await callLLM({
+                endpoint: ragPlannerConfig.endpoint,
+                key: ragPlannerConfig.key,
+                model: ragPlannerConfig.model,
+                messages: rewriteMessages,
+                maxTokens: 6000,
+                temperature: 0,
+                enableCache,
+                cacheDb: db,
+                cacheType: 'chat_intent_rewrite',
+                cacheTtlMs: 6 * 60 * 60 * 1000,
+                cacheScope: `character:${character.id}`,
+                cacheCharacterId: character.id,
+                cacheKeyExtra,
+                returnUsage: true,
+                validateCachedContent: (cachedText) => isValidRewritePayload(cachedText),
+                shouldCacheResult: (resultText) => isValidRewritePayload(resultText),
+                debugAttempt: buildLlmAttemptRecorder(character, {
+                    context_type: contextType,
+                    planner_source: ragPlannerConfig.source
+                })
+            });
+            recordLlmDebug(character, 'output', content, {
+                context_type: contextType,
+                planner_source: ragPlannerConfig.source,
+                retrieval_label: retrievalLabel,
+                planner_topics: plannerTopics,
+                usage: usage || null
+            });
+            if (usage) {
+                recordTokenUsage(character.id, 'chat_intent_rewrite', usage);
+                broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage });
+            }
+            return { content, usage };
+        };
+
+        let retrievalRequest = normalizedResumeState?.retrievalRequest || null;
+        if (!retrievalRequest || resumeFrom !== 'retrieve') {
+            let { content: rewriteResult } = await runRewriteAttempt({
+                enableCache: true,
+                contextType: 'chat_intent_rewrite'
+            });
+
+            let { request: parsedRewriteRequest, malformed: malformedRewrite } = parseStructuredRagQuery(rewriteResult, retrievalLabel, plannerTopics);
+            if (malformedRewrite) {
+                recordLlmDebug(character, 'event', 'Retrying rewrite without cache after malformed output.', {
+                    context_type: 'chat_intent_rewrite_retry',
+                    planner_source: ragPlannerConfig.source,
+                    retrieval_label: retrievalLabel,
+                    planner_topics: plannerTopics
+                });
+                ({ content: rewriteResult } = await runRewriteAttempt({
+                    enableCache: false,
+                    cacheKeyExtra: `retry:${Date.now()}`,
+                    contextType: 'chat_intent_rewrite_retry'
+                }));
+                ({ request: parsedRewriteRequest, malformed: malformedRewrite } = parseStructuredRagQuery(rewriteResult, retrievalLabel, plannerTopics));
+            }
+            if (malformedRewrite) {
+                const error = new Error('RAG rewrite output was malformed. Please retry.');
+                error.ragResume = {
+                    failedAt: 'rewrite',
+                    latestUserMessage: recentInputString,
+                    plannerTopics,
+                    parsedDecision,
+                    rewriteConstraints
+                };
+                throw error;
+            }
+            retrievalRequest = enforceStructuredRagQueryConstraints(parsedRewriteRequest, rewriteConstraints);
+        } else {
+            recordLlmDebug(character, 'event', 'Resuming RAG directly from retrieval request.', {
+                context_type: 'chat_intent_retrieve_resume',
+                planner_source: ragPlannerConfig.source,
+                retrieval_label: retrievalLabel,
+                planner_topics: plannerTopics
+            });
+        }
+        updateRagProgress(character.id, wsClients, { currentKey: 'retrieve' });
+        const retrievalSlots = deriveRagRetrievalSlots({
+            retrievalRequest,
+            plannerTopics,
+            retrievalLabel,
+            latestUserMessage: recentInputString
+        });
+        let dynamicMemories;
+        try {
+            dynamicMemories = await executeMultiSlotMemorySearch(
+                memory,
+                character.id,
+                retrievalRequest,
+                retrievalSlots
+            );
+        } catch (e) {
+            e.ragResume = {
+                failedAt: 'retrieve',
+                latestUserMessage: recentInputString,
+                plannerTopics,
+                parsedDecision,
+                rewriteConstraints,
+                retrievalRequest
+            };
+            throw e;
+        }
+        if (dynamicMemories && dynamicMemories.length > 0) {
+            const querySummary = Array.isArray(retrievalRequest.queries) ? retrievalRequest.queries.join(' | ') : retrievalLabel;
+            const formattedMemories = dynamicMemories.map((m, index) => {
+                const summary = String(m.summary || m.event || '').trim();
+                const content = String(m.content || '').trim();
+                const focus = String(m.memory_focus || '').trim();
+                const tier = String(m.memory_tier || '').trim();
+                const matchedQuery = String(m._matched_query || '').trim();
+                const matchedSlots = Array.isArray(m._matched_slots) ? m._matched_slots.filter(Boolean) : [];
+                const memoryTime = String(m.time || '').trim();
+                const sourceTimeText = String(m.source_time_text || '').trim();
+                const lines = [
+                    `Memory ${index + 1}: ${summary || m.event || `memory_${index + 1}`}`
+                ];
+                lines.push('Timeline: This is a recalled past event or older memory, not something automatically happening right now.');
+                if (memoryTime) {
+                    lines.push(`Event Time: ${memoryTime}`);
+                }
+                if (sourceTimeText) {
+                    lines.push(`Source Dialogue Time: ${sourceTimeText}`);
+                }
+                if (content && content !== summary) {
+                    lines.push(`Details: ${content}`);
+                }
+                if (focus || tier) {
+                    lines.push(`Type: ${focus || 'unknown'} / ${tier || 'unknown'}`);
+                }
+                if (matchedSlots.length > 0) {
+                    lines.push(`Slot Coverage: ${matchedSlots.join(', ')}`);
+                }
+                if (matchedQuery) {
+                    lines.push(`Matched Query: ${matchedQuery}`);
+                }
+                return lines.join('\n');
+            }).join('\n\n');
+            const sysInjection = `\n[SYSTEM: You successfully retrieved older memories related to "${querySummary}". ` +
+                `Treat the memory summaries and details below as factual recall anchors from the past. They are not automatically the current moment, and they are not permanent character settings unless the memory explicitly says so. ` +
+                `If any recalled memory conflicts with the user's newest message or the latest visible conversation, trust the newest conversation first. ` +
+                `When answering, prefer these concrete facts over vague emotional generalization.]\n`
+                + formattedMemories
+                + '\n(Use these recalled facts to answer the user accurately and specifically.)';
+            apiMessages[0].content += `\n${sysInjection}\n`;
+
+            if (!msgMetadata) msgMetadata = { retrievedMemories: [] };
+            msgMetadata.retrievedMemories.push(...dynamicMemories.map(mem => ({
+                id: mem.id,
+                event: mem.event,
+                summary: mem.summary || '',
+                content: mem.content || '',
+                memory_focus: mem.memory_focus || '',
+                memory_tier: mem.memory_tier || '',
+                matched_slots: Array.isArray(mem._matched_slots) ? mem._matched_slots : [],
+                importance: mem.importance,
+                time: mem.time || '',
+                created_at: mem.created_at,
+                last_retrieved_at: mem.last_retrieved_at,
+                retrieval_count: mem.retrieval_count || 0,
+                matched_query: mem._matched_query || '',
+                source_time_text: mem.source_time_text || '',
+                source_started_at: mem.source_started_at || 0,
+                source_ended_at: mem.source_ended_at || 0
+            })));
+        } else {
+            console.log(`[Engine] RAG returned no relevant matches for "${retrievalLabel}".`);
+        }
+
+        updateRagProgress(character.id, wsClients, { currentKey: 'answer' });
+
+        return msgMetadata;
+    }
+
     // Function that actually triggers the generation of an AI message
-    async function triggerMessage(character, wsClients, isUserReply = false, isTimerWakeup = false, extraSystemDirective = null) {
+    async function triggerMessage(character, wsClients, isUserReply = false, isTimerWakeup = false, extraSystemDirective = null, generationOptions = {}) {
         console.log(`\n[DEBUG] === Trigger Message Entry: ${character.name} (isUserReply: ${isUserReply}) ===`);
 
         // Check if character is still active or blocked
@@ -665,7 +1539,15 @@ ${universalResult.preamble}`;
             return;
         }
 
-        timers.set(character.id, { timerId: null, targetTime: Date.now(), isThinking: true });
+        const shouldResumeRag = !!(generationOptions && generationOptions.resumeRagState && isUserReply && !extraSystemDirective);
+        timers.set(character.id, {
+            timerId: null,
+            targetTime: Date.now(),
+            isThinking: true,
+            ragProgress: (isUserReply && !extraSystemDirective)
+                ? createRagProgress(shouldResumeRag ? (generationOptions.resumeRagState.failedAt || 'summary') : 'summary')
+                : null
+        });
         broadcastEngineState(wsClients);
 
         // Process pressure mechanics if this is a spontaneous auto-message (not a fast reply)
@@ -710,21 +1592,22 @@ ${universalResult.preamble}`;
 
         let customDelayMs = null;
         try {
-            const contextLimit = charCheck.context_msg_limit || 60;
-            const contextHistory = db.getVisibleMessages(character.id, contextLimit);
-            const conversationDigest = typeof db.getConversationDigest === 'function'
-                ? db.getConversationDigest(character.id)
-                : null;
-            const hasConversationDigest = !!(conversationDigest && conversationDigest.digest_text);
-            const liveHistoryWindowSize = hasConversationDigest
-                ? getDigestTailWindowSize(contextLimit, contextHistory.length)
-                : contextLimit;
-            const liveHistory = hasConversationDigest
-                ? contextHistory.slice(-liveHistoryWindowSize)
-                : contextHistory;
-            const transformedHistory = buildSlidingHistoryWindow(db, character.id, liveHistoryWindowSize, liveHistory);
-            const latestUserMessage = [...liveHistory].reverse().find(m => m.role !== 'character');
-            const recentInputString = String(latestUserMessage?.content || '').trim();
+            const {
+                contextHistory,
+                conversationDigest,
+                liveHistory,
+                transformedHistory,
+                recentInputString
+            } = await preparePrivateConversationState({
+                db,
+                memory,
+                character: charCheck,
+                refreshDigest: !!(isUserReply && !extraSystemDirective)
+            });
+
+            if (isUserReply && !extraSystemDirective) {
+                updateRagProgress(character.id, wsClients, { currentKey: 'topics' });
+            }
 
             const { prompt: systemPrompt, retrievedMemoriesContext } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
                 conversationDigest,
@@ -749,93 +1632,53 @@ ${universalResult.preamble}`;
                 apiMessages.push({ role: 'user', content: '[系统提示：请根据当前语境继续上一话题，或者自然开启一个新话题。]' });
             }
 
+            if (isUserReply && !extraSystemDirective) {
+                try {
+                    msgMetadata = await runStructuredRagPipeline({
+                        character,
+                        transformedHistory,
+                        recentInputString,
+                        conversationDigest,
+                        wsClients,
+                        apiMessages,
+                        msgMetadata,
+                        resumeState: generationOptions?.resumeRagState || null
+                    });
+                    setRagFailureState(character.id, null);
+                } catch (intentErr) {
+                    const rawMessage = String(intentErr?.message || 'Unknown RAG planner error');
+                    console.error(`[Engine] RAG planner failed:`, rawMessage);
+                    setRagFailureState(character.id, {
+                        characterId: character.id,
+                        latestUserMessage: recentInputString,
+                        ...(intentErr?.ragResume || {})
+                    });
+                    updateRagProgress(character.id, wsClients, {
+                        currentKey: 'answer',
+                        status: 'error'
+                    });
+                    if (/RAG planner/i.test(rawMessage)) {
+                        throw intentErr;
+                    }
+                    throw new Error(`RAG planner failed. Please retry. (${rawMessage.slice(0, 180)})`);
+                }
+            }
+
+            if (isUserReply && !extraSystemDirective) {
+                updateRagProgress(character.id, wsClients, { currentKey: 'answer' });
+            }
+
             recordLlmDebug(charCheck, 'input', apiMessages, {
                 context_type: isUserReply ? 'private_reply' : (isTimerWakeup ? 'timer_wakeup' : 'proactive'),
                 isUserReply,
                 isTimerWakeup,
                 extraSystemDirective: extraSystemDirective || '',
-                retrievedMemoriesCount: Array.isArray(retrievedMemoriesContext) ? retrievedMemoriesContext.length : 0,
+                retrievedMemoriesCount: Array.isArray(msgMetadata?.retrievedMemories) ? msgMetadata.retrievedMemories.length : 0,
                 maxTokens: charCheck.max_tokens || 2000,
                 model: charCheck.model_name,
-                temperature: isUserReply ? 1.05 : 0.9,
                 presencePenalty: isUserReply ? 0.35 : 0,
                 frequencyPenalty: isUserReply ? 0.45 : 0
             });
-
-            // --- Phase 1 & 2: Dynamic Intent Classification for Memory Retrieval (RAG) ---
-            const ragPlannerConfig = resolveRagPlannerConfig(character);
-            if (isUserReply && !extraSystemDirective && memory && memory.searchMemories && ragPlannerConfig.endpoint && ragPlannerConfig.key && ragPlannerConfig.model) {
-                const intentPrompt = "SYSTEM RAG CHECK: Analyze the user's latest message. Can you reply accurately and fully using ONLY the chat history above? If the user refers to a past event, past conversation, or specific detail not in this recent history context, output ONLY the phrase `SEARCH_MEMORY: [keyword]` (replace [keyword] with a 1-3 word search query). If you have enough context to reply normally, output exactly `ENOUGH_CONTEXT`. Do not output anything else.";
-
-                try {
-                    const { content: intentResult, usage: intentUsage } = await callLLM({
-                        endpoint: ragPlannerConfig.endpoint,
-                        key: ragPlannerConfig.key,
-                        model: ragPlannerConfig.model,
-                        messages: [...apiMessages, { role: 'user', content: intentPrompt }],
-                        maxTokens: 50,
-                        temperature: 0.1,
-                        enableCache: true,
-                        cacheDb: db,
-                        cacheType: 'chat_intent',
-                        cacheTtlMs: 6 * 60 * 60 * 1000,
-                        cacheScope: `character:${character.id}`,
-                        cacheCharacterId: character.id,
-                        returnUsage: true,
-                        debugAttempt: buildLlmAttemptRecorder(character, {
-                            context_type: 'chat_intent',
-                            planner_source: ragPlannerConfig.source
-                        })
-                    });
-
-                    if (intentUsage) {
-                        recordTokenUsage(character.id, 'chat_intent', intentUsage);
-                        broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: intentUsage });
-                    }
-
-                    const searchMatch = intentResult.match(/SEARCH_MEMORY:\s*\[?([^\]]+)\]?/i);
-                    let retrievalLabel = '';
-                    let dynamicMemories = [];
-
-                    if (searchMatch && searchMatch[1] && !intentResult.toUpperCase().includes('ENOUGH_CONTEXT')) {
-                        const keyword = searchMatch[1].trim();
-                        retrievalLabel = keyword;
-                        console.log(`[Engine] Dynamic RAG Triggered for ${character.name}. Query: "${keyword}"`);
-                        dynamicMemories = await memory.searchMemories(character.id, keyword, 3);
-                    } else {
-                        const associativeQueries = buildAssociativeMemoryQueries(recentInputString);
-                        if (associativeQueries.length > 0) {
-                            retrievalLabel = associativeQueries.join(' / ');
-                            console.log(`[Engine] Associative RAG Triggered for ${character.name}. Queries: "${retrievalLabel}"`);
-                            dynamicMemories = await runAssociativeMemorySearch(memory, character.id, associativeQueries, 3);
-                        } else {
-                            console.log(`[Engine] Intent: ENOUGH_CONTEXT. Skipping RAG search.`);
-                        }
-                    }
-
-                    if (dynamicMemories && dynamicMemories.length > 0) {
-                        const sysInjection = `\n[SYSTEM: You successfully retrieved older memories related to "${retrievalLabel}"]\n` +
-                            dynamicMemories.map(m => `- ${m.event}`).join('\n') + `\n(Use this to answer the user accurately)`;
-
-                        // Edit the first system prompt to prepend this dynamic injection
-                        apiMessages[0].content += `\n${sysInjection}\n`;
-
-                        if (!msgMetadata) msgMetadata = { retrievedMemories: [] };
-                        msgMetadata.retrievedMemories.push(...dynamicMemories.map(mem => ({
-                            id: mem.id,
-                            event: mem.event,
-                            importance: mem.importance,
-                            created_at: mem.created_at,
-                            last_retrieved_at: mem.last_retrieved_at,
-                            retrieval_count: mem.retrieval_count || 0
-                        })));
-                    } else if (retrievalLabel) {
-                        console.log(`[Engine] RAG returned no relevant matches for "${retrievalLabel}".`);
-                    }
-                } catch (intentErr) {
-                    console.error(`[Engine] Background intent classification failed, proceeding normally:`, intentErr.message);
-                }
-            }
 
             let { content: generatedText, usage, finishReason } = await callLLM({
                 endpoint: character.api_endpoint,
@@ -843,7 +1686,6 @@ ${universalResult.preamble}`;
                 model: character.model_name,
                 messages: apiMessages,
                 maxTokens: character.max_tokens || 2000,
-                temperature: isUserReply ? 1.05 : 0.9,
                 presencePenalty: isUserReply ? 0.35 : 0,
                 frequencyPenalty: isUserReply ? 0.45 : 0,
                 enableCache: !!isUserReply,
@@ -872,7 +1714,6 @@ ${universalResult.preamble}`;
                             { role: 'user', content: '[系统续写] 你上一条消息被截断了。不要重说前文，只把刚才没说完的那句话自然续完并收尾。输出纯文本。' }
                         ],
                         maxTokens: Math.min(character.max_tokens || 2000, 300),
-                        temperature: isUserReply ? 1.05 : 0.9,
                         presencePenalty: isUserReply ? 0.2 : 0,
                         frequencyPenalty: isUserReply ? 0.3 : 0,
                         enableCache: !!isUserReply,
@@ -1301,6 +2142,13 @@ ${universalResult.preamble}`;
                         broadcastNewMessage(wsClients, newMessage);
                     }
 
+                    if (isUserReply && !extraSystemDirective) {
+                        updateRagProgress(character.id, wsClients, {
+                            currentKey: 'answer',
+                            status: 'completed'
+                        });
+                    }
+
                     // Trigger memory extraction in background based on recent context + new full message
                     memory.extractMemoryFromContext(character, [...liveHistory, { role: 'character', content: generatedText, timestamp: Date.now() }])
                         .catch(err => console.error('[Engine] Memory extraction err:', err.message));
@@ -1311,6 +2159,12 @@ ${universalResult.preamble}`;
 
         } catch (e) {
             console.error(`[Engine] Failed to trigger message for ${character.id}:`, e.message);
+            if (isUserReply && !extraSystemDirective) {
+                updateRagProgress(character.id, wsClients, {
+                    currentKey: 'answer',
+                    status: 'error'
+                });
+            }
             // Show the error visibly in the chat so the user knows what went wrong
             const errText = e.message || 'Unknown error';
             const { id: msgId, timestamp: msgTs } = db.addMessage(character.id, 'system', `[System] API Error: ${errText}`);
@@ -1332,6 +2186,7 @@ ${universalResult.preamble}`;
 
     // Schedules a setTimeout based on character's interval settings
     function scheduleNext(character, wsClients, exactDelayMs = null) {
+        const preservedRagProgress = timers.get(character.id)?.ragProgress || null;
         stopTimer(character.id); // clear existing if any
 
         if (character.status !== 'active') return;
@@ -1367,7 +2222,12 @@ ${universalResult.preamble}`;
             triggerMessage(character, wsClients, false, !!exactDelayMs);
         }, delay);
 
-        timers.set(character.id, { timerId, targetTime: Date.now() + delay, isThinking: false });
+        timers.set(character.id, {
+            timerId,
+            targetTime: Date.now() + delay,
+            isThinking: false,
+            ragProgress: preservedRagProgress
+        });
         broadcastEngineState(wsClients);
     }
 
@@ -1450,7 +2310,7 @@ ${universalResult.preamble}`;
      * Handle a user message. Resets timer, and triggers an immediate "return reaction" 
      * if pressure was high, before zeroing out the pressure.
      */
-    function handleUserMessage(characterId, wsClients) {
+    function handleUserMessage(characterId, wsClients, options = {}) {
         const char = db.getCharacter(characterId);
         if (!char || char.status !== 'active' || char.is_blocked) return;
 
@@ -1470,9 +2330,10 @@ ${universalResult.preamble}`;
             // Re-fetch fresh character data (settings may have changed in the 1.5s gap)
             const freshChar = db.getCharacter(characterId);
             if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) return;
+            const resumeRagState = options?.useRetryResume ? getRagFailureState(characterId) : null;
             // Trigger a reply. We leave pressure AND jealousy as-is for this reply so it generates the Return Reaction
             // Jealousy is NOT zeroed out 鈥?the AI decides via [JEALOUSY:N] tag when to forgive
-            triggerMessage(freshChar, wsClients, true).finally(() => {
+            triggerMessage(freshChar, wsClients, true, false, null, { resumeRagState }).finally(() => {
                 // The model must explicitly relax via [PRESSURE]/[JEALOUSY] tags.
                 const cleanupPatch = {};
                 if (hadPendingCityReply) {

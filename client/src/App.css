@@ -73,6 +73,21 @@
   padding: 0;
 }
 
+@keyframes ragPulse {
+  0% {
+    filter: saturate(0.95) brightness(0.98);
+    transform: scaleY(0.98);
+  }
+  50% {
+    filter: saturate(1.08) brightness(1.03);
+    transform: scaleY(1);
+  }
+  100% {
+    filter: saturate(0.95) brightness(0.98);
+    transform: scaleY(0.98);
+  }
+}
+
 /* ─── ST-AutoPulse Status Dots ──────────────────── */
 .autopulse-status-dot {
   width: 12px;
@@ -360,16 +375,26 @@ body {
 
 /* ─── Chat Header ─── */
 .chat-header {
-  height: 60px;
+  min-height: 60px;
+  height: auto;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  padding: 0 20px;
+  padding: 10px 20px;
   background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-bottom: 1px solid var(--card-border);
   flex-shrink: 0;
+}
+
+.chat-header-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-header-name {
@@ -458,6 +483,9 @@ body {
 }
 
 .message-bubble {
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
   padding: 10px 14px;
   border-radius: 12px;
   font-size: 14px;
@@ -1270,9 +1298,13 @@ body {
   }
 
   .chat-header {
-    padding: 0 10px;
-    gap: 8px;
-  }
+      padding: 10px;
+      gap: 8px;
+    }
+
+  .chat-header-title {
+      min-width: 0;
+    }
 
   .chat-header-name {
     font-size: 14px;

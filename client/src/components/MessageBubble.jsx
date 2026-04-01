@@ -3,6 +3,67 @@ import { AlertCircle, ArrowRightLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
+function MemoryRecallDisclosure({ memories = [], expanded = false }) {
+    const { lang } = useLanguage();
+
+    return (
+        <div style={{
+            marginTop: '6px',
+            padding: '0',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '6px'
+        }}>
+            {expanded && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {memories.map((mem, idx) => {
+                        const eventTime = String(mem.time || '').trim();
+                        const sourceTime = String(mem.source_time_text || '').trim();
+                        return (
+                            <div key={`${mem.id || mem.event || idx}-${idx}`} style={{
+                                background: 'rgba(255,255,255,0.38)',
+                                borderRadius: '8px',
+                                padding: '6px 8px'
+                            }}>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'flex-start' }}>
+                                    <div style={{ fontSize: '11px', fontWeight: '500', color: '#79839a', lineHeight: '1.35' }}>
+                                        {mem.summary || mem.event || (lang === 'en' ? `Memory ${idx + 1}` : `记忆 ${idx + 1}`)}
+                                    </div>
+                                    {mem.retrieval_count > 0 && (
+                                        <div style={{ fontSize: '10px', color: '#b1b7c5', whiteSpace: 'nowrap' }}>
+                                            {lang === 'en' ? `used ${mem.retrieval_count}x` : `调用 ${mem.retrieval_count} 次`}
+                                        </div>
+                                    )}
+                                </div>
+                                {(eventTime || sourceTime) && (
+                                    <div style={{ marginTop: '5px', fontSize: '10px', color: '#a8afbf', lineHeight: '1.5' }}>
+                                        {eventTime && (
+                                            <div>{lang === 'en' ? 'Event time:' : '事件时间：'} {eventTime}</div>
+                                        )}
+                                        {sourceTime && (
+                                            <div>{lang === 'en' ? 'Source dialogue:' : '来源对话：'} {sourceTime}</div>
+                                        )}
+                                    </div>
+                                )}
+                                {mem.content && (
+                                    <div style={{ marginTop: '5px', fontSize: '10px', color: '#9199ab', lineHeight: '1.5' }}>
+                                        {mem.content}
+                                    </div>
+                                )}
+                                {mem.matched_query && (
+                                    <div style={{ marginTop: '5px', fontSize: '10px', color: '#b0b7c6', lineHeight: '1.4' }}>
+                                        {lang === 'en' ? 'Matched query:' : '命中查询：'} {mem.matched_query}
+                                    </div>
+                                )}
+                            </div>
+                        );
+                    })}
+                </div>
+            )}
+        </div>
+    );
+}
+
 function BlockedSystemMessage({ name }) {
     return (
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '20px 0', gap: '8px' }}>
@@ -137,6 +198,28 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
     const isUser = message.role === 'user';
     const content = message.content || '';  // null-safe: old DB records may have null content
     const { lang } = useLanguage();
+    const memoryDisclosureKey = message?.id ? `memory_disclosure_${message.id}` : '';
+    const [showMemories, setShowMemories] = useState(() => {
+        if (!memoryDisclosureKey || typeof window === 'undefined') return false;
+        try {
+            return window.sessionStorage.getItem(memoryDisclosureKey) === 'open';
+        } catch {
+            return false;
+        }
+    });
+    const recalledMemories = !isUser && Array.isArray(message.metadata?.retrievedMemories)
+        ? message.metadata.retrievedMemories
+        : [];
+    const hasRecalledMemories = recalledMemories.length > 0;
+
+    useEffect(() => {
+        if (!memoryDisclosureKey || typeof window === 'undefined') return;
+        try {
+            window.sessionStorage.setItem(memoryDisclosureKey, showMemories ? 'open' : 'closed');
+        } catch {
+            // Ignore storage failures; the disclosure can still work in-memory.
+        }
+    }, [memoryDisclosureKey, showMemories]);
 
     if (message.role === 'system') {
         const isApiError = content.includes('API Error');
@@ -232,33 +315,37 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
                             <span>{new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
                         </div>
                     )}
-                    {!isUser && message.metadata?.retrievedMemories && message.metadata.retrievedMemories.length > 0 && (
+                    {hasRecalledMemories && (
                         <div style={{
-                            marginTop: '6px',
-                            padding: '6px 10px',
-                            backgroundColor: 'rgba(255, 255, 255, 0.4)',
-                            borderRadius: '8px',
-                            fontSize: '11px',
-                            color: '#888',
-                            borderLeft: '2px solid #ddd',
+                            marginTop: '2px',
                             display: 'flex',
-                            flexDirection: 'column',
-                            gap: '3px'
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: '8px',
+                            fontSize: '10px',
+                            color: '#b2bbcd'
                         }}>
-                            <div style={{ fontWeight: '500', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                                <span>🧠</span> {lang === 'en' ? 'Recalled Memory:' : '回忆起：'}
-                            </div>
-                            {message.metadata.retrievedMemories.map((mem, idx) => (
-                                <div key={idx} style={{ lineHeight: '1.3' }}>
-                                    - {mem.event}
-                                    {mem.retrieval_count > 0 && (
-                                        <span style={{ color: '#aaa', marginLeft: '6px' }}>
-                                            {lang === 'en' ? `(used ${mem.retrieval_count}x)` : `（已调用 ${mem.retrieval_count} 次）`}
-                                        </span>
-                                    )}
-                                </div>
-                            ))}
+                            <span>{lang === 'en' ? `Used ${recalledMemories.length} memories` : `调用了 ${recalledMemories.length} 条记忆`}</span>
+                            <button
+                                onClick={() => setShowMemories(value => !value)}
+                                style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    padding: 0,
+                                    cursor: 'pointer',
+                                    fontSize: '10px',
+                                    color: '#b2bbcd',
+                                    whiteSpace: 'nowrap'
+                                }}
+                            >
+                                {showMemories
+                                    ? (lang === 'en' ? 'Hide' : '收起')
+                                    : (lang === 'en' ? 'View' : '查看')}
+                            </button>
                         </div>
+                    )}
+                    {hasRecalledMemories && (
+                        <MemoryRecallDisclosure memories={recalledMemories} expanded={showMemories} />
                     )}
                 </div>
                 {message.isBlocked && (

@@ -65,66 +65,92 @@ async function qdrantRequest(path, options = {}) {
 }
 
 const ensuredCollections = new Set();
+const pendingCollectionEnsures = new Map();
+
+function isAlreadyExistsError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('already exists');
+}
 
 async function ensureCollection(userId, vectorSize = DEFAULT_VECTOR_SIZE) {
     const collectionName = getCollectionName(userId);
     if (ensuredCollections.has(collectionName)) return collectionName;
-
-    try {
-        const existing = await qdrantRequest(`/collections/${collectionName}`);
-        const existingSize = Number(
-            existing?.result?.config?.params?.vectors?.size
-            || existing?.result?.config?.params?.vectors?.default?.size
-            || 0
-        );
-        if (existingSize && existingSize !== Number(vectorSize)) {
-            console.warn(`[Qdrant] Collection ${collectionName} dimension mismatch (${existingSize} != ${vectorSize}). Recreating...`);
-            await qdrantRequest(`/collections/${collectionName}`, {
-                method: 'DELETE'
-            });
-        } else {
-            ensuredCollections.add(collectionName);
-            return collectionName;
-        }
-    } catch (e) {
-        // continue to create when missing/unreachable details aren't available yet
+    if (pendingCollectionEnsures.has(collectionName)) {
+        return pendingCollectionEnsures.get(collectionName);
     }
 
-    await qdrantRequest(`/collections/${collectionName}`, {
-        method: 'PUT',
-        body: {
-            vectors: {
-                size: vectorSize,
-                distance: 'Cosine'
-            },
-            optimizers_config: {
-                default_segment_number: 2
+    const ensurePromise = (async () => {
+        try {
+            const existing = await qdrantRequest(`/collections/${collectionName}`);
+            const existingSize = Number(
+                existing?.result?.config?.params?.vectors?.size
+                || existing?.result?.config?.params?.vectors?.default?.size
+                || 0
+            );
+            if (existingSize && existingSize !== Number(vectorSize)) {
+                console.warn(`[Qdrant] Collection ${collectionName} dimension mismatch (${existingSize} != ${vectorSize}). Recreating...`);
+                await qdrantRequest(`/collections/${collectionName}`, {
+                    method: 'DELETE'
+                });
+            } else {
+                ensuredCollections.add(collectionName);
+                return collectionName;
+            }
+        } catch (e) {
+            // continue to create when missing/unreachable details aren't available yet
+        }
+
+        try {
+            await qdrantRequest(`/collections/${collectionName}`, {
+                method: 'PUT',
+                body: {
+                    vectors: {
+                        size: vectorSize,
+                        distance: 'Cosine'
+                    },
+                    optimizers_config: {
+                        default_segment_number: 2
+                    }
+                }
+            });
+        } catch (e) {
+            if (!isAlreadyExistsError(e)) {
+                throw e;
             }
         }
-    });
 
-    // Create payload indexes when possible. If they already exist, Qdrant will reject; ignore those failures.
-    const indexFields = [
-        { field_name: 'character_id', field_schema: 'keyword' },
-        { field_name: 'group_id', field_schema: 'keyword' },
-        { field_name: 'memory_type', field_schema: 'keyword' },
-        { field_name: 'is_archived', field_schema: 'integer' },
-        { field_name: 'created_at', field_schema: 'integer' },
-        { field_name: 'importance', field_schema: 'integer' },
-        { field_name: 'source_started_at', field_schema: 'integer' },
-        { field_name: 'source_ended_at', field_schema: 'integer' }
-    ];
-    for (const field of indexFields) {
-        try {
-            await qdrantRequest(`/collections/${collectionName}/index`, {
-                method: 'PUT',
-                body: field
-            });
-        } catch (e) { }
+        // Create payload indexes when possible. If they already exist, Qdrant will reject; ignore those failures.
+        const indexFields = [
+            { field_name: 'character_id', field_schema: 'keyword' },
+            { field_name: 'group_id', field_schema: 'keyword' },
+            { field_name: 'memory_type', field_schema: 'keyword' },
+            { field_name: 'memory_tier', field_schema: 'keyword' },
+            { field_name: 'memory_focus', field_schema: 'keyword' },
+            { field_name: 'is_archived', field_schema: 'integer' },
+            { field_name: 'created_at', field_schema: 'integer' },
+            { field_name: 'importance', field_schema: 'integer' },
+            { field_name: 'source_started_at', field_schema: 'integer' },
+            { field_name: 'source_ended_at', field_schema: 'integer' }
+        ];
+        for (const field of indexFields) {
+            try {
+                await qdrantRequest(`/collections/${collectionName}/index`, {
+                    method: 'PUT',
+                    body: field
+                });
+            } catch (e) { }
+        }
+
+        ensuredCollections.add(collectionName);
+        return collectionName;
+    })();
+
+    pendingCollectionEnsures.set(collectionName, ensurePromise);
+    try {
+        return await ensurePromise;
+    } finally {
+        pendingCollectionEnsures.delete(collectionName);
     }
-
-    ensuredCollections.add(collectionName);
-    return collectionName;
 }
 
 async function upsertMemoryPoint(userId, point) {

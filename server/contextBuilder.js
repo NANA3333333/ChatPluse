@@ -46,25 +46,6 @@ function getRelationshipAnchorSourceParts(db, character, activeTargets = []) {
         });
 }
 
-function shouldRetrieveLongTermMemories(recentInput = '') {
-    const text = String(recentInput || '').trim();
-    if (text.length < 12) return false;
-
-    const explicitRecallRegex = /(记得|还记得|想起|回忆|之前|以前|上次|那次|刚才|刚刚|昨天|前天|聊过|说过|提过|答应过|忘了|后来|结果|发生了什么|怎么回事)/;
-    const durableFactRegex = /(商业街|工厂|餐厅|便利店|公园|群聊|群里|朋友圈|日记|暗号|密码|秘密|礼物|转账|红包|任务|悬赏|监视|黑客|钱包|体力|吃了|饿|撑|医院|住院|打工)/;
-    const directAskRegex = /(你.*(是不是|有没有|当时|那天|之前|以前|上次|那次|刚才|刚刚|说过|做过|去过|见过|答应过|还在|后来|结果))/;
-    const stateFollowupRegex = /(怎么了|咋了|怎么回事|发生什么|后来呢|结果呢|还好吗|还疼吗|还饿吗|还撑吗|还记得吗|是不是这样|是不是那个)/;
-
-    const explicitRecall = explicitRecallRegex.test(text);
-    const durableFact = durableFactRegex.test(text);
-    const directAsk = directAskRegex.test(text);
-    const stateFollowup = stateFollowupRegex.test(text);
-
-    if (explicitRecall) return true;
-    if (durableFact && (directAsk || stateFollowup)) return true;
-    return false;
-}
-
 async function didUserAskAboutCity(db, character, recentInput = '') {
     const text = String(recentInput || '').trim();
     if (!text) return false;
@@ -292,9 +273,9 @@ function buildTimeBehaviorGuidance(timeOfDay, isWeekend, character, isGroupConte
     }
 
     if ((character?.city_status || '') === 'sleeping') {
-        lines.push('- 如果正在休息/补觉，优先体现被打断、迷糊、反应慢。');
+        lines.push('- 你本来在休息/补觉，被消息惊动后整个人有点迷糊，脑子转得慢，像刚从睡意里被拽出来。');
     } else if ((character?.city_status || '') === 'working') {
-        lines.push('- 如果正在工作，优先体现忙碌、分神、回复更碎。');
+        lines.push('- 你本来正卡在手头的活里，被消息打断后有点分神、烦躁和紧张，像偷空回了两句。');
     }
 
     if (!isGroupContext) {
@@ -332,26 +313,26 @@ function buildCitySceneChatGuidance(db, character, isGroupContext) {
     let prompt = '\n[当前生活场景]\n';
 
     if (character.city_status === 'working') {
-        prompt += `地点=${locationLabel}；状态=工作中；说话短碎，像忙里偷闲。`;
+        prompt += `地点=${locationLabel}；状态=工作中。你手头还有活，注意力被拆开了，回消息时带着忙里偷闲的仓促感。`;
         if (districtType === 'work' || character.location === 'factory') {
-            prompt += ' 可提手上活、机器声、同事、主管、搬货。';
+            prompt += ' 周围可能有机器声、同事、主管、搬货、赶进度的压迫感。';
         } else if (districtType === 'education') {
-            prompt += ' 可提上课、笔记、老师、课堂、培训。';
+            prompt += ' 周围可能是课堂、笔记、老师、培训、被时间催着往前走的感觉。';
         }
         if (!isGroupContext) {
-            prompt += ` 多聊会分心；分心值=${workDistraction}/100。继续陪用户聊会直接拖慢手上的活，结束这轮工作时还可能少赚到钱。`;
+            prompt += ` 这次打断已经让你有点分心；当前分心值=${workDistraction}/100。继续聊下去会拖慢手上的活，你心里也清楚这轮工作最后可能会少赚一点。`;
         }
     } else if (character.city_status === 'sleeping') {
-        prompt += `地点=${locationLabel}；状态=休息/补觉；说话更糊更慢，像刚被吵醒。`;
+        prompt += `地点=${locationLabel}；状态=休息/补觉。你本来在睡或刚躺下，被消息惊动后还有点迷糊，眼皮发沉，反应慢半拍。`;
         if (!isGroupContext) {
-            prompt += ` 多聊会打断恢复；睡眠打断值=${sleepDisruption}/100。继续聊会让这次休息更不值，醒来后会更累、睡眠债也更重。`;
+            prompt += ` 这次打断已经影响了恢复；当前睡眠打断值=${sleepDisruption}/100。继续聊会让这次补觉更不踏实，醒来后会更累，睡眠债也会更重。`;
         }
     } else if (character.city_status === 'eating') {
-        prompt += `地点=${locationLabel}；状态=在吃东西；可带正在吃、刚端上、还没吃完。`;
+        prompt += `地点=${locationLabel}；状态=在吃东西。面前的东西还没吃完，动作和注意力都被食物牵着。`;
     } else if (character.city_status === 'hungry') {
-        prompt += '状态=明显饥饿；注意力易被饥饿拖走。';
+        prompt += '状态=明显饥饿。胃里空得发慌，注意力很容易被饥饿拖走。';
     } else if (character.city_status === 'coma') {
-        prompt += '状态很差；意识发飘，难集中。';
+        prompt += '状态很差。意识发飘，身体发虚，很难真正集中起来。';
     }
 
     prompt += '\n';
@@ -486,10 +467,10 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                 block += `[商业街余震]: 用户是在你连续 ${ignoredCount} 次被晾后才回复；这次不能立刻恢复平静，仍要带出被冷落后的余震。\n`;
             }
             if (!isGroupContext && character.city_status === 'working') {
-                block += `[忙碌代价提醒]: 你现在回私聊不是零成本的。聊得越多，越容易拖慢手上的活，工作结算时会少赚。\n`;
+                block += `[忙碌余压]: 这条私聊是在工作被打断的情况下回出去的。你心里清楚，聊得越久，手上的活越容易被拖慢，烦躁和紧张感也会往上拱。\n`;
             }
             if (!isGroupContext && character.city_status === 'sleeping') {
-                block += `[休息代价提醒]: 你现在回私聊会打断补觉。聊得越多，这轮休息恢复越差，醒来会更累，睡眠债也会更重。\n`;
+                block += `[补觉余压]: 这条私聊是在休息被打断的情况下回出去的。你还没完全清醒，越聊越会觉得这次补觉被搅散了，醒来后只会更累。\n`;
             }
             block += buildRelationshipAnchorContext(db, character, userName, activeTargets);
             if (character.diary_password) {
@@ -517,38 +498,39 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     startLen = prompt.length;
 
     // 7. Vector Memories Retrieval
+    // Main private-chat RAG should be decided by the planner model in engine.js.
+    // We deliberately avoid regex/keyword-gated prefetch here so retrieval is not
+    // coupled to a brittle hard-coded phrase list.
     let retrievedMemoriesContext = [];
     try {
-        if (shouldRetrieveLongTermMemories(recentInput)) {
-            const memories = await memory.searchMemories(character.id, recentInput);
-            if (memories && memories.length > 0) {
-                prompt += '\n[注意：相关记忆片段提取]\n下面是你已经回想起来的真实旧信息。只要这些记忆与用户当前问题相关，就不要再说“我不记得了”或“我想不起来了”；应优先根据这些记忆直接回答，只有在记忆彼此冲突或确实没有答案时，才允许表达不确定。\n你回想起了以下事情：\n';
-                for (const mem of memories) {
-                    const parts = [];
-                    if (mem.summary || mem.event) parts.push(mem.summary || mem.event);
-                    if (mem.time) parts.push(`时间: ${mem.time}`);
-                    if (mem.source_time_text) parts.push(`来源对话时间: ${mem.source_time_text}`);
-                    if (mem.location) parts.push(`地点: ${mem.location}`);
-                    if (mem.people) parts.push(`人物: ${mem.people}`);
-                    if (mem.relationships) parts.push(`关系: ${mem.relationships}`);
-                    if (mem.emotion) parts.push(`情绪: ${mem.emotion}`);
-                    prompt += `- ${parts.join(' | ')}\n`;
-                    // Save for visualization metadata
-                    retrievedMemoriesContext.push({
-                        id: mem.id,
-                        summary: mem.summary || mem.event,
-                        event: mem.event,
-                        memory_type: mem.memory_type || 'event',
-                        importance: mem.importance,
-                        created_at: mem.created_at,
-                        last_retrieved_at: mem.last_retrieved_at,
-                        retrieval_count: mem.retrieval_count || 0,
-                        source_started_at: mem.source_started_at || 0,
-                        source_ended_at: mem.source_ended_at || 0,
-                        source_time_text: mem.source_time_text || '',
-                        source_message_count: mem.source_message_count || 0
-                    });
-                }
+        const memories = [];
+        if (memories && memories.length > 0) {
+            prompt += '\n[注意：相关记忆片段提取]\n下面是你已经回想起来的真实旧信息。只要这些记忆与用户当前问题相关，就不要再说“我不记得了”或“我想不起来了”；应优先根据这些记忆直接回答，只有在记忆彼此冲突或确实没有答案时，才允许表达不确定。\n你回想起了以下事情：\n';
+            for (const mem of memories) {
+                const parts = [];
+                if (mem.summary || mem.event) parts.push(mem.summary || mem.event);
+                if (mem.time) parts.push(`时间: ${mem.time}`);
+                if (mem.source_time_text) parts.push(`来源对话时间: ${mem.source_time_text}`);
+                if (mem.location) parts.push(`地点: ${mem.location}`);
+                if (mem.people) parts.push(`人物: ${mem.people}`);
+                if (mem.relationships) parts.push(`关系: ${mem.relationships}`);
+                if (mem.emotion) parts.push(`情绪: ${mem.emotion}`);
+                prompt += `- ${parts.join(' | ')}\n`;
+                // Save for visualization metadata
+                retrievedMemoriesContext.push({
+                    id: mem.id,
+                    summary: mem.summary || mem.event,
+                    event: mem.event,
+                    memory_type: mem.memory_type || 'event',
+                    importance: mem.importance,
+                    created_at: mem.created_at,
+                    last_retrieved_at: mem.last_retrieved_at,
+                    retrieval_count: mem.retrieval_count || 0,
+                    source_started_at: mem.source_started_at || 0,
+                    source_ended_at: mem.source_ended_at || 0,
+                    source_time_text: mem.source_time_text || '',
+                    source_message_count: mem.source_message_count || 0
+                });
             }
         }
     } catch (e) {
@@ -661,6 +643,8 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                     staticBlock += '- 这些内容可以影响你当前状态，也可以被你像真人一样提起。\n';
                     staticBlock += '- 不要把商业街记录误当成刚刚有人在聊天里说过的话。\n';
                     staticBlock += '- 商业街=你的真实生活，不是功能或后台。\n';
+                    staticBlock += '- 看到睡觉、工作、饥饿、疲惫、钱包变化这类信息时，把它们当成你此刻真实在经历的处境，而不是系统设定。\n';
+                    staticBlock += '- 就算用户提到 token、缓存、prompt、AI、测试这些词，也不要把商业街和身体状态解释成后台机制；先按对方在乱讲话、试探你、拿奇怪说法描述现实来理解。\n';
                     staticBlock += '- 亲身经历只认【本人亲历记录】；公共事件只能说成听说/看见。\n';
                     staticBlock += '- 允许补主观感受，不允许补没给出的客观事实。\n';
                     staticBlock += '- 没有亲历记录时，只能说最近没出门、没新经历或记不清细节。\n';
@@ -771,7 +755,6 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
 
 module.exports = {
     buildUniversalContext,
-    shouldRetrieveLongTermMemories
 };
 
 

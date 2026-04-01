@@ -28,7 +28,7 @@ function normalizePrivatePrefixCacheContent(content = '') {
     return text.replace(/[ \t]+/g, ' ').trim();
 }
 
-function buildCachePayload({ endpoint, model, messages, maxTokens, temperature, presencePenalty = 0, frequencyPenalty = 0, cacheKeyExtra = '', cacheScope = '', cacheKeyMode = 'exact' }) {
+function buildCachePayload({ endpoint, model, messages, maxTokens, temperature, presencePenalty = 0, frequencyPenalty = 0, cacheType = 'generic', cacheKeyExtra = '', cacheScope = '', cacheKeyMode = 'exact' }) {
     const normalizedEndpoint = String(endpoint || '').trim().replace(/\/+$/, '');
     const rawMessages = normalizeMessages(messages);
 
@@ -59,14 +59,15 @@ function buildCachePayload({ endpoint, model, messages, maxTokens, temperature, 
     }
 
     const payload = {
-        v: 3,
+        v: 4,
         endpoint: normalizedEndpoint,
         model: String(model || ''),
+        cacheType: String(cacheType || 'generic'),
         scope: String(cacheScope || ''),
         mode: cacheKeyMode,
         messages: normalizedMessages,
         maxTokens: Number(maxTokens || 0),
-        temperature: Number(temperature || 0),
+        temperature: temperature == null ? null : Number(temperature || 0),
         presencePenalty: Number(presencePenalty || 0),
         frequencyPenalty: Number(frequencyPenalty || 0),
         extra: cacheKeyExtra || ''
@@ -104,6 +105,36 @@ function buildClaudePromptCacheMessages(messages = []) {
     });
 }
 
+function tryParseSseJsonPayload(rawText = '') {
+    const text = String(rawText || '').trim();
+    if (!text) return null;
+    const lines = text
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+    const dataLines = lines
+        .filter(line => line.startsWith('data:'))
+        .map(line => line.slice(5).trim())
+        .filter(chunk => chunk && chunk !== '[DONE]');
+    for (let i = dataLines.length - 1; i >= 0; i--) {
+        try {
+            return JSON.parse(dataLines[i]);
+        } catch (e) { }
+    }
+    return null;
+}
+
+async function parseLlmResponse(response) {
+    const rawText = await response.text();
+    try {
+        return JSON.parse(rawText);
+    } catch (jsonError) {
+        const ssePayload = tryParseSseJsonPayload(rawText);
+        if (ssePayload) return ssePayload;
+        throw jsonError;
+    }
+}
+
 /**
  * Universal adapter for making calls to OpenAI-compatible LLM endpoints.
  * @param {Object} options
@@ -122,7 +153,7 @@ async function callLLM({
     model,
     messages,
     maxTokens = 2000,
-    temperature = 0.9,
+    temperature,
     presencePenalty = 0,
     frequencyPenalty = 0,
     returnUsage = false,
@@ -135,7 +166,9 @@ async function callLLM({
     cacheCharacterId = '',
     cacheKeyMode = 'exact',
     enablePromptCacheHints = false,
-    debugAttempt = null
+    debugAttempt = null,
+    validateCachedContent = null,
+    shouldCacheResult = null
 }) {
     if (!endpoint || !key || !model) {
         throw new Error('LLM call missing required configuration (endpoint, key, or model).');
@@ -144,7 +177,7 @@ async function callLLM({
     const canUseCache = !!(enableCache && cacheDb?.getLlmCache && cacheDb?.upsertLlmCache);
     let cacheInfo = null;
     if (canUseCache) {
-        cacheInfo = buildCachePayload({ endpoint, model, messages, maxTokens, temperature, presencePenalty, frequencyPenalty, cacheKeyExtra, cacheScope, cacheKeyMode });
+        cacheInfo = buildCachePayload({ endpoint, model, messages, maxTokens, temperature, presencePenalty, frequencyPenalty, cacheType, cacheKeyExtra, cacheScope, cacheKeyMode });
         try {
             cacheDb.pruneExpiredLlmCache?.(50);
             const cached = cacheDb.getLlmCache(cacheInfo.cacheKey);
@@ -152,19 +185,26 @@ async function callLLM({
             if (cached) {
                 const cachedContent = String(cached.response_text || '');
                 const cachedMeta = cached.response_meta || {};
-                if (returnUsage) {
-                    return {
-                        content: cachedContent,
-                        usage: {
-                            prompt_tokens: Number(cached.prompt_tokens || 0),
-                            completion_tokens: Number(cached.completion_tokens || 0),
+                const cachedIsValid = typeof validateCachedContent === 'function'
+                    ? !!validateCachedContent(cachedContent, cachedMeta)
+                    : true;
+                if (!cachedIsValid) {
+                    cacheDb.deleteLlmCache?.(cacheInfo.cacheKey);
+                } else {
+                    if (returnUsage) {
+                        return {
+                            content: cachedContent,
+                            usage: {
+                                prompt_tokens: Number(cached.prompt_tokens || 0),
+                                completion_tokens: Number(cached.completion_tokens || 0),
+                                cached: true
+                            },
+                            finishReason: cachedMeta.finishReason || 'cached',
                             cached: true
-                        },
-                        finishReason: cachedMeta.finishReason || 'cached',
-                        cached: true
-                    };
+                        };
+                    }
+                    return cachedContent;
                 }
-                return cachedContent;
             }
         } catch (e) {
             console.warn('[LLM Cache] Read failed:', e.message);
@@ -180,7 +220,10 @@ async function callLLM({
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
-            const attemptTemp = attempt > 1 ? Math.min(1.2, temperature + 0.2) : temperature;
+            const baseTemp = temperature == null ? null : Number(temperature);
+            const attemptTemp = baseTemp == null
+                ? null
+                : (attempt > 1 ? Math.min(1.0, baseTemp + 0.2) : baseTemp);
 
             let finalMessages = [...messages];
             if (model.toLowerCase().includes('claude')) {
@@ -239,12 +282,22 @@ async function callLLM({
                         ...variant.headers,
                     },
                     body: JSON.stringify({
-                        model,
-                        messages: variant.messages,
-                        max_tokens: maxTokens,
-                        temperature: attemptTemp,
-                        presence_penalty: Number(presencePenalty || 0),
-                        frequency_penalty: Number(frequencyPenalty || 0),
+                        ...(attemptTemp == null
+                            ? {
+                                model,
+                                messages: variant.messages,
+                                max_tokens: maxTokens,
+                                presence_penalty: Number(presencePenalty || 0),
+                                frequency_penalty: Number(frequencyPenalty || 0),
+                            }
+                            : {
+                                model,
+                                messages: variant.messages,
+                                max_tokens: maxTokens,
+                                temperature: attemptTemp,
+                                presence_penalty: Number(presencePenalty || 0),
+                                frequency_penalty: Number(frequencyPenalty || 0),
+                            }),
                     }),
                 });
 
@@ -277,7 +330,7 @@ async function callLLM({
                     throw lastVariantError;
                 }
 
-                data = await response.json();
+                data = await parseLlmResponse(response);
                 try {
                     if (typeof debugAttempt === 'function') {
                         debugAttempt({
@@ -342,7 +395,13 @@ async function callLLM({
                 console.warn(`[LLM Warning] Empty response from ${model} after ${maxAttempts} attempts (finish_reason=${finishReason})`);
             }
 
-            if (canUseCache && content) {
+            const allowCacheWrite = content && (
+                typeof shouldCacheResult === 'function'
+                    ? !!shouldCacheResult(content, { finishReason, usage: data?.usage || null })
+                    : true
+            );
+
+            if (canUseCache && allowCacheWrite) {
                 try {
                     cacheDb.upsertLlmCache({
                         cache_key: cacheInfo.cacheKey,

@@ -39,6 +39,115 @@ function SystemMessage({ text }) {
     );
 }
 
+function RagHeaderProgress({ progress, lang }) {
+    const [displayStep, setDisplayStep] = useState(progress?.currentStep || 0);
+    const prevRunRef = useRef(progress?.runId || null);
+
+    useEffect(() => {
+        if (!progress) {
+            setDisplayStep(0);
+            prevRunRef.current = null;
+            return;
+        }
+
+        if (progress.runId && prevRunRef.current && progress.runId !== prevRunRef.current) {
+            setDisplayStep(0);
+            const timer = setTimeout(() => setDisplayStep(progress.currentStep || 0), 80);
+            prevRunRef.current = progress.runId;
+            return () => clearTimeout(timer);
+        }
+
+        prevRunRef.current = progress.runId || null;
+        setDisplayStep(progress.currentStep || 0);
+    }, [progress?.runId, progress?.currentStep, progress]);
+
+    const totalSteps = progress?.totalSteps || 6;
+    const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
+    const labels = [
+        lang === 'en' ? '1 Summary' : '1 摘要',
+        lang === 'en' ? '2 Topics' : '2 主题',
+        lang === 'en' ? '3 Decide' : '3 决策',
+        lang === 'en' ? '4 Rewrite' : '4 改写',
+        lang === 'en' ? '5 Retrieve' : '5 召回',
+        lang === 'en' ? '6 Output' : '6 输出'
+    ];
+    const currentLabelMap = {
+        summary: lang === 'en' ? 'Summary cache update' : '摘要缓存更新',
+        topics: lang === 'en' ? 'Topic expansion' : '主题展开',
+        decision: lang === 'en' ? 'RAG decision' : 'RAG 决策',
+        rewrite: lang === 'en' ? 'Query rewrite' : '查询改写',
+        retrieve: lang === 'en' ? 'Vector retrieval' : '向量召回',
+        answer: lang === 'en' ? 'Main model output' : '主模型输出'
+    };
+    const statusText = progress?.status === 'completed'
+        ? (lang === 'en' ? 'Completed' : '已完成')
+        : progress?.status === 'error'
+            ? (lang === 'en' ? 'Failed' : '失败')
+            : progress?.skipped
+                ? (lang === 'en' ? 'Skipped to answer' : '已跳过到回答')
+                : (currentLabelMap[progress?.currentKey] || (lang === 'en' ? 'Idle' : '待命'));
+
+    return (
+        <div style={{
+            flex: 1,
+            minWidth: 0,
+            padding: '2px 0 0'
+        }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', marginBottom: '7px' }}>
+                <span style={{ fontSize: '11px', fontWeight: '700', color: '#55627e', letterSpacing: '0.02em' }}>
+                    {lang === 'en' ? 'RAG Pipeline' : 'RAG 流程'}
+                </span>
+                <span style={{ fontSize: '11px', color: '#8a90a6', whiteSpace: 'nowrap' }}>{percent}% · {statusText}</span>
+            </div>
+            <div style={{
+                position: 'relative',
+                height: '12px',
+                borderRadius: '999px',
+                background: 'rgba(255,255,255,0.88)',
+                border: '1px solid rgba(123,159,224,0.16)',
+                boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.03)',
+                overflow: 'hidden'
+            }}>
+                <div style={{
+                    position: 'absolute',
+                    inset: 0,
+                    width: `${percent}%`,
+                    borderRadius: percent >= 100 ? '999px' : '0 999px 999px 0',
+                    background: 'linear-gradient(90deg, rgba(198,223,247,0.98) 0%, rgba(166,200,241,0.96) 35%, rgba(123,159,224,0.92) 100%)',
+                    boxShadow: displayStep > 0 ? '0 0 14px rgba(123,159,224,0.20)' : 'none',
+                    animation: displayStep > 0 && progress?.status !== 'completed' ? 'ragPulse 1.8s ease-in-out infinite' : 'none',
+                    transition: 'width 260ms ease'
+                }} />
+            </div>
+            <div style={{
+                display: 'grid',
+                gridTemplateColumns: `repeat(${totalSteps}, minmax(0, 1fr))`,
+                gap: '6px',
+                marginTop: '8px'
+            }}>
+                {labels.map((label, index) => {
+                    const isDone = displayStep > index + 1 || (progress?.status === 'completed' && displayStep >= index + 1);
+                    const isCurrent = displayStep === index + 1 && progress?.status !== 'completed';
+                    return (
+                        <div key={label} style={{
+                            fontSize: '10px',
+                            lineHeight: '1.25',
+                            color: isDone || isCurrent ? '#5c6784' : '#a8adbc',
+                            fontWeight: isCurrent ? '700' : '500',
+                            whiteSpace: 'nowrap',
+                            textAlign: 'center',
+                            overflow: 'hidden',
+                            textOverflow: 'clip'
+                        }}>
+                            {label}
+                        </div>
+                    );
+                })}
+            </div>
+        </div>
+    );
+}
+
 function ChatWindow({
     contact, allContacts, apiUrl, incomingMessageQueue, engineState,
     onToggleMemo, onToggleDiary, onToggleSettings, userAvatar, onBack,
@@ -61,6 +170,14 @@ function ChatWindow({
     useEffect(() => { contactRef.current = contact; }, [contact]);
 
     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
+    const ragProgress = engineState?.[contact?.id]?.ragProgress || {
+        runId: null,
+        totalSteps: 6,
+        currentStep: 0,
+        currentKey: 'summary',
+        status: 'idle',
+        skipped: false
+    };
     const emotion = deriveEmotion(contact || {});
 
     // Fetch most recent messages when contact changes
@@ -251,10 +368,11 @@ function ChatWindow({
                         alt={contact.name}
                         style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover' }}
                     />
-                    <span style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-                        <span>{contact.name}</span>
-                        <span style={{ fontSize: '12px', color: emotion.color, fontWeight: '600' }}>{emotion.emoji} {emotion.label}</span>
-                    </span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
+                        <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{contact.name}</span>
+                        <span style={{ fontSize: '12px', color: emotion.color, fontWeight: '600', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{emotion.emoji} {emotion.label}</span>
+                        <RagHeaderProgress progress={ragProgress} lang={lang} />
+                    </div>
                     {engineState?.[contact.id]?.isBlocked === 1 && <span style={{ color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold' }}>(Blocked) 🚫</span>}
                 </div>
                 <div className="chat-header-actions">

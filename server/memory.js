@@ -14,8 +14,12 @@ const LOCAL_EMBEDDING_INDEX_TAG = process.env.LOCAL_EMBEDDING_INDEX_TAG || 'bge_
 // Dynamic import for transformers.js
 let pipeline = null;
 let extractionDisabled = false;
+const embeddingCache = new Map();
+const EMBEDDING_CACHE_LIMIT = 256;
 
 let globalWsClientsResolver = null;
+const activeSweepJobs = new Set();
+const SWEEP_COOLDOWN_MS = 5 * 60 * 1000;
 function setWsClientsResolver(resolver) {
     globalWsClientsResolver = resolver;
 }
@@ -36,18 +40,40 @@ async function getExtractor() {
 }
 
 async function getEmbedding(text) {
+    const normalizedText = String(text || '').trim();
+    if (!normalizedText) {
+        return Array.from({ length: LOCAL_EMBEDDING_DIM }, () => 0);
+    }
+    if (embeddingCache.has(normalizedText)) {
+        return embeddingCache.get(normalizedText);
+    }
     const extractor = await getExtractor();
     if (!extractor) {
         // Return a zero-vector if local embeddings are broken
         return Array.from({ length: LOCAL_EMBEDDING_DIM }, () => 0);
     }
-    const output = await extractor(text, { pooling: 'mean', normalize: true });
-    return Array.from(output.data);
+    const output = await extractor(normalizedText, { pooling: 'mean', normalize: true });
+    const vector = Array.from(output.data);
+    embeddingCache.set(normalizedText, vector);
+    if (embeddingCache.size > EMBEDDING_CACHE_LIMIT) {
+        const oldestKey = embeddingCache.keys().next().value;
+        if (oldestKey) embeddingCache.delete(oldestKey);
+    }
+    return vector;
+}
+
+function yieldToEventLoop() {
+    return new Promise(resolve => setImmediate(resolve));
 }
 
 // Memory vector indices cache: UserId_CharacterID -> LocalIndex
 const indices = new Map();
 let qdrantAvailability = null;
+
+function isRecoverableQdrantError(error) {
+    const message = String(error?.message || '').toLowerCase();
+    return message.includes('already exists');
+}
 
 async function canUseQdrant() {
     if (qdrantAvailability !== null) return qdrantAvailability;
@@ -232,12 +258,133 @@ function getMemory(userId) {
         return false;
     }
 
+    function classifyUserCenteredMemory(memoryData = {}) {
+        const text = [
+            memoryData.summary,
+            memoryData.content,
+            memoryData.event,
+            memoryData.relationships,
+            memoryData.people,
+            memoryData.location,
+            memoryData.emotion
+        ].filter(Boolean).join(' ').toLowerCase();
+        const type = String(memoryData.memory_type || '').toLowerCase();
+        const importance = Number(memoryData.importance || 5);
+        const peopleList = Array.isArray(memoryData.people_json)
+            ? memoryData.people_json.map(v => String(v || '').toLowerCase())
+            : String(memoryData.people || '').toLowerCase().split(/[,\s/]+/).filter(Boolean);
+        const hasUser = /(nana|user|用户|你\b)/i.test(text) || peopleList.some(v => /(nana|user|用户)/i.test(v));
+        const hasCharacter = /(claude|gemini|grok|glm|gpt|assistant|ai|角色|对方|ta\b|他\b|她\b)/i.test(text)
+            || peopleList.some(v => /(claude|gemini|grok|glm|gpt|assistant|ai|角色)/i.test(v));
+        const hasRelationshipSignal = /(关系|和好|吵架|冲突|承诺|信任|嫉妒|吃醋|委屈|喜欢|告白|暧昧|拉扯|陪|安慰|伤到|hurt|jealous|relationship|trust|conflict|reconcile|affection)/i.test(text)
+            || type === 'relationship';
+        const hasLoveConfessionSignal = /(我喜欢你|我爱你|喜欢你|爱你|告白|表白|心动|暧昧|想和你在一起|对你有感觉|不是第一次说|说过很多次|反复示爱|明确示爱|关系确认|只喜欢你|只想要你)/i.test(text);
+        const hasUserDemandSignal = /(答应我|你要答应|你得答应|别离开我|不要离开我|只准|不准|要一直陪我|必须回应我|你要记住|不许忘|你得哄我|你要陪我|别找别人|只能对我)/i.test(text);
+        const hasCurrentArcSignal = /(最近|这段时间|目前|现在|正在|打算|准备|计划|offer|startup|ceo|实习|面试|简历|求职|找工作|工作|公司|入职|考研|学校|项目|论文|焦虑|内耗|压力|病|身体|恢复)/i.test(text)
+            || ['plan', 'emotion'].includes(type);
+        const hasIdentitySignal = /(学历|本科|专业|学校|背景|家庭|性格|偏好|喜欢|讨厌|习惯|口味|过敏|身体状况|健康问题|长期目标|价值观|梦想|身份|经历)/i.test(text)
+            || type === 'preference';
+
+        if ((hasLoveConfessionSignal || hasUserDemandSignal) && (hasUser || hasCharacter)) {
+            return {
+                memory_focus: 'relationship',
+                memory_tier: 'core'
+            };
+        }
+        if (hasRelationshipSignal && (hasUser || hasCharacter)) {
+            return {
+                memory_focus: 'relationship',
+                memory_tier: importance >= 5 ? 'core' : 'active'
+            };
+        }
+        if (hasCurrentArcSignal && hasUser) {
+            return {
+                memory_focus: 'user_current_arc',
+                memory_tier: importance >= 5 ? 'core' : 'active'
+            };
+        }
+        if (hasIdentitySignal && hasUser) {
+            return {
+                memory_focus: 'user_profile',
+                memory_tier: importance >= 4 ? 'core' : 'active'
+            };
+        }
+        if (importance >= 6) {
+            return {
+                memory_focus: 'general',
+                memory_tier: 'active'
+            };
+        }
+        return {
+            memory_focus: 'general',
+            memory_tier: 'ambient'
+        };
+    }
+
     function computeMemoryRetrievalWeight(memoryData = {}) {
         const type = String(memoryData.memory_type || '').toLowerCase();
+        const inferred = classifyUserCenteredMemory(memoryData);
+        const tier = String(memoryData.memory_tier || inferred.memory_tier || '').toLowerCase();
+        const focus = String(memoryData.memory_focus || inferred.memory_focus || '').toLowerCase();
         if (isRoutineCityMemory(memoryData)) return 0.42;
         if (looksLikeCityMemory(memoryData)) return hasHighValueMemorySignals(memoryData) ? 0.78 : 0.6;
-        if (['relationship', 'plan', 'preference', 'emotion'].includes(type)) return 1.16;
-        return 1;
+        let weight = 1;
+        if (['relationship', 'plan', 'preference', 'emotion'].includes(type)) weight += 0.16;
+        if (tier === 'core') weight += 0.4;
+        else if (tier === 'active') weight += 0.18;
+        if (focus === 'relationship') weight += 0.34;
+        else if (focus === 'user_current_arc') weight += 0.22;
+        else if (focus === 'user_profile') weight += 0.2;
+        return weight;
+    }
+
+    function computeMemoryTierBoost(memoryData = {}) {
+        const inferred = classifyUserCenteredMemory(memoryData);
+        const tier = String(memoryData.memory_tier || inferred.memory_tier || '').toLowerCase();
+        const focus = String(memoryData.memory_focus || inferred.memory_focus || '').toLowerCase();
+        let boost = 0;
+        if (tier === 'core') boost += 0.22;
+        else if (tier === 'active') boost += 0.1;
+        if (focus === 'relationship') boost += 0.26;
+        else if (focus === 'user_current_arc') boost += 0.16;
+        else if (focus === 'user_profile') boost += 0.14;
+        return boost;
+    }
+
+    function computeUserProfilePriorityBoost(memoryData = {}, queryText = '', queryVariants = []) {
+        const inferred = classifyUserCenteredMemory(memoryData);
+        const tier = String(memoryData.memory_tier || inferred.memory_tier || '').toLowerCase();
+        const focus = String(memoryData.memory_focus || inferred.memory_focus || '').toLowerCase();
+        const type = String(memoryData.memory_type || '').toLowerCase();
+        const text = [
+            memoryData?.summary,
+            memoryData?.content,
+            memoryData?.event
+        ].filter(Boolean).join(' ');
+        const queryContext = [
+            String(queryText || ''),
+            ...(Array.isArray(queryVariants) ? queryVariants : [])
+        ].join('\n');
+
+        let boost = 0;
+        if (focus === 'user_profile') {
+            boost += 0.42;
+            if (tier === 'core') boost += 0.18;
+        } else if (focus === 'user_current_arc') {
+            boost += 0.08;
+            if (tier === 'core') boost += 0.06;
+        }
+
+        if (/(关于我|记得我|个人信息|用户信息|背景|学习|学历|学校|专业|年级|工作|实习|职业|经历|情况|介绍)/i.test(queryContext)) {
+            if (focus === 'user_profile') boost += 0.72;
+            else if (focus === 'user_current_arc') boost += 0.34;
+            if (focus === 'relationship') boost -= 0.12;
+            if (type === 'emotion' || /(焦虑|难过|委屈|情绪|内耗|痛苦|崩溃)/i.test(text)) {
+                boost -= 0.18;
+            }
+        }
+
+        return boost;
     }
 
     function buildDedupeKey(characterId, memoryData) {
@@ -302,6 +449,15 @@ function getMemory(userId) {
             memoryType = 'city_event';
         }
         let importance = Math.max(1, Math.min(10, Number(rawMemoryData.importance) || 5));
+        const classified = classifyUserCenteredMemory({
+            ...rawMemoryData,
+            memory_type: memoryType,
+            importance,
+            people_json: peopleList,
+            relationship_json: relationshipList,
+            people: peopleList.join(', '),
+            relationships: relationshipSummary.join('; ')
+        });
         const normalized = {
             memory_type: memoryType,
             summary: summary || content || '(empty memory)',
@@ -324,10 +480,18 @@ function getMemory(userId) {
             source_started_at: Number(rawMemoryData.source_started_at || 0),
             source_ended_at: Number(rawMemoryData.source_ended_at || 0),
             source_time_text: String(rawMemoryData.source_time_text || '').trim(),
-            source_message_count: Number(rawMemoryData.source_message_count || 0)
+            source_message_count: Number(rawMemoryData.source_message_count || 0),
+            memory_tier: String(rawMemoryData.memory_tier || classified.memory_tier || 'ambient').trim().toLowerCase(),
+            memory_focus: String(rawMemoryData.memory_focus || classified.memory_focus || 'general').trim().toLowerCase()
         };
         if (!normalized.source_time_text) {
             normalized.source_time_text = formatSourceTimeRange(normalized.source_started_at, normalized.source_ended_at);
+        }
+        if (!['core', 'active', 'ambient'].includes(normalized.memory_tier)) {
+            normalized.memory_tier = classified.memory_tier || 'ambient';
+        }
+        if (!['user_profile', 'user_current_arc', 'relationship', 'general'].includes(normalized.memory_focus)) {
+            normalized.memory_focus = classified.memory_focus || 'general';
         }
         if (isRoutineCityMemory(normalized)) {
             normalized.memory_type = 'city_log';
@@ -341,6 +505,8 @@ function getMemory(userId) {
         const relationshipSummary = summarizeRelationships(memoryData.relationship_json ?? memoryData.relationships);
         return [
             memoryData.memory_type ? `Type: ${memoryData.memory_type}` : '',
+            memoryData.memory_tier ? `Tier: ${memoryData.memory_tier}` : '',
+            memoryData.memory_focus ? `Focus: ${memoryData.memory_focus}` : '',
             memoryData.summary ? `Summary: ${memoryData.summary}` : '',
             memoryData.content ? `Content: ${memoryData.content}` : '',
             memoryData.location ? `Location: ${memoryData.location}` : '',
@@ -743,6 +909,8 @@ function getMemory(userId) {
                             character_id: String(characterId),
                             group_id: mem.group_id || '',
                             memory_type: mem.memory_type || 'event',
+                            memory_tier: mem.memory_tier || 'ambient',
+                            memory_focus: mem.memory_focus || 'general',
                             importance: mem.importance || 5,
                             created_at: mem.created_at || Date.now(),
                             time: mem.time || '',
@@ -770,6 +938,8 @@ function getMemory(userId) {
                     memory_id: mem.id,
                     surprise_score: mem.surprise_score || mem.importance || 5,
                     memory_type: mem.memory_type || 'event',
+                    memory_tier: mem.memory_tier || 'ambient',
+                    memory_focus: mem.memory_focus || 'general',
                     dedupe_key: mem.dedupe_key || '',
                     retrieval_weight: retrievalWeight
                 }
@@ -1036,7 +1206,9 @@ function getMemory(userId) {
 
                 const importance = Number(row.importance || 5);
                 const retrievalWeight = Number(row.retrieval_weight || computeMemoryRetrievalWeight(row) || 1);
-                const finalScore = lexicalBoost + aliasBridgeBoost + (importance * 0.025) + ((retrievalWeight - 1) * 0.1);
+                const tierBoost = computeMemoryTierBoost(row);
+                const profilePriorityBoost = computeUserProfilePriorityBoost(row, normalizedVariants[0] || '', normalizedVariants);
+                const finalScore = lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost + (importance * 0.025) + ((retrievalWeight - 1) * 0.1);
                 return {
                     row,
                     finalScore,
@@ -1062,12 +1234,16 @@ function getMemory(userId) {
         try {
             const rows = db.getMemories(characterId)
                 .filter(row => Number(row.is_archived || 0) === 0)
-                .slice(0, 300);
+                .slice(0, 120);
             if (rows.length === 0) return [];
 
             const queryEmbedding = await getEmbedding(queryText);
             const scored = [];
-            for (const row of rows) {
+            for (let idx = 0; idx < rows.length; idx++) {
+                if (idx > 0 && idx % 10 === 0) {
+                    await yieldToEventLoop();
+                }
+                const row = rows[idx];
                 const text = [
                     row.summary,
                     row.content,
@@ -1083,7 +1259,9 @@ function getMemory(userId) {
                 const importance = Number(row.importance || 5);
                 const retrievalWeight = Number(row.retrieval_weight || computeMemoryRetrievalWeight(row) || 1);
                 const contradictionPenalty = computeRecallContradictionPenalty(row, queryText);
-                const finalScore = similarity + (importance * 0.02) + ((retrievalWeight - 1) * 0.08) - contradictionPenalty;
+                const tierBoost = computeMemoryTierBoost(row);
+                const profilePriorityBoost = computeUserProfilePriorityBoost(row, queryText, [queryText]);
+                const finalScore = similarity + tierBoost + profilePriorityBoost + (importance * 0.02) + ((retrievalWeight - 1) * 0.08) - contradictionPenalty;
                 scored.push({ row, finalScore });
             }
 
@@ -1101,17 +1279,88 @@ function getMemory(userId) {
         }
     }
 
+    function normalizeMemorySearchRequest(queryInput, limit = 5) {
+        const requestedLimit = Math.max(1, Math.min(12, Number(limit || 5) || 5));
+        if (queryInput && typeof queryInput === 'object' && !Array.isArray(queryInput)) {
+            const explicitQueries = Array.isArray(queryInput.queries)
+                ? queryInput.queries.map(item => String(item || '').trim()).filter(Boolean).slice(0, 12)
+                : [];
+            const primaryText = String(queryInput.queryText || explicitQueries[0] || '').trim();
+            const filters = queryInput.filters && typeof queryInput.filters === 'object'
+                ? queryInput.filters
+                : {};
+            return {
+                primaryText,
+                explicitQueries,
+                filters: {
+                    memory_focus: Array.isArray(filters.memory_focus)
+                        ? filters.memory_focus.map(item => String(item || '').trim()).filter(Boolean).slice(0, 4)
+                        : [],
+                    memory_tier: Array.isArray(filters.memory_tier)
+                        ? filters.memory_tier.map(item => String(item || '').trim()).filter(Boolean).slice(0, 3)
+                        : []
+                },
+                limit: Math.max(1, Math.min(12, Number(queryInput.limit || requestedLimit) || requestedLimit))
+            };
+        }
+        const primaryText = String(queryInput || '').trim();
+        return {
+            primaryText,
+            explicitQueries: [],
+            filters: { memory_focus: [], memory_tier: [] },
+            limit: requestedLimit
+        };
+    }
+
+    function buildMemorySearchFilter(characterId, filters = {}) {
+        const must = [
+            { key: 'character_id', match: { value: String(characterId) } },
+            { key: 'is_archived', match: { value: 0 } }
+        ];
+        const focusList = Array.isArray(filters.memory_focus) ? filters.memory_focus.filter(Boolean) : [];
+        const tierList = Array.isArray(filters.memory_tier) ? filters.memory_tier.filter(Boolean) : [];
+        if (focusList.length === 1) {
+            must.push({ key: 'memory_focus', match: { value: String(focusList[0]) } });
+        }
+        if (tierList.length === 1) {
+            must.push({ key: 'memory_tier', match: { value: String(tierList[0]) } });
+        }
+        return { must };
+    }
+
+    function memoryMatchesSearchFilters(memoryRow, filters = {}) {
+        if (!memoryRow) return false;
+        const focusList = Array.isArray(filters.memory_focus) ? filters.memory_focus.filter(Boolean) : [];
+        const tierList = Array.isArray(filters.memory_tier) ? filters.memory_tier.filter(Boolean) : [];
+        if (focusList.length > 0 && !focusList.includes(String(memoryRow.memory_focus || '').trim())) {
+            return false;
+        }
+        if (tierList.length > 0 && !tierList.includes(String(memoryRow.memory_tier || '').trim())) {
+            return false;
+        }
+        return Number(memoryRow.is_archived || 0) === 0;
+    }
+
     async function searchMemories(characterId, queryText, limit = 5) {
         try {
             const db = getDb();
-            let queryVariants = buildExpandedMemorySearchQueries(queryText);
-            const llmExpandedVariants = await expandMemoryQueriesWithLLM(db, characterId, queryText, queryVariants);
+            const normalizedRequest = normalizeMemorySearchRequest(queryText, limit);
+            const baseQuery = normalizedRequest.primaryText || normalizedRequest.explicitQueries[0] || '';
+            let queryVariants = normalizedRequest.explicitQueries.length > 0
+                ? Array.from(new Set([
+                    ...normalizedRequest.explicitQueries,
+                    ...buildExpandedMemorySearchQueries(baseQuery)
+                ])).slice(0, 6)
+                : buildExpandedMemorySearchQueries(baseQuery);
+            const llmExpandedVariants = await expandMemoryQueriesWithLLM(db, characterId, baseQuery, queryVariants);
             if (llmExpandedVariants.length > 0) {
                 const merged = new Set(queryVariants);
                 llmExpandedVariants.forEach(v => merged.add(v));
-                queryVariants = Array.from(merged).slice(0, 12);
+                queryVariants = Array.from(merged).slice(0, 6);
             }
             if (queryVariants.length === 0) return [];
+            const searchFilter = buildMemorySearchFilter(characterId, normalizedRequest.filters);
+            const resultLimit = normalizedRequest.limit;
 
             if (await canUseQdrant()) {
                 try {
@@ -1122,27 +1371,27 @@ function getMemory(userId) {
                         const qdrantResults = await qdrant.searchMemoryPoints(
                             userId,
                             queryEmbedding,
-                            {
-                                must: [
-                                    { key: 'character_id', match: { value: String(characterId) } },
-                                    { key: 'is_archived', match: { value: 0 } }
-                                ]
-                            },
-                            Math.max(limit * 3, 8)
+                            searchFilter,
+                            Math.max(resultLimit * 3, 8)
                         );
 
                         for (const res of qdrantResults) {
                             const memoryId = res?.payload?.memory_id || res?.id;
                             if (!memoryId || res.score <= 0.3) continue;
                             const memRow = db.getMemory(memoryId);
-                            if (!memRow || Number(memRow.is_archived || 0) !== 0) continue;
+                            if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters)) continue;
                             const surpriseScore = res?.payload?.importance || memRow.importance || 5;
-                            const retrievalWeight = Number(res?.payload?.retrieval_weight || 1);
+                            const retrievalWeight = Math.max(
+                                Number(res?.payload?.retrieval_weight || 1),
+                                Number(computeMemoryRetrievalWeight(memRow) || 1)
+                            );
                             const lexicalBoost = computeLexicalBoost(memRow, queryVariants);
                             const aliasBridgeBoost = computeAliasBridgeBoost(memRow, queryVariants);
                             const queryWeight = i === 0 ? 1 : (i === 1 ? 0.96 : 0.9);
-                            const contradictionPenalty = computeRecallContradictionPenalty(memRow, queryText);
-                            const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost - contradictionPenalty;
+                            const contradictionPenalty = computeRecallContradictionPenalty(memRow, baseQuery);
+                            const tierBoost = computeMemoryTierBoost(memRow);
+                            const profilePriorityBoost = computeUserProfilePriorityBoost(memRow, baseQuery, queryVariants);
+                            const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost - contradictionPenalty;
                             const existing = aggregate.get(memoryId);
                             if (!existing || finalScore > existing.finalScore) {
                                 aggregate.set(memoryId, { memRow, finalScore, rawScore: res.score, matchedQuery: variant });
@@ -1152,7 +1401,7 @@ function getMemory(userId) {
 
                     const memories = Array.from(aggregate.values())
                         .sort((a, b) => b.finalScore - a.finalScore)
-                        .slice(0, limit)
+                        .slice(0, resultLimit)
                         .map(entry => {
                             entry.memRow._search_score = entry.finalScore.toFixed(3);
                             entry.memRow._matched_query = entry.matchedQuery;
@@ -1166,7 +1415,9 @@ function getMemory(userId) {
                     }
                 } catch (e) {
                     console.error(`[Memory] Qdrant search failed for ${characterId}:`, e.message);
-                    qdrantAvailability = false;
+                    if (!isRecoverableQdrantError(e)) {
+                        qdrantAvailability = false;
+                    }
                 }
             }
 
@@ -1175,19 +1426,24 @@ function getMemory(userId) {
             for (let i = 0; i < queryVariants.length; i++) {
                 const variant = queryVariants[i];
                 const queryEmbedding = await getEmbedding(variant);
-                const results = await index.queryItems(queryEmbedding, Math.max(limit * 3, 8));
+                const results = await index.queryItems(queryEmbedding, Math.max(resultLimit * 3, 8));
 
                 for (const res of results) {
                     if (!(res.score > 0.3 && res.item.metadata && res.item.metadata.memory_id)) continue;
                     const memRow = db.getMemory(res.item.metadata.memory_id);
-                    if (!memRow || Number(memRow.is_archived || 0) !== 0) continue;
+                    if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters)) continue;
                     const surpriseScore = (res.item.metadata && res.item.metadata.surprise_score) ? res.item.metadata.surprise_score : 5;
-                    const retrievalWeight = (res.item.metadata && Number(res.item.metadata.retrieval_weight)) || 1;
+                    const retrievalWeight = Math.max(
+                        (res.item.metadata && Number(res.item.metadata.retrieval_weight)) || 1,
+                        Number(computeMemoryRetrievalWeight(memRow) || 1)
+                    );
                     const lexicalBoost = computeLexicalBoost(memRow, queryVariants);
                     const aliasBridgeBoost = computeAliasBridgeBoost(memRow, queryVariants);
                     const queryWeight = i === 0 ? 1 : (i === 1 ? 0.96 : 0.9);
-                    const contradictionPenalty = computeRecallContradictionPenalty(memRow, queryText);
-                    const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost - contradictionPenalty;
+                    const contradictionPenalty = computeRecallContradictionPenalty(memRow, baseQuery);
+                    const tierBoost = computeMemoryTierBoost(memRow);
+                    const profilePriorityBoost = computeUserProfilePriorityBoost(memRow, baseQuery, queryVariants);
+                    const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost - contradictionPenalty;
                     const existing = aggregate.get(memRow.id);
                     if (!existing || finalScore > existing.finalScore) {
                         aggregate.set(memRow.id, { memRow, finalScore, matchedQuery: variant });
@@ -1196,7 +1452,7 @@ function getMemory(userId) {
             }
             const memories = Array.from(aggregate.values())
                 .sort((a, b) => b.finalScore - a.finalScore)
-                .slice(0, limit)
+                .slice(0, resultLimit)
                 .map(entry => {
                     entry.memRow._search_score = entry.finalScore.toFixed(3);
                     entry.memRow._matched_query = entry.matchedQuery;
@@ -1207,7 +1463,8 @@ function getMemory(userId) {
             }
             if (memories.length > 0) return memories;
 
-            const lexicalFallback = runLexicalMemoryFallback(db, characterId, queryVariants, limit);
+            const lexicalFallback = runLexicalMemoryFallback(db, characterId, queryVariants, resultLimit)
+                .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters));
             if (lexicalFallback.length > 0) {
                 if (db.markMemoriesRetrieved) {
                     db.markMemoriesRetrieved(lexicalFallback.map(m => m.id));
@@ -1215,7 +1472,8 @@ function getMemory(userId) {
                 return lexicalFallback;
             }
 
-            const semanticFallback = await runSemanticMemoryFallback(db, characterId, queryText, limit);
+            const semanticFallback = (await runSemanticMemoryFallback(db, characterId, baseQuery, resultLimit))
+                .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters));
             if (semanticFallback.length > 0 && db.markMemoriesRetrieved) {
                 db.markMemoriesRetrieved(semanticFallback.map(m => m.id));
             }
@@ -1252,6 +1510,15 @@ WRITING STYLE:
 - Prefer concrete, relationship-aware phrasing over abstract categories.
 - Write "content" as 1 to 2 fuller Chinese sentences with key detail.
 - "event" is only an internal short tag, and can be shorter / more generic than summary.
+- Classify each memory from a user-centered perspective:
+  - "memory_focus": "user_profile" for stable personal information, traits, preferences, background
+  - "memory_focus": "user_current_arc" for what the user is currently dealing with, pursuing, waiting on, or worrying about
+  - "memory_focus": "relationship" for major user-character relationship dynamics, trust shifts, conflicts, closeness, jealousy, repair
+  - "memory_focus": "general" for everything else
+- Then assign "memory_tier":
+  - "core" for the user's personal identity, current main life thread, or major relationship nodes that should be easy to recall later
+  - "active" for currently relevant but more temporary memories
+  - "ambient" for lower-priority background fragments
 - Do not write summary as bland labels like "Financial transfer", "Meta-commentary conflict", "Preference update", "Emotional insecurity".
 - Better summary examples:
   - "Nana给Claude转了83.52元，让他先去吃饭休息。"
@@ -1290,6 +1557,8 @@ Output exactly in this JSON format (and nothing else):
 {
     "action": "add" | "update" | "none",
     "memory_type": "event | fact | preference | relationship | plan | emotion",
+    "memory_tier": "core | active | ambient",
+    "memory_focus": "user_profile | user_current_arc | relationship | general",
     "summary": "自然中文短句，适合直接显示在记忆卡片上",
     "content": "更完整的中文说明，1到2句",
     "time": "...",
@@ -1869,6 +2138,16 @@ IMPORTANT:
 - If nothing meaningful happened in this chunk, return [].
 - Do not explain your answer outside the JSON array.
 - Routine city logs (eating, wandering, sitting around, heading home) should usually be omitted unless they create strong emotional, relational, financial, or survival-relevant developments.
+- Classify each memory from a user-centered perspective:
+  - "memory_focus": "user_profile" for stable personal info, preferences, background, or traits
+  - "memory_focus": "user_current_arc" for what the user is currently dealing with or pursuing
+  - "memory_focus": "relationship" for major user-character relationship dynamics
+  - "memory_focus": "general" for everything else
+- Then assign "memory_tier":
+  - "core" for user identity, current main life thread, or key relationship nodes
+  - "active" for currently relevant but more temporary memories
+  - "ambient" for lower-priority fragments
+- Treat repeated confessions, direct affection, explicit "I like/love you", relationship confirmation, or clear emotional demands toward the character as key relationship nodes. These should usually be stored as "memory_focus": "relationship" and "memory_tier": "core".
 
 Importance scale:
 - 1-3: Casual preferences, routine activities
@@ -1885,6 +2164,8 @@ Output exactly in this JSON format (and nothing else):
 [
   {
     "memory_type": "event | fact | preference | relationship | plan | emotion",
+    "memory_tier": "core | active | ambient",
+    "memory_focus": "user_profile | user_current_arc | relationship | general",
     "summary": "...",
     "content": "...",
     "time": "e.g. today",
@@ -2117,8 +2398,22 @@ Output exactly in this JSON format (and nothing else):
     }
 
     async function sweepOverflowMemories(character) {
-        const memoryConfig = resolveMemoryModelConfig(character);
+        const sweepKey = String(character.id || '');
+        const lastRunAt = Number(character?.sweep_last_run_at || 0);
         const now = Date.now();
+
+        if (activeSweepJobs.has(sweepKey)) {
+            console.log(`[Memory] Sweep skipped for ${character.name}: another sweep is already running.`);
+            return 0;
+        }
+
+        if (lastRunAt > 0 && (now - lastRunAt) < SWEEP_COOLDOWN_MS) {
+            console.log(`[Memory] Sweep skipped for ${character.name}: cooldown active (${Math.ceil((SWEEP_COOLDOWN_MS - (now - lastRunAt)) / 1000)}s remaining).`);
+            return 0;
+        }
+
+        activeSweepJobs.add(sweepKey);
+        const memoryConfig = resolveMemoryModelConfig(character);
         updateSweepStatus(character.id, {
             sweep_last_run_at: now,
             sweep_last_error: '',
@@ -2203,6 +2498,16 @@ CRITICAL:
 - Prefer 0 to 4 strong memories for this batch, not an exhaustive list.
 - Score each memory on a "surprise" factor from 1 to 10.
 - Include the batch's real dialogue time range in your understanding.
+- Classify each memory from a user-centered perspective:
+  - "memory_focus": "user_profile" for stable personal info, preferences, background, or traits
+  - "memory_focus": "user_current_arc" for what the user is currently pursuing, waiting on, worrying about, or going through
+  - "memory_focus": "relationship" for major user-character relationship dynamics
+  - "memory_focus": "general" for everything else
+- Then assign "memory_tier":
+  - "core" for user identity, current main life thread, or key relationship nodes
+  - "active" for currently relevant but more temporary memories
+  - "ambient" for lower-priority fragments
+- Treat repeated confessions, direct affection, explicit "I like/love you", relationship confirmation, or clear emotional demands toward the character as key relationship nodes. These should usually be stored as "memory_focus": "relationship" and "memory_tier": "core".
 - Surprise 1-3: Routine, completely expected.
 - Surprise 4-6: Mildly interesting, personal details.
 - Surprise 7-8: Emotional, unexpected events.
@@ -2230,6 +2535,8 @@ Output exactly in this JSON format (and nothing else):
   "memories": [
     {
       "memory_type": "event | fact | preference | relationship | plan | emotion",
+      "memory_tier": "core | active | ambient",
+      "memory_focus": "user_profile | user_current_arc | relationship | general",
       "summary": "自然中文短句，适合直接显示在记忆卡片上",
       "content": "更完整的中文说明，1到2句",
       "time": "recent past",
@@ -2347,6 +2654,8 @@ Output exactly in this JSON format (and nothing else):
             });
             console.error(`[Memory] Sweep failed for ${character.id}:`, e.message);
             return 0;
+        } finally {
+            activeSweepJobs.delete(sweepKey);
         }
     }
 
@@ -2395,6 +2704,8 @@ Output exactly in this JSON format (and nothing else):
                             character_id: String(characterId),
                             group_id: groupId || '',
                             memory_type: normalizedMemory.memory_type || 'event',
+                            memory_tier: normalizedMemory.memory_tier || 'ambient',
+                            memory_focus: normalizedMemory.memory_focus || 'general',
                             importance: normalizedMemory.importance || 5,
                             created_at: existing?.created_at || Date.now(),
                             time: normalizedMemory.time || '',
@@ -2430,6 +2741,8 @@ Output exactly in this JSON format (and nothing else):
                     memory_id: memoryId,
                     surprise_score: normalizedMemory.surprise_score || 5,
                     memory_type: normalizedMemory.memory_type || 'event',
+                    memory_tier: normalizedMemory.memory_tier || 'ambient',
+                    memory_focus: normalizedMemory.memory_focus || 'general',
                     dedupe_key: normalizedMemory.dedupe_key || '',
                     retrieval_weight: retrievalWeight
                 }
