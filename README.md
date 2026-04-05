@@ -1,6 +1,17 @@
 
 # ChatPulse
 
+> [!IMPORTANT]
+> **2026-04-05 最新修复说明**
+> - 修掉了 Claude 私聊里 RAG `retrieve` 阶段会卡死的问题，根因是聊天链里不该现场自愈重建索引。
+> - 实时聊天链默认不再让本地 `vectra` 参与自动回退，当前主路径是 `Qdrant + SQLite 正文 + lexical/semantic fallback`。
+> - 关闭了默认的额外 query expansion，小模型不再在检索前多绕一层。
+> - 放松了 `profile` 槽过滤，轻度关系化的用户画像记忆不再被白白筛掉。
+> - 连续相同的 API 报错现在会在私聊里合并显示，不再一条一条刷屏。
+> - 商业街管理员赠送物品/钱/体力现在会按正常私聊链触发角色反馈并进入后续上下文。
+>
+> 详细说明见下方中文的“**2026-04-05 修复记录**”和英文的 “**2026-04-05 Fix Notes**”。
+
 <p align="center">
   <a href="#简体中文">简体中文</a> |
   <a href="#english">English</a>
