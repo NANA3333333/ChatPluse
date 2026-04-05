@@ -135,6 +135,54 @@ async function parseLlmResponse(response) {
     }
 }
 
+function safeJsonPreview(value, maxLength = 4000) {
+    try {
+        const text = typeof value === 'string' ? value : JSON.stringify(value);
+        if (!text) return '';
+        return text.length > maxLength ? `${text.slice(0, maxLength)}...<truncated>` : text;
+    } catch (_) {
+        return String(value || '').slice(0, maxLength);
+    }
+}
+
+function summarizeMessages(messages = []) {
+    return (messages || []).map((msg, index) => {
+        const content = msg?.content;
+        const isArrayContent = Array.isArray(content);
+        const previewSource = typeof content === 'string'
+            ? content
+            : (isArrayContent ? safeJsonPreview(content, 600) : safeJsonPreview(content, 300));
+        return {
+            index,
+            role: msg?.role || 'unknown',
+            content_type: isArrayContent ? 'array' : typeof content,
+            content_length: typeof previewSource === 'string' ? previewSource.length : 0,
+            preview: typeof previewSource === 'string' ? previewSource.slice(0, 300) : ''
+        };
+    });
+}
+
+function buildRequestBody({ model, messages, maxTokens, temperature, presencePenalty = 0, frequencyPenalty = 0 }) {
+    return {
+        ...(temperature == null
+            ? {
+                model,
+                messages,
+                max_tokens: maxTokens,
+                presence_penalty: Number(presencePenalty || 0),
+                frequency_penalty: Number(frequencyPenalty || 0),
+            }
+            : {
+                model,
+                messages,
+                max_tokens: maxTokens,
+                temperature,
+                presence_penalty: Number(presencePenalty || 0),
+                frequency_penalty: Number(frequencyPenalty || 0),
+            }),
+    };
+}
+
 /**
  * Universal adapter for making calls to OpenAI-compatible LLM endpoints.
  * @param {Object} options
@@ -152,6 +200,7 @@ async function callLLM({
     key,
     model,
     messages,
+    uncachedMessages = null,
     maxTokens = 2000,
     temperature,
     presencePenalty = 0,
@@ -237,6 +286,14 @@ async function callLLM({
             }
 
             const requestVariants = [];
+            const uncachedDebugRequestBody = buildRequestBody({
+                model,
+                messages: Array.isArray(uncachedMessages) && uncachedMessages.length ? uncachedMessages : finalMessages,
+                maxTokens,
+                temperature: attemptTemp,
+                presencePenalty,
+                frequencyPenalty
+            });
             if (supportsClaudePromptCacheHints(model, enablePromptCacheHints)) {
                 requestVariants.push({
                     label: 'claude_prompt_cache',
@@ -254,6 +311,14 @@ async function callLLM({
             let lastVariantError = null;
             for (const variant of requestVariants) {
                 const attemptStartedAt = Date.now();
+                const requestBody = buildRequestBody({
+                    model,
+                    messages: variant.messages,
+                    maxTokens,
+                    temperature: attemptTemp,
+                    presencePenalty,
+                    frequencyPenalty
+                });
                 try {
                     if (typeof debugAttempt === 'function') {
                         debugAttempt({
@@ -267,7 +332,10 @@ async function callLLM({
                             presencePenalty,
                             frequencyPenalty,
                             messageCount: Array.isArray(variant.messages) ? variant.messages.length : 0,
-                            promptCacheHint: variant.label === 'claude_prompt_cache'
+                            promptCacheHint: variant.label === 'claude_prompt_cache',
+                            requestBodyPreview: safeJsonPreview(requestBody, 12000),
+                            uncachedRequestBodyPreview: safeJsonPreview(uncachedDebugRequestBody, 12000),
+                            messageSummary: summarizeMessages(variant.messages)
                         });
                     }
                 } catch (e) {
@@ -281,24 +349,7 @@ async function callLLM({
                         'Authorization': `Bearer ${key}`,
                         ...variant.headers,
                     },
-                    body: JSON.stringify({
-                        ...(attemptTemp == null
-                            ? {
-                                model,
-                                messages: variant.messages,
-                                max_tokens: maxTokens,
-                                presence_penalty: Number(presencePenalty || 0),
-                                frequency_penalty: Number(frequencyPenalty || 0),
-                            }
-                            : {
-                                model,
-                                messages: variant.messages,
-                                max_tokens: maxTokens,
-                                temperature: attemptTemp,
-                                presence_penalty: Number(presencePenalty || 0),
-                                frequency_penalty: Number(frequencyPenalty || 0),
-                            }),
-                    }),
+                    body: JSON.stringify(requestBody),
                 });
 
                 if (!response.ok) {
@@ -315,7 +366,11 @@ async function callLLM({
                                 status: response.status,
                                 durationMs: Date.now() - attemptStartedAt,
                                 error: lastVariantError.message,
-                                promptCacheHint: variant.label === 'claude_prompt_cache'
+                                promptCacheHint: variant.label === 'claude_prompt_cache',
+                                requestBodyPreview: safeJsonPreview(requestBody, 12000),
+                                uncachedRequestBodyPreview: safeJsonPreview(uncachedDebugRequestBody, 12000),
+                                messageSummary: summarizeMessages(variant.messages),
+                                responsePreview: safeJsonPreview(errorText, 12000)
                             });
                         }
                     } catch (e) {
@@ -339,14 +394,18 @@ async function callLLM({
                             variant: variant.label,
                             url,
                             model,
-                            status: response.status,
-                            durationMs: Date.now() - attemptStartedAt,
-                            usage: data?.usage || null,
-                            finishReason: data?.choices?.[0]?.finish_reason || 'unknown',
-                            promptCacheHint: variant.label === 'claude_prompt_cache'
-                        });
-                    }
-                } catch (e) {
+                                status: response.status,
+                                durationMs: Date.now() - attemptStartedAt,
+                                usage: data?.usage || null,
+                                finishReason: data?.choices?.[0]?.finish_reason || 'unknown',
+                                promptCacheHint: variant.label === 'claude_prompt_cache',
+                                requestBodyPreview: safeJsonPreview(requestBody, 12000),
+                                uncachedRequestBodyPreview: safeJsonPreview(uncachedDebugRequestBody, 12000),
+                                messageSummary: summarizeMessages(variant.messages),
+                                responsePreview: safeJsonPreview(data, 12000)
+                            });
+                        }
+                    } catch (e) {
                     console.warn('[LLM Debug] Failed to record attempt success:', e.message);
                 }
                 lastVariantError = null;

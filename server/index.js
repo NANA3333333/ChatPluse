@@ -37,7 +37,7 @@ function getJwtSecret() {
 }
 const JWT_SECRET = getJwtSecret();
 const { getEngine } = require('./engine');
-const { getMemory, extractMemoryFromContext, setWsClientsResolver } = require('./memory');
+const { getMemory, extractMemoryFromContext, setWsClientsResolver, getEmbeddingDebugStatus } = require('./memory');
 const { getTokenCount } = require('./utils/tokenizer');
 const qdrant = require('./qdrant');
 
@@ -46,6 +46,61 @@ function getDigestTailWindowSize(contextLimit, availableCount) {
     const safeAvailable = Math.max(0, Number(availableCount) || 0);
     if (safeAvailable <= 0) return 0;
     return Math.min(safeAvailable, Math.max(3, Math.min(60, Math.ceil(safeLimit * 0.3))));
+}
+
+function extractMessagePlainText(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content.map(part => {
+            if (typeof part === 'string') return part;
+            if (part && typeof part === 'object') {
+                return String(part.text || part.content || '');
+            }
+            return '';
+        }).join('\n');
+    }
+    if (content && typeof content === 'object') {
+        return String(content.text || content.content || '');
+    }
+    return '';
+}
+
+function buildClaudePromptCacheEstimateMessages(messages = []) {
+    let markedCount = 0;
+    return (messages || []).map((msg, index) => {
+        if (!msg || typeof msg !== 'object') return msg;
+        const clone = { ...msg };
+        const shouldMark = markedCount < 2 && (
+            clone.role === 'system' ||
+            (index > 0 && typeof clone.content === 'string' && clone.content.length >= 512)
+        );
+        if (shouldMark && typeof clone.content === 'string') {
+            clone.content = [{
+                type: 'text',
+                text: clone.content,
+                cache_control: { type: 'ephemeral' }
+            }];
+            markedCount += 1;
+        }
+        return clone;
+    });
+}
+
+function estimateJsonWrapperTokensForMessages(messages = []) {
+    const safeMessages = Array.isArray(messages) ? messages : [];
+    const plainTextTokens = safeMessages.reduce((sum, message) => {
+        return sum + getTokenCount(extractMessagePlainText(message?.content || ''));
+    }, 0);
+    const messagesJsonTokens = getTokenCount(JSON.stringify(safeMessages));
+    return {
+        plainTextTokens,
+        messagesJsonTokens,
+        wrapperTokens: Math.max(0, messagesJsonTokens - plainTextTokens)
+    };
+}
+
+function estimateRequestBodyTokens(body) {
+    return getTokenCount(JSON.stringify(body || {}));
 }
 const multer = require('multer');
 const { callLLM } = require('./llm');
@@ -585,6 +640,19 @@ app.get('/api/user/memory-status', authMiddleware, async (req, res) => {
 });
 
 // 1. Get all characters (Contacts list)
+app.get('/api/system/embedding-status', authMiddleware, async (req, res) => {
+    try {
+        const status = getEmbeddingDebugStatus();
+        res.json({
+            success: true,
+            embedding: status,
+            now: Date.now()
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/api/characters', authMiddleware, (req, res) => {
     const db = req.db;
     const engine = req.engine;
@@ -1572,37 +1640,100 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
             role: m.role === 'character' ? 'assistant' : 'user',
             content: String(m.content || '')
         }));
+        const estimatedWithCacheMessagesRaw = [
+            { role: 'system', content: finalSystemPrompt },
+            ...transformedHistory
+        ];
+        const estimatedWithoutCacheMessagesRaw = [
+            {
+                role: 'system',
+                content: `${systemPromptPreamble}\n${getDefaultGuidelines()}${supplementalCharacterPrompt ? `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}` : ''}${antiRepeat}`
+            },
+            ...transformedFullHistory
+        ];
+        const useClaudePromptCacheShape = String(character.model_name || '').toLowerCase().includes('claude');
+        const estimatedWithCacheMessages = useClaudePromptCacheShape
+            ? buildClaudePromptCacheEstimateMessages(estimatedWithCacheMessagesRaw)
+            : estimatedWithCacheMessagesRaw;
+        const estimatedWithoutCacheMessages = useClaudePromptCacheShape
+            ? buildClaudePromptCacheEstimateMessages(estimatedWithoutCacheMessagesRaw)
+            : estimatedWithoutCacheMessagesRaw;
+        const estimatedWithCacheMessageStats = estimateJsonWrapperTokensForMessages(estimatedWithCacheMessages);
+        const estimatedWithoutCacheMessageStats = estimateJsonWrapperTokensForMessages(estimatedWithoutCacheMessages);
         const estimatedHistoryTokens = transformedHistory.reduce((sum, msg) => sum + getTokenCount(msg.content) + 6, 0);
         const estimatedFullHistoryTokens = transformedFullHistory.reduce((sum, msg) => sum + getTokenCount(msg.content) + 6, 0);
         const estimatedSystemPromptTokens = getTokenCount(finalSystemPrompt);
         const estimatedSystemPromptWithoutDigestTokens = getTokenCount(`${systemPromptPreamble}\n${getDefaultGuidelines()}${supplementalCharacterPrompt ? `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}` : ''}${antiRepeat}`);
         const estimatedMessageEnvelopeTokens = 8 + transformedHistory.length * 2;
         const estimatedFullMessageEnvelopeTokens = 8 + transformedFullHistory.length * 2;
-        const finalPromptEstimate = estimatedSystemPromptTokens + estimatedHistoryTokens + estimatedMessageEnvelopeTokens;
+        const estimatedWithCacheRequestBody = {
+            model: character.model_name,
+            messages: estimatedWithCacheMessages,
+            max_tokens: Number(character.max_tokens || 2000),
+            presence_penalty: Number(character.presence_penalty || 0),
+            frequency_penalty: Number(character.frequency_penalty || 0),
+        };
+        const estimatedWithoutCacheRequestBody = {
+            model: character.model_name,
+            messages: estimatedWithoutCacheMessages,
+            max_tokens: Number(character.max_tokens || 2000),
+            presence_penalty: Number(character.presence_penalty || 0),
+            frequency_penalty: Number(character.frequency_penalty || 0),
+        };
+        const estimatedWithoutCacheTokens = estimateRequestBodyTokens(estimatedWithoutCacheRequestBody);
+        const estimatedWithCacheTokens = estimateRequestBodyTokens(estimatedWithCacheRequestBody);
+        const finalPromptEstimate = estimatedWithCacheTokens;
 
         const estimatedDigestTokens = conversationDigest?.digest_text
             ? getTokenCount(memory.formatConversationDigestForPrompt(conversationDigest) || '')
             : 0;
         const estimatedTailTokens = getTokenCount(x_chat_text);
-        const estimatedWithoutCacheTokens = estimatedSystemPromptWithoutDigestTokens + estimatedFullHistoryTokens + estimatedFullMessageEnvelopeTokens;
-        const estimatedWithCacheTokens = estimatedSystemPromptTokens + estimatedHistoryTokens + estimatedMessageEnvelopeTokens;
-        const estimatedWithoutCacheBaseTokens = Math.max(
+        const estimatedWithoutCacheXTokens = estimatedFullHistoryTokens;
+        const estimatedWithCacheXTokens = Math.max(0, estimatedHistoryTokens - estimatedTailTokens);
+        const estimatedComparableBaseTokens = Math.max(
+            0,
+            estimatedSystemPromptWithoutDigestTokens
+            - Number(breakdown.city_x_y || 0)
+            - Number(breakdown.z_memory || 0)
+            - Number(breakdown.moments || 0)
+            - Number(breakdown.q_impression || 0)
+        );
+        const estimatedWithoutCacheOtherTokens = Math.max(
             0,
             estimatedWithoutCacheTokens
-            - estimatedFullHistoryTokens
-            - (breakdown.city_x_y || 0)
-            - (breakdown.z_memory || 0)
-            - (breakdown.moments || 0)
-            - (breakdown.q_impression || 0)
+            - estimatedComparableBaseTokens
+            - estimatedWithoutCacheXTokens
+            - Number(breakdown.city_x_y || 0)
+            - Number(breakdown.z_memory || 0)
+            - Number(breakdown.moments || 0)
+            - Number(breakdown.q_impression || 0)
+        );
+        const estimatedWithCacheOtherTokens = Math.max(
+            0,
+            estimatedWithCacheTokens
+            - estimatedComparableBaseTokens
+            - estimatedDigestTokens
+            - estimatedWithCacheXTokens
+            - estimatedTailTokens
+            - Number(breakdown.city_x_y || 0)
+            - Number(breakdown.z_memory || 0)
+            - Number(breakdown.moments || 0)
+            - Number(breakdown.q_impression || 0)
+        );
+        const estimatedWithoutCacheBaseTokens = Math.max(
+            0,
+            estimatedComparableBaseTokens
         );
         const estimatedWithCacheBaseTokens = Math.max(
             0,
-            estimatedWithCacheTokens
-            - estimatedHistoryTokens
-            - (breakdown.city_x_y || 0)
-            - (breakdown.z_memory || 0)
-            - (breakdown.moments || 0)
-            - (breakdown.q_impression || 0)
+            estimatedComparableBaseTokens
+        );
+        const estimatedRagInjectedTokens = Math.max(
+            0,
+            Number(breakdown.city_x_y || 0)
+            + Number(breakdown.z_memory || 0)
+            + Number(breakdown.moments || 0)
+            + Number(breakdown.q_impression || 0)
         );
         breakdown.system_full = estimatedSystemPromptTokens;
         breakdown.history_full = estimatedHistoryTokens;
@@ -1724,6 +1855,126 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 WHERE character_id = ?
             `).get(charId)
             : null;
+        const latestConversationSnapshotRow = rawDb
+            ? rawDb.prepare(`
+                SELECT meta, timestamp
+                FROM llm_debug_logs
+                WHERE character_id = ?
+                  AND direction = 'input'
+                  AND context_type = 'private_reply'
+                ORDER BY id DESC
+                LIMIT 1
+            `).get(charId)
+            : null;
+        const latestConversationAttemptRow = rawDb
+            ? rawDb.prepare(`
+                SELECT meta, timestamp
+                FROM llm_debug_logs
+                WHERE character_id = ?
+                  AND direction = 'attempt_result'
+                  AND context_type = 'private_reply'
+                ORDER BY id DESC
+                LIMIT 1
+            `).get(charId)
+            : null;
+        let latestConversationSnapshot = null;
+        try {
+            latestConversationSnapshot = latestConversationSnapshotRow?.meta
+                ? JSON.parse(latestConversationSnapshotRow.meta)?.context_snapshot || null
+                : null;
+        } catch (_) {
+            latestConversationSnapshot = null;
+        }
+        let latestConversationAttemptMeta = null;
+        try {
+            latestConversationAttemptMeta = latestConversationAttemptRow?.meta
+                ? JSON.parse(latestConversationAttemptRow.meta)
+                : null;
+        } catch (_) {
+            latestConversationAttemptMeta = null;
+        }
+
+        const lastConversationPromptTokens = Number(latestConversationUsageRow?.prompt_tokens || 0);
+        let loggedCachedRequestBodyTokens = 0;
+        let loggedUncachedRequestBodyTokens = 0;
+        try {
+            if (latestConversationAttemptMeta?.requestBodyPreview) {
+                loggedCachedRequestBodyTokens = getTokenCount(latestConversationAttemptMeta.requestBodyPreview);
+                const parsedCachedRequestBody = JSON.parse(latestConversationAttemptMeta.requestBodyPreview);
+                loggedCachedRequestBodyTokens = getTokenCount(JSON.stringify(parsedCachedRequestBody));
+            }
+            if (latestConversationAttemptMeta?.uncachedRequestBodyPreview) {
+                const parsedUncachedRequestBody = JSON.parse(latestConversationAttemptMeta.uncachedRequestBodyPreview);
+                loggedUncachedRequestBodyTokens = getTokenCount(JSON.stringify(parsedUncachedRequestBody));
+            }
+        } catch (e) {
+            console.warn('[API] Failed to derive logged cached/uncached request body tokens:', e.message);
+        }
+        const validLoggedUncachedRequestBodyTokens = loggedUncachedRequestBodyTokens > loggedCachedRequestBodyTokens
+            ? loggedUncachedRequestBodyTokens
+            : 0;
+        const snapshotWithoutCacheTokens = Number(
+            validLoggedUncachedRequestBodyTokens
+            || latestConversationSnapshot?.estimated_without_cache_tokens
+            || estimatedWithoutCacheTokens
+            || 0
+        );
+        const snapshotWithCacheTokens = Number(
+            loggedCachedRequestBodyTokens
+            || latestConversationSnapshot?.estimated_with_cache_tokens
+            || estimatedWithCacheTokens
+            || 0
+        );
+        const snapshotRagInjectedTokens = Math.max(
+            0,
+            Number(
+                latestConversationSnapshot?.estimated_rag_injected_tokens
+                || latestConversationSnapshot?.breakdown?.z_memory
+                || estimatedRagInjectedTokens
+                || 0
+            )
+        );
+        let lastConversationRequestBodyTokens = 0;
+        let lastConversationMessagesJsonTokens = 0;
+        let lastConversationPlainMessageTokens = 0;
+        let lastConversationJsonWrapperTokens = 0;
+        let lastConversationOtherTokens = 0;
+        try {
+            if (latestConversationAttemptMeta?.requestBodyPreview) {
+                const requestBody = JSON.parse(latestConversationAttemptMeta.requestBodyPreview);
+                const requestMessages = Array.isArray(requestBody?.messages) ? requestBody.messages : [];
+                lastConversationRequestBodyTokens = getTokenCount(JSON.stringify(requestBody));
+                lastConversationMessagesJsonTokens = getTokenCount(JSON.stringify(requestMessages));
+                lastConversationPlainMessageTokens = requestMessages.reduce((sum, message) => {
+                    return sum + getTokenCount(extractMessagePlainText(message?.content || ''));
+                }, 0);
+                lastConversationJsonWrapperTokens = Math.max(
+                    0,
+                    lastConversationMessagesJsonTokens - lastConversationPlainMessageTokens
+                );
+                lastConversationOtherTokens = Math.max(
+                    0,
+                    lastConversationRequestBodyTokens - (
+                        getTokenCount(extractMessagePlainText(requestMessages?.[0]?.content || ''))
+                        + requestMessages.slice(1).reduce((sum, message) => {
+                            return sum + getTokenCount(extractMessagePlainText(message?.content || ''));
+                        }, 0)
+                    )
+                );
+            }
+        } catch (e) {
+            console.warn('[API] Failed to derive JSON wrapper token stats:', e.message);
+        }
+        const cacheOnlyWithoutRagBaselineTokens = Math.max(0, snapshotWithoutCacheTokens - snapshotRagInjectedTokens);
+        const cacheOnlyActualInputTokens = Math.max(0, lastConversationPromptTokens - snapshotRagInjectedTokens);
+        const cacheOnlySavedTokens = Math.max(0, cacheOnlyWithoutRagBaselineTokens - cacheOnlyActualInputTokens);
+        const cacheOnlyHitRatePercent = cacheOnlyWithoutRagBaselineTokens > 0
+            ? Math.round((cacheOnlySavedTokens / cacheOnlyWithoutRagBaselineTokens) * 100)
+            : 0;
+        const totalSavedIncludingRagTokens = Math.max(0, snapshotWithoutCacheTokens - lastConversationPromptTokens);
+        const totalSavedIncludingRagRatePercent = snapshotWithoutCacheTokens > 0
+            ? Math.round((totalSavedIncludingRagTokens / snapshotWithoutCacheTokens) * 100)
+            : 0;
 
         res.json({
             success: true,
@@ -1744,10 +1995,15 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 estimated_without_cache_tokens: estimatedWithoutCacheTokens,
                 estimated_with_cache_tokens: estimatedWithCacheTokens,
                 estimated_tail_tokens: estimatedTailTokens,
+                estimated_without_cache_x_tokens: estimatedWithoutCacheXTokens,
+                estimated_with_cache_x_tokens: estimatedWithCacheXTokens,
                 estimated_full_history_tokens: estimatedFullHistoryTokens,
                 estimated_full_message_envelope_tokens: estimatedFullMessageEnvelopeTokens,
                 estimated_without_cache_base_tokens: estimatedWithoutCacheBaseTokens,
                 estimated_with_cache_base_tokens: estimatedWithCacheBaseTokens,
+                estimated_without_cache_other_tokens: estimatedWithoutCacheOtherTokens,
+                estimated_with_cache_other_tokens: estimatedWithCacheOtherTokens,
+                estimated_rag_injected_tokens: snapshotRagInjectedTokens,
                 actual_prompt_tokens_total: mainUsageRow?.prompt_tokens || 0,
                 actual_completion_tokens_total: mainUsageRow?.completion_tokens || 0,
                 actual_request_count: mainUsageRow?.request_count || 0,
@@ -1786,10 +2042,24 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 last_actual_completion_tokens: latestUsageRow?.completion_tokens || 0,
                 last_actual_context_type: latestUsageRow?.context_type || '',
                 last_actual_timestamp: latestUsageRow?.timestamp || 0,
-                last_conversation_prompt_tokens: latestConversationUsageRow?.prompt_tokens || 0,
+                last_conversation_prompt_tokens: lastConversationPromptTokens,
                 last_conversation_completion_tokens: latestConversationUsageRow?.completion_tokens || 0,
                 last_conversation_context_type: latestConversationUsageRow?.context_type || '',
-                last_conversation_timestamp: latestConversationUsageRow?.timestamp || 0
+                last_conversation_timestamp: latestConversationUsageRow?.timestamp || 0,
+                last_conversation_snapshot_timestamp: Number(latestConversationSnapshot?.timestamp || latestConversationSnapshotRow?.timestamp || 0),
+                last_conversation_estimated_without_cache_tokens: snapshotWithoutCacheTokens,
+                last_conversation_estimated_with_cache_tokens: snapshotWithCacheTokens,
+                last_conversation_request_body_tokens: lastConversationRequestBodyTokens,
+                last_conversation_messages_json_tokens: lastConversationMessagesJsonTokens,
+                last_conversation_plain_message_tokens: lastConversationPlainMessageTokens,
+                last_conversation_json_wrapper_tokens: lastConversationJsonWrapperTokens,
+                last_conversation_other_tokens: lastConversationOtherTokens,
+                cache_only_without_rag_baseline_tokens: cacheOnlyWithoutRagBaselineTokens,
+                cache_only_actual_input_tokens: cacheOnlyActualInputTokens,
+                cache_only_saved_tokens: cacheOnlySavedTokens,
+                cache_only_hit_rate_percent: cacheOnlyHitRatePercent,
+                total_saved_including_rag_tokens: totalSavedIncludingRagTokens,
+                total_saved_including_rag_rate_percent: totalSavedIncludingRagRatePercent
             }
         });
     } catch (e) {

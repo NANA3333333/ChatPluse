@@ -39,6 +39,22 @@
   <script>
     (function () {
       try {
+        var url = new URL(window.location.href);
+        if (url.searchParams.get('resetLocalState') === '1') {
+          [
+            'cp_custom_css',
+            'cp_theme_config',
+            'cp_theme',
+            'cp_token',
+            'cp_user',
+            'cp_avatar'
+          ].forEach(function (key) {
+            localStorage.removeItem(key);
+          });
+          url.searchParams.delete('resetLocalState');
+          window.history.replaceState({}, '', url.pathname + url.search + url.hash);
+        }
+
         var theme = localStorage.getItem('cp_theme');
         if (theme) document.documentElement.setAttribute('data-theme', theme);
         var themeConfig = localStorage.getItem('cp_theme_config');

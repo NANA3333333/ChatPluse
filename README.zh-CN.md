@@ -116,10 +116,29 @@ chmod +x install-and-start.sh
 Qdrant 的行为：
 
 - 如果 Qdrant 可用，系统优先使用 Qdrant
-- 如果 Qdrant 不可用，系统会自动回退到本地 vectra
+- 实时私聊/群聊 RAG 现在默认不再依赖本地 vectra 作为自动回退
 - Qdrant collection 会在首次写入记忆时按需自动创建
 
-也就是说，即使没有启动 Qdrant，新人依然可以把项目在本地跑起来。
+也就是说，项目仍然可以在本地跑起来，但实时记忆检索现在建议保持 Qdrant 可用。
+
+## 2026-04-05 修复记录
+
+今天这一轮主要修的是 Claude 私聊链、RAG 检索链和几个前端体验问题：
+
+- 修掉了聊天链里“边聊天边自愈重建索引”的设计。之前这会导致 `retrieve` 卡死、风扇狂转、RAG 长时间停在“召回”阶段。现在实时聊天只负责查，不再在对话现场修索引。
+- 关闭了实时链中的 vectra 参与。当前默认只走 `Qdrant + SQLite 正文 + lexical/semantic fallback`，不再让老的本地 vectra 索引和 Qdrant 打架。只有显式设置 `LOCAL_VECTOR_INDEX_ENABLED=1` 才会重新启用。
+- 关闭了“检索前再次调用小模型扩写 query”的默认行为。只有显式设置 `MEMORY_QUERY_EXPANSION_ENABLED=1` 才会开启，避免中转站或额外小模型把 RAG 前置链拖慢。
+- 给 RAG 检索补了更细的调试日志，能看到 `retrieve`、每个 slot 的开始/结束、Qdrant 查询、fallback 查询等阶段，方便以后定位“卡在 topics / rewrite / retrieve / output 的哪一步”。
+- 新增了 `GET /api/system/embedding-status` 调试接口，用来观察本地 `bge-m3` embedding 层是否真的在工作、是否报错、最近一次耗时如何。
+- 放松了 `profile` 槽的过滤规则。以前像“占有欲、撒娇习惯、互动风格、边界感”这种明明属于用户画像的记忆，会因为带一点关系味被全刷掉；现在这类轻度关系化的用户画像可以正常进入 RAG。
+- 商业街管理员发钱、补体力、送物品，现在会按正常私聊链触发角色反馈，并像普通聊天一样进入后续上下文；赠送事件文案也统一成“用户名给角色送了什么”。
+- 私聊/群聊 emoji 面板补了更多常用表情，并修掉了之前因编码问题变成 `??` 的显示错误。
+- 连续相同的系统 API 报错现在会在私聊里合并成一条显示，并标注“连续出现 N 次”，避免同一类 503/500 报错刷屏。
+
+补充说明：
+
+- 当前看到的 Claude `503 model_not_found / no available channel` 更像是中转站线路问题，不是本地 RAG 卡死。
+- SQLite 里存的是记忆正文，Qdrant 存的是向量索引；今天暴露的问题不是“记忆内容丢了”，而是“索引状态检查 + 聊天现场自愈”这套设计会把实时对话拖死。
 
 ## 可选：启动 Qdrant
 

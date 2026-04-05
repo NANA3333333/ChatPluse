@@ -338,20 +338,36 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
 
     const estimatedWithoutCache = contextStats?.estimated_without_cache_tokens ?? 0;
     const estimatedWithCache = contextStats?.estimated_with_cache_tokens ?? 0;
+    const lastRoundEstimatedWithoutCache = contextStats?.last_conversation_estimated_without_cache_tokens
+        ?? contextStats?.estimated_without_cache_tokens
+        ?? 0;
     const estimatedTailTokens = contextStats?.estimated_tail_tokens ?? 0;
+    const estimatedDigestTokens = contextStats?.estimated_digest_tokens ?? 0;
     const estimatedWithoutCacheBase = contextStats?.estimated_without_cache_base_tokens ?? 0;
     const estimatedWithCacheBase = contextStats?.estimated_with_cache_base_tokens ?? 0;
-    const estimatedWithoutCacheX = contextStats?.estimated_full_history_tokens ?? 0;
-    const estimatedWithCacheX = contextStats?.estimated_history_tokens ?? 0;
+    const estimatedWithoutCacheOther = contextStats?.estimated_without_cache_other_tokens ?? 0;
+    const estimatedWithCacheOther = contextStats?.estimated_with_cache_other_tokens ?? 0;
+    const estimatedWithoutCacheX = contextStats?.estimated_without_cache_x_tokens
+        ?? contextStats?.estimated_full_history_tokens
+        ?? 0;
+    const estimatedWithCacheX = contextStats?.estimated_with_cache_x_tokens
+        ?? contextStats?.estimated_history_tokens
+        ?? 0;
     const estimatedY = contextStats?.city_x_y ?? 0;
     const estimatedZ = contextStats?.z_memory ?? 0;
     const estimatedMoments = contextStats?.moments ?? 0;
     const estimatedO = contextStats?.q_impression ?? 0;
+    const estimatedRagInjectedTokens = contextStats?.estimated_rag_injected_tokens ?? 0;
+    const estimatedOtherTokens = contextStats?.last_conversation_other_tokens ?? 0;
     const actualInputTokens = contextStats?.last_conversation_prompt_tokens || contextStats?.last_actual_prompt_tokens || 0;
-    const actualSavedTokens = Math.max(0, estimatedWithoutCache - actualInputTokens);
-    const actualSavedRate = estimatedWithoutCache > 0
-        ? Math.round((actualSavedTokens / estimatedWithoutCache) * 100)
+    const actualSavedTokens = Math.max(0, lastRoundEstimatedWithoutCache - actualInputTokens);
+    const actualSavedRate = lastRoundEstimatedWithoutCache > 0
+        ? Math.round((actualSavedTokens / lastRoundEstimatedWithoutCache) * 100)
         : 0;
+    const cacheOnlyHitRatePercent = contextStats?.cache_only_hit_rate_percent ?? 0;
+    const cacheOnlySavedTokens = contextStats?.cache_only_saved_tokens ?? 0;
+    const totalSavedIncludingRagTokens = contextStats?.total_saved_including_rag_tokens ?? 0;
+    const totalSavedIncludingRagRatePercent = contextStats?.total_saved_including_rag_rate_percent ?? 0;
 
     const formatEmotionLogDelta = (label, before, after) => {
         if (before == null && after == null) return null;
@@ -515,15 +531,23 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Deep Memory (Z)' : '深层记忆调用 (Z参数)'}</span><span style={{ fontWeight: '500', color: '#7f8c8d' }}>{estimatedZ} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Moments Feed' : '朋友圈上下文'}</span><span style={{ fontWeight: '500', color: '#7f8c8d' }}>{estimatedMoments} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Impression History (Q)' : '往事印象注入 (Q参数)'}</span><span style={{ fontWeight: '500', color: '#c0392b' }}>{estimatedO} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Other Overhead' : '其他类 T'}</span><span style={{ fontWeight: '500', color: '#7c3aed' }}>{estimatedWithoutCacheOther} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px dashed #eee', paddingTop: '8px', marginTop: '4px' }}><span style={{ color: '#666', fontWeight: '600' }}>{lang === 'en' ? 'With Cache Breakdown' : '有缓存后预估明细'}</span><span style={{ fontWeight: '700', color: '#2c3e50' }}>{estimatedWithCache} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Base' : '基础设定与系统指令 (Base)'}</span><span style={{ fontWeight: '500', color: '#333' }}>{estimatedWithCacheBase} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Digest Summary' : '摘要 digest'}</span><span style={{ fontWeight: '500', color: '#2563eb' }}>{estimatedDigestTokens} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Private Window (X)' : '私聊上下文窗口 (X参数)'}</span><span style={{ fontWeight: '500', color: '#27ae60' }}>{estimatedWithCacheX} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'City Context (Y)' : '商业街环境感知 (Y参数)'}</span><span style={{ fontWeight: '500', color: '#e67e22' }}>{estimatedY} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Deep Memory (Z)' : '深层记忆调用 (Z参数)'}</span><span style={{ fontWeight: '500', color: '#7f8c8d' }}>{estimatedZ} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Moments Feed' : '朋友圈上下文'}</span><span style={{ fontWeight: '500', color: '#7f8c8d' }}>{estimatedMoments} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Impression History (Q)' : '往事印象注入 (Q参数)'}</span><span style={{ fontWeight: '500', color: '#c0392b' }}>{estimatedO} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Other Overhead' : '其他类 T'}</span><span style={{ fontWeight: '500', color: '#7c3aed' }}>{estimatedWithCacheOther} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Tail Tokens' : '尾巴 token'}</span><span style={{ fontWeight: '700', color: '#27ae60' }}>{estimatedTailTokens} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px dashed #eee', paddingTop: '8px', marginTop: '4px' }}><span style={{ color: '#666', fontWeight: '600' }}>{lang === 'en' ? 'Actual Input Tokens' : '实际输入 token'}</span><span style={{ fontWeight: '700', color: '#8e44ad' }}>{actualInputTokens} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Round RAG Injected' : '上一轮 RAG 注入 token'}</span><span style={{ fontWeight: '500', color: '#d97706' }}>{estimatedRagInjectedTokens} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Round Other Overhead' : '上一轮其他类 T'}</span><span style={{ fontWeight: '500', color: '#7c3aed' }}>{estimatedOtherTokens} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Cache Hit Rate (No RAG)' : '排除 RAG 的缓存命中率'}</span><span style={{ fontWeight: '500', color: '#2563eb' }}>{cacheOnlyHitRatePercent}%</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Cache Saved (No RAG)' : '排除 RAG 的缓存节约 token'}</span><span style={{ fontWeight: '500', color: '#2563eb' }}>{cacheOnlySavedTokens} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Cache + RAG Saved' : '缓存库 + RAG 总节约 token'}</span><span style={{ fontWeight: '500', color: '#16a34a' }}>{totalSavedIncludingRagTokens} T ({totalSavedIncludingRagRatePercent}%)</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px dashed #eee', paddingTop: '8px', marginTop: '4px' }}><span style={{ color: '#666', fontWeight: '600' }}>{lang === 'en' ? 'Memory Sweep Progress (W)' : '长时记忆消化积攒 (W参数)'}</span><span style={{ fontWeight: '500', color: (contextStats?.w_unsummarized_count ?? 0) >= (contextStats?.w_sweep_limit ?? 0) ? '#c0392b' : '#34495e' }}>{contextStats?.w_unsummarized_count ?? 0} / {contextStats?.w_sweep_limit ?? 0} {lang === 'en' ? 'msgs' : '条'}</span></div>
                             {!!contextStats?.w_last_error && <div style={{ marginTop: '6px', padding: '8px 10px', background: '#fff1f1', border: '1px solid #ffc0c0', borderRadius: '6px', color: '#c0392b', fontSize: '12px', lineHeight: 1.5 }}><strong>{lang === 'en' ? 'Sweep Error: ' : '整理失败：'}</strong>{contextStats.w_last_error}</div>}
                             {(contextStats?.w_last_run_at ?? 0) > 0 && <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Sweep Attempt' : '上次整理尝试'}</span><span style={{ fontWeight: '500', color: '#555' }}>{new Date(contextStats.w_last_run_at).toLocaleString()}</span></div>}

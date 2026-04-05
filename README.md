@@ -282,10 +282,29 @@ On first startup, the project automatically creates:
 Qdrant behavior:
 
 - Uses Qdrant when reachable
-- Falls back to local vectra when Qdrant is unavailable
+- Real-time private/group chat RAG no longer depends on local vectra as an automatic fallback by default
 - Creates Qdrant collections lazily on first memory write
 
-So the project is still runnable locally even without Qdrant.
+So the project is still runnable locally, but real-time memory retrieval is now expected to have Qdrant available.
+
+### 2026-04-05 Fix Notes
+
+Today’s work focused on the Claude private-chat path, the RAG retrieval pipeline, and a few front-end UX regressions:
+
+- Removed chat-time self-healing index rebuilds from the live retrieval path. Previously, a normal chat request could enter `retrieve`, decide the index looked unhealthy, and start rebuilding during the reply, which caused long hangs and heavy local CPU usage.
+- Disabled vectra in the real-time retrieval path by default. The current live path is effectively `Qdrant + SQLite memory content + lexical/semantic fallback`. Local vectra is now opt-in only via `LOCAL_VECTOR_INDEX_ENABLED=1`.
+- Disabled the extra “expand memory queries with another LLM call” step by default. It can still be re-enabled with `MEMORY_QUERY_EXPANSION_ENABLED=1`, but it no longer slows down the standard retrieval path out of the box.
+- Added finer-grained retrieval tracing so logs now show retrieve start/end, per-slot progress, Qdrant query phases, and fallback phases. This makes it much easier to tell whether a request is stuck in topics, rewrite, retrieve, or main output.
+- Added `GET /api/system/embedding-status` to inspect the local `bge-m3` embedding runtime: loaded state, active jobs, recent latency, and errors.
+- Relaxed profile-slot filtering so lightly relationship-tinted user-profile memories can still be injected. This fixes a case where valid profile memories were being retrieved and then discarded because they mentioned possessiveness, teasing style, or interaction habits.
+- City-manager gifting / money / stamina actions now go through the normal private-chat chain and can generate ordinary in-character feedback that becomes part of later conversation context.
+- Expanded the private/group emoji picker, fixed the temporary `??` encoding regression, and kept the wider popup layout.
+- Consecutive identical system API errors in private chat are now collapsed into a single visible message with a repeat count, instead of spamming multiple identical red bubbles.
+
+Notes:
+
+- Recent Claude `503 model_not_found / no available channel` failures look like upstream relay/channel issues, not local RAG hangs.
+- SQLite stores memory content, while Qdrant stores vector indices. The main issue uncovered today was not lost memory text; it was an unstable “index state check + self-heal during live chat” design.
 
 Optional Qdrant startup:
 

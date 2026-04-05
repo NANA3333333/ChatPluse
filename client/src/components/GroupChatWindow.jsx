@@ -22,7 +22,18 @@ function normalizeGroupMessages(list = []) {
         .map(({ __fallbackIndex, ...msg }) => msg);
 }
 
-const quickEmojis = ['😀', '😂', '🥺', '😡', '🥰', '👍', '🙏', '💔', '🔥', '✨', '🥳', '😭', '😎', '🙄', '🤔'];
+const quickEmojis = [
+    '\u{1F600}', '\u{1F601}', '\u{1F602}', '\u{1F923}', '\u{1F979}',
+    '\u{1F60A}', '\u{1F642}', '\u{1F609}', '\u{1F60D}', '\u{1F618}',
+    '\u{1F970}', '\u{1F60E}', '\u{1F914}', '\u{1F644}', '\u{1F634}',
+    '\u{1F62D}', '\u{1F621}', '\u{1F624}', '\u{1F97A}', '\u{1F633}',
+    '\u{1F917}', '\u{1FAF6}', '\u{1F44D}', '\u{1F44E}', '\u{1F64F}',
+    '\u{1F44F}', '\u{1F4AA}', '\u{1F494}', '\u{2764}\u{FE0F}', '\u{1F495}',
+    '\u{1F525}', '\u{2728}', '\u{1F389}', '\u{1F38A}', '\u{1F339}',
+    '\u{1F35C}', '\u{1F35A}', '\u{1F370}', '\u{2615}', '\u{1F9CB}',
+    '\u{1F381}', '\u{1F490}', '\u{1F436}', '\u{1F431}', '\u{1F319}',
+    '\u{2600}\u{FE0F}', '\u{26A1}', '\u{1F4A4}', '\u{1F440}', '\u{1F90D}'
+];
 
 /* ─── Red Packet Send Modal ─── */
 function RedPacketModal({ group, apiUrl, onClose, userWallet }) {
@@ -842,12 +853,12 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
                         </button>
 
                         {showEmojiPicker && (
-                            <div className="emoji-picker" style={{ position: 'absolute', bottom: '50px', left: '10px', backgroundColor: '#fff', border: '1px solid #ddd', borderRadius: '8px', padding: '10px', display: 'flex', flexWrap: 'wrap', gap: '5px', width: '220px', boxShadow: '0 -4px 12px rgba(0,0,0,0.1)', zIndex: 100 }}>
-                                <div style={{ width: '100%', display: 'flex', justifyContent: 'flex-end', marginBottom: '5px' }}>
+                            <div className="emoji-picker" style={{ position: 'absolute', bottom: '50px', left: '10px', backgroundColor: '#fff', border: '1px solid #ddd', borderRadius: '12px', padding: '12px 40px 12px 12px', display: 'grid', gridTemplateColumns: 'repeat(8, minmax(0, 1fr))', gap: '8px', width: 'min(420px, calc(100vw - 40px))', boxShadow: '0 -4px 12px rgba(0,0,0,0.1)', zIndex: 100 }}>
+                                <div style={{ position: 'absolute', top: '8px', right: '8px' }}>
                                     <button onClick={() => setShowEmojiPicker(false)} style={{ padding: '2px' }}><X size={14} /></button>
                                 </div>
                                 {quickEmojis.map(e => (
-                                    <span key={e} onClick={() => addEmoji(e)} style={{ fontSize: '20px', cursor: 'pointer', padding: '4px', borderRadius: '4px' }}>{e}</span>
+                                    <span key={e} onClick={() => addEmoji(e)} style={{ fontSize: '22px', cursor: 'pointer', padding: '6px', borderRadius: '8px', textAlign: 'center' }}>{e}</span>
                                 ))}
                             </div>
                         )}

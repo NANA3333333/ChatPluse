@@ -10,12 +10,35 @@ const qdrant = require('./qdrant');
 const LOCAL_EMBEDDING_MODEL = process.env.LOCAL_EMBEDDING_MODEL || 'Xenova/bge-m3';
 const LOCAL_EMBEDDING_DIM = Number(process.env.LOCAL_EMBEDDING_DIM || 1024);
 const LOCAL_EMBEDDING_INDEX_TAG = process.env.LOCAL_EMBEDDING_INDEX_TAG || 'bge_m3_1024';
+const MEMORY_QUERY_EXPANSION_ENABLED = process.env.MEMORY_QUERY_EXPANSION_ENABLED === '1';
+const LOCAL_VECTOR_INDEX_ENABLED = process.env.LOCAL_VECTOR_INDEX_ENABLED === '1';
 
 // Dynamic import for transformers.js
 let pipeline = null;
 let extractionDisabled = false;
 const embeddingCache = new Map();
+const embeddingInFlight = new Map();
 const EMBEDDING_CACHE_LIMIT = 256;
+const embeddingStats = {
+    model: LOCAL_EMBEDDING_MODEL,
+    dimension: LOCAL_EMBEDDING_DIM,
+    extractorState: 'idle',
+    activeCount: 0,
+    cacheSize: 0,
+    inflightSize: 0,
+    lastStartedAt: 0,
+    lastFinishedAt: 0,
+    lastDurationMs: 0,
+    lastError: '',
+    totalCalls: 0,
+    totalCacheHits: 0,
+    totalInflightHits: 0,
+    totalCompleted: 0,
+    totalFailures: 0,
+    slowestActiveTextPreview: '',
+    slowestActiveElapsedMs: 0
+};
+const activeEmbeddingJobs = new Map();
 
 let globalWsClientsResolver = null;
 const activeSweepJobs = new Set();
@@ -27,16 +50,38 @@ function setWsClientsResolver(resolver) {
 async function getExtractor() {
     if (extractionDisabled) return null;
     if (!pipeline) {
+        embeddingStats.extractorState = 'loading';
         try {
             const transformers = await import('@xenova/transformers');
             pipeline = await transformers.pipeline('feature-extraction', LOCAL_EMBEDDING_MODEL);
+            embeddingStats.extractorState = 'ready';
         } catch (e) {
             console.error('[Memory] Xenova/ONNX initialization failed. Disabling local embeddings. Error:', e.message);
             extractionDisabled = true;
+            embeddingStats.extractorState = 'failed';
+            embeddingStats.lastError = String(e.message || e);
             return null;
         }
     }
     return pipeline;
+}
+
+function refreshEmbeddingStats() {
+    embeddingStats.cacheSize = embeddingCache.size;
+    embeddingStats.inflightSize = embeddingInFlight.size;
+    embeddingStats.activeCount = activeEmbeddingJobs.size;
+    let slowestPreview = '';
+    let slowestElapsed = 0;
+    const now = Date.now();
+    for (const job of activeEmbeddingJobs.values()) {
+        const elapsed = Math.max(0, now - Number(job.startedAt || now));
+        if (elapsed >= slowestElapsed) {
+            slowestElapsed = elapsed;
+            slowestPreview = job.preview || '';
+        }
+    }
+    embeddingStats.slowestActiveTextPreview = slowestPreview;
+    embeddingStats.slowestActiveElapsedMs = slowestElapsed;
 }
 
 async function getEmbedding(text) {
@@ -44,22 +89,65 @@ async function getEmbedding(text) {
     if (!normalizedText) {
         return Array.from({ length: LOCAL_EMBEDDING_DIM }, () => 0);
     }
+    embeddingStats.totalCalls += 1;
     if (embeddingCache.has(normalizedText)) {
+        embeddingStats.totalCacheHits += 1;
+        refreshEmbeddingStats();
         return embeddingCache.get(normalizedText);
     }
-    const extractor = await getExtractor();
-    if (!extractor) {
-        // Return a zero-vector if local embeddings are broken
-        return Array.from({ length: LOCAL_EMBEDDING_DIM }, () => 0);
+    if (embeddingInFlight.has(normalizedText)) {
+        embeddingStats.totalInflightHits += 1;
+        refreshEmbeddingStats();
+        return embeddingInFlight.get(normalizedText);
     }
-    const output = await extractor(normalizedText, { pooling: 'mean', normalize: true });
-    const vector = Array.from(output.data);
-    embeddingCache.set(normalizedText, vector);
-    if (embeddingCache.size > EMBEDDING_CACHE_LIMIT) {
-        const oldestKey = embeddingCache.keys().next().value;
-        if (oldestKey) embeddingCache.delete(oldestKey);
+    const startedAt = Date.now();
+    const preview = normalizedText.slice(0, 80);
+    activeEmbeddingJobs.set(normalizedText, { startedAt, preview });
+    embeddingStats.lastStartedAt = startedAt;
+    refreshEmbeddingStats();
+    const pending = (async () => {
+        const extractor = await getExtractor();
+        if (!extractor) {
+            // Return a zero-vector if local embeddings are broken
+            return Array.from({ length: LOCAL_EMBEDDING_DIM }, () => 0);
+        }
+        const output = await extractor(normalizedText, { pooling: 'mean', normalize: true });
+        const vector = Array.from(output.data);
+        embeddingCache.set(normalizedText, vector);
+        if (embeddingCache.size > EMBEDDING_CACHE_LIMIT) {
+            const oldestKey = embeddingCache.keys().next().value;
+            if (oldestKey) embeddingCache.delete(oldestKey);
+        }
+        return vector;
+    })();
+    embeddingInFlight.set(normalizedText, pending);
+    try {
+        const vector = await pending;
+        embeddingStats.totalCompleted += 1;
+        embeddingStats.lastFinishedAt = Date.now();
+        embeddingStats.lastDurationMs = Math.max(0, embeddingStats.lastFinishedAt - startedAt);
+        embeddingStats.lastError = '';
+        return vector;
+    } catch (e) {
+        embeddingStats.totalFailures += 1;
+        embeddingStats.lastFinishedAt = Date.now();
+        embeddingStats.lastDurationMs = Math.max(0, embeddingStats.lastFinishedAt - startedAt);
+        embeddingStats.lastError = String(e?.message || e || '');
+        throw e;
+    } finally {
+        embeddingInFlight.delete(normalizedText);
+        activeEmbeddingJobs.delete(normalizedText);
+        refreshEmbeddingStats();
     }
-    return vector;
+}
+
+function getEmbeddingDebugStatus() {
+    refreshEmbeddingStats();
+    return {
+        ...embeddingStats,
+        extractionDisabled,
+        pipelineLoaded: !!pipeline
+    };
 }
 
 function yieldToEventLoop() {
@@ -69,6 +157,7 @@ function yieldToEventLoop() {
 // Memory vector indices cache: UserId_CharacterID -> LocalIndex
 const indices = new Map();
 let qdrantAvailability = null;
+const indexRepairAttempts = new Map();
 
 function isRecoverableQdrantError(error) {
     const message = String(error?.message || '').toLowerCase();
@@ -91,7 +180,7 @@ async function getVectorIndex(userId, characterId) {
     if (indices.has(key)) {
         return indices.get(key);
     }
-    const dir = path.join(__dirname, '..', 'data', 'vectors', LOCAL_EMBEDDING_INDEX_TAG, String(userId), String(characterId));
+    const dir = getVectorIndexDir(userId, characterId);
     const indexPath = path.join(dir, 'index.json');
     if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
@@ -138,6 +227,37 @@ async function getVectorIndex(userId, characterId) {
     }
     indices.set(key, index);
     return index;
+}
+
+function getVectorIndexDir(userId, characterId) {
+    return path.join(__dirname, '..', 'data', 'vectors', LOCAL_EMBEDDING_INDEX_TAG, String(userId), String(characterId));
+}
+
+function getLegacyVectorIndexDir(userId, characterId) {
+    return path.join(__dirname, '..', 'data', 'vectors', String(userId), String(characterId));
+}
+
+function getLegacyDefaultVectorIndexDir(characterId) {
+    return path.join(__dirname, '..', 'data', 'vectors', 'default', String(characterId));
+}
+
+function getVectorIndexFile(dir) {
+    return path.join(dir, 'index.json');
+}
+
+function getVectorIndexItemCountSync(dir) {
+    try {
+        const indexPath = getVectorIndexFile(dir);
+        let filePath = indexPath;
+        if (fs.existsSync(indexPath) && fs.statSync(indexPath).isDirectory()) {
+            filePath = path.join(indexPath, 'index.json');
+        }
+        if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return 0;
+        const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+        return Array.isArray(parsed?.items) ? parsed.items.length : 0;
+    } catch (e) {
+        return 0;
+    }
 }
 
 const memoryCache = new Map();
@@ -560,6 +680,9 @@ function getMemory(userId) {
     }
 
     async function expandMemoryQueriesWithLLM(db, characterId, queryText, baseVariants = []) {
+        if (!MEMORY_QUERY_EXPANSION_ENABLED) {
+            return [];
+        }
         try {
             const character = db.getCharacter ? db.getCharacter(characterId) : null;
             if (!character) return [];
@@ -871,6 +994,7 @@ function getMemory(userId) {
     async function wipeIndex(characterId) {
         const key = `${userId}_${characterId}`;
         indices.delete(key);
+        indexRepairAttempts.delete(key);
         if (await canUseQdrant()) {
             try {
                 await qdrant.deleteCharacterPoints(userId, characterId);
@@ -878,8 +1002,13 @@ function getMemory(userId) {
                 console.error(`[Memory] Failed to wipe Qdrant points for ${characterId}:`, e.message);
             }
         }
-        const dir = path.join(__dirname, '..', 'data', 'vectors', String(userId), String(characterId));
-        if (fs.existsSync(dir)) {
+        const dirsToWipe = [
+            getVectorIndexDir(userId, characterId),
+            getLegacyVectorIndexDir(userId, characterId),
+            getLegacyDefaultVectorIndexDir(characterId)
+        ];
+        for (const dir of dirsToWipe) {
+            if (!fs.existsSync(dir)) continue;
             try {
                 fs.rmSync(dir, { recursive: true, force: true });
             } catch (e) {
@@ -894,7 +1023,7 @@ function getMemory(userId) {
         const rows = db.getMemories ? db.getMemories(characterId) : [];
         if (!rows || rows.length === 0) return;
 
-        const index = await getVectorIndex(userId, characterId);
+        const index = LOCAL_VECTOR_INDEX_ENABLED ? await getVectorIndex(userId, characterId) : null;
         for (const mem of rows) {
             const textToEmbed = buildMemoryEmbeddingText(mem);
             const embeddingArray = await getEmbedding(textToEmbed);
@@ -931,20 +1060,97 @@ function getMemory(userId) {
                     qdrantAvailability = false;
                 }
             }
-            await index.insertItem({
-                id: String(mem.id),
-                vector: embeddingArray,
-                metadata: {
-                    memory_id: mem.id,
-                    surprise_score: mem.surprise_score || mem.importance || 5,
-                    memory_type: mem.memory_type || 'event',
-                    memory_tier: mem.memory_tier || 'ambient',
-                    memory_focus: mem.memory_focus || 'general',
-                    dedupe_key: mem.dedupe_key || '',
-                    retrieval_weight: retrievalWeight
-                }
+            if (index) {
+                await index.insertItem({
+                    id: String(mem.id),
+                    vector: embeddingArray,
+                    metadata: {
+                        memory_id: mem.id,
+                        surprise_score: mem.surprise_score || mem.importance || 5,
+                        memory_type: mem.memory_type || 'event',
+                        memory_tier: mem.memory_tier || 'ambient',
+                        memory_focus: mem.memory_focus || 'general',
+                        dedupe_key: mem.dedupe_key || '',
+                        retrieval_weight: retrievalWeight
+                    }
+                });
+            }
+        }
+    }
+
+    async function ensureSearchIndexReady(characterId, onTrace = null) {
+        const key = `${userId}_${characterId}`;
+        const lastAttemptAt = Number(indexRepairAttempts.get(key) || 0);
+        const now = Date.now();
+        if (typeof onTrace === 'function') {
+            await onTrace({
+                phase: 'ensure_begin',
+                throttleMsRemaining: lastAttemptAt ? Math.max(0, (5 * 60 * 1000) - (now - lastAttemptAt)) : 0
             });
         }
+        if (lastAttemptAt && (now - lastAttemptAt) < 5 * 60 * 1000) return;
+
+        const db = getDb();
+        const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
+        if (!rawDb || typeof rawDb.prepare !== 'function') return;
+        const memoryCount = Number(rawDb.prepare('SELECT COUNT(*) AS c FROM memories WHERE character_id = ?').get(characterId)?.c || 0);
+        if (typeof onTrace === 'function') {
+            await onTrace({ phase: 'ensure_memory_count', memoryCount });
+        }
+        if (memoryCount <= 0) return;
+
+        const currentDir = getVectorIndexDir(userId, characterId);
+        const legacyDir = getLegacyVectorIndexDir(userId, characterId);
+        const legacyDefaultDir = getLegacyDefaultVectorIndexDir(characterId);
+        const localItemCount = Math.max(
+            getVectorIndexItemCountSync(currentDir),
+            getVectorIndexItemCountSync(legacyDir),
+            getVectorIndexItemCountSync(legacyDefaultDir)
+        );
+
+        let qdrantCount = 0;
+        if (await canUseQdrant()) {
+            try {
+                if (typeof onTrace === 'function') {
+                    await onTrace({ phase: 'ensure_qdrant_count_begin' });
+                }
+                const collectionName = qdrant.getCollectionName(userId);
+                const response = await fetch(`${qdrant.getQdrantConfig().url}/collections/${collectionName}/points/count`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        filter: {
+                            must: [{ key: 'character_id', match: { value: String(characterId) } }]
+                        },
+                        exact: true
+                    })
+                });
+                const payload = await response.json();
+                qdrantCount = Number(payload?.result?.count || 0);
+                if (typeof onTrace === 'function') {
+                    await onTrace({ phase: 'ensure_qdrant_count_finish', qdrantCount, localItemCount });
+                }
+            } catch (e) {
+                if (typeof onTrace === 'function') {
+                    await onTrace({ phase: 'ensure_qdrant_count_error', message: String(e?.message || e), localItemCount });
+                }
+                console.warn(`[Memory] Failed to inspect Qdrant count for ${characterId}:`, e.message);
+            }
+        }
+
+        if (localItemCount > 0 || qdrantCount > 0) {
+            if (typeof onTrace === 'function') {
+                await onTrace({ phase: 'ensure_ready', qdrantCount, localItemCount });
+            }
+            return;
+        }
+
+        indexRepairAttempts.set(key, now);
+        console.warn(`[Memory] Detected empty search index for ${characterId} despite ${memoryCount} SQL memories. Rebuilding...`);
+        if (typeof onTrace === 'function') {
+            await onTrace({ phase: 'ensure_rebuild', qdrantCount, localItemCount, memoryCount });
+        }
+        await rebuildIndex(characterId);
     }
 
     const MEMORY_QUERY_EXPANSIONS = [
@@ -1341,7 +1547,7 @@ function getMemory(userId) {
         return Number(memoryRow.is_archived || 0) === 0;
     }
 
-    async function searchMemories(characterId, queryText, limit = 5) {
+    async function searchMemories(characterId, queryText, limit = 5, onTrace = null) {
         try {
             const db = getDb();
             const normalizedRequest = normalizeMemorySearchRequest(queryText, limit);
@@ -1361,12 +1567,28 @@ function getMemory(userId) {
             if (queryVariants.length === 0) return [];
             const searchFilter = buildMemorySearchFilter(characterId, normalizedRequest.filters);
             const resultLimit = normalizedRequest.limit;
+            if (typeof onTrace === 'function') {
+                await onTrace({
+                    phase: 'search_start',
+                    baseQuery,
+                    queryVariants,
+                    filters: normalizedRequest.filters,
+                    resultLimit
+                });
+            }
 
             if (await canUseQdrant()) {
                 try {
+                    if (typeof onTrace === 'function') {
+                        await onTrace({ phase: 'qdrant_begin', variantCount: queryVariants.length });
+                    }
                     const aggregate = new Map();
                     for (let i = 0; i < queryVariants.length; i++) {
                         const variant = queryVariants[i];
+                        const variantStartedAt = Date.now();
+                        if (typeof onTrace === 'function') {
+                            await onTrace({ phase: 'qdrant_variant_start', variant, index: i });
+                        }
                         const queryEmbedding = await getEmbedding(variant);
                         const qdrantResults = await qdrant.searchMemoryPoints(
                             userId,
@@ -1374,6 +1596,15 @@ function getMemory(userId) {
                             searchFilter,
                             Math.max(resultLimit * 3, 8)
                         );
+                        if (typeof onTrace === 'function') {
+                            await onTrace({
+                                phase: 'qdrant_variant_finish',
+                                variant,
+                                index: i,
+                                durationMs: Date.now() - variantStartedAt,
+                                resultCount: Array.isArray(qdrantResults) ? qdrantResults.length : 0
+                            });
+                        }
 
                         for (const res of qdrantResults) {
                             const memoryId = res?.payload?.memory_id || res?.id;
@@ -1411,9 +1642,18 @@ function getMemory(userId) {
                         db.markMemoriesRetrieved(memories.map(m => m.id));
                     }
                     if (memories.length > 0) {
+                        if (typeof onTrace === 'function') {
+                            await onTrace({ phase: 'qdrant_return', count: memories.length });
+                        }
                         return memories;
                     }
+                    if (typeof onTrace === 'function') {
+                        await onTrace({ phase: 'qdrant_empty' });
+                    }
                 } catch (e) {
+                    if (typeof onTrace === 'function') {
+                        await onTrace({ phase: 'qdrant_error', message: String(e?.message || e) });
+                    }
                     console.error(`[Memory] Qdrant search failed for ${characterId}:`, e.message);
                     if (!isRecoverableQdrantError(e)) {
                         qdrantAvailability = false;
@@ -1421,64 +1661,102 @@ function getMemory(userId) {
                 }
             }
 
-            const index = await getVectorIndex(userId, characterId);
-            const aggregate = new Map();
-            for (let i = 0; i < queryVariants.length; i++) {
-                const variant = queryVariants[i];
-                const queryEmbedding = await getEmbedding(variant);
-                const results = await index.queryItems(queryEmbedding, Math.max(resultLimit * 3, 8));
+            if (LOCAL_VECTOR_INDEX_ENABLED) {
+                if (typeof onTrace === 'function') {
+                    await onTrace({ phase: 'vectra_begin', variantCount: queryVariants.length });
+                }
+                const index = await getVectorIndex(userId, characterId);
+                const aggregate = new Map();
+                for (let i = 0; i < queryVariants.length; i++) {
+                    const variant = queryVariants[i];
+                    const variantStartedAt = Date.now();
+                    if (typeof onTrace === 'function') {
+                        await onTrace({ phase: 'vectra_variant_start', variant, index: i });
+                    }
+                    const queryEmbedding = await getEmbedding(variant);
+                    const results = await index.queryItems(queryEmbedding, Math.max(resultLimit * 3, 8));
+                    if (typeof onTrace === 'function') {
+                        await onTrace({
+                            phase: 'vectra_variant_finish',
+                            variant,
+                            index: i,
+                            durationMs: Date.now() - variantStartedAt,
+                            resultCount: Array.isArray(results) ? results.length : 0
+                        });
+                    }
 
-                for (const res of results) {
-                    if (!(res.score > 0.3 && res.item.metadata && res.item.metadata.memory_id)) continue;
-                    const memRow = db.getMemory(res.item.metadata.memory_id);
-                    if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters)) continue;
-                    const surpriseScore = (res.item.metadata && res.item.metadata.surprise_score) ? res.item.metadata.surprise_score : 5;
-                    const retrievalWeight = Math.max(
-                        (res.item.metadata && Number(res.item.metadata.retrieval_weight)) || 1,
-                        Number(computeMemoryRetrievalWeight(memRow) || 1)
-                    );
-                    const lexicalBoost = computeLexicalBoost(memRow, queryVariants);
-                    const aliasBridgeBoost = computeAliasBridgeBoost(memRow, queryVariants);
-                    const queryWeight = i === 0 ? 1 : (i === 1 ? 0.96 : 0.9);
-                    const contradictionPenalty = computeRecallContradictionPenalty(memRow, baseQuery);
-                    const tierBoost = computeMemoryTierBoost(memRow);
-                    const profilePriorityBoost = computeUserProfilePriorityBoost(memRow, baseQuery, queryVariants);
-                    const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost - contradictionPenalty;
-                    const existing = aggregate.get(memRow.id);
-                    if (!existing || finalScore > existing.finalScore) {
-                        aggregate.set(memRow.id, { memRow, finalScore, matchedQuery: variant });
+                    for (const res of results) {
+                        if (!(res.score > 0.3 && res.item.metadata && res.item.metadata.memory_id)) continue;
+                        const memRow = db.getMemory(res.item.metadata.memory_id);
+                        if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters)) continue;
+                        const surpriseScore = (res.item.metadata && res.item.metadata.surprise_score) ? res.item.metadata.surprise_score : 5;
+                        const retrievalWeight = Math.max(
+                            (res.item.metadata && Number(res.item.metadata.retrieval_weight)) || 1,
+                            Number(computeMemoryRetrievalWeight(memRow) || 1)
+                        );
+                        const lexicalBoost = computeLexicalBoost(memRow, queryVariants);
+                        const aliasBridgeBoost = computeAliasBridgeBoost(memRow, queryVariants);
+                        const queryWeight = i === 0 ? 1 : (i === 1 ? 0.96 : 0.9);
+                        const contradictionPenalty = computeRecallContradictionPenalty(memRow, baseQuery);
+                        const tierBoost = computeMemoryTierBoost(memRow);
+                        const profilePriorityBoost = computeUserProfilePriorityBoost(memRow, baseQuery, queryVariants);
+                        const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost - contradictionPenalty;
+                        const existing = aggregate.get(memRow.id);
+                        if (!existing || finalScore > existing.finalScore) {
+                            aggregate.set(memRow.id, { memRow, finalScore, matchedQuery: variant });
+                        }
                     }
                 }
+                const memories = Array.from(aggregate.values())
+                    .sort((a, b) => b.finalScore - a.finalScore)
+                    .slice(0, resultLimit)
+                    .map(entry => {
+                        entry.memRow._search_score = entry.finalScore.toFixed(3);
+                        entry.memRow._matched_query = entry.matchedQuery;
+                        return entry.memRow;
+                    });
+                if (memories.length > 0 && db.markMemoriesRetrieved) {
+                    db.markMemoriesRetrieved(memories.map(m => m.id));
+                }
+                if (memories.length > 0) {
+                    if (typeof onTrace === 'function') {
+                        await onTrace({ phase: 'vectra_return', count: memories.length });
+                    }
+                    return memories;
+                }
             }
-            const memories = Array.from(aggregate.values())
-                .sort((a, b) => b.finalScore - a.finalScore)
-                .slice(0, resultLimit)
-                .map(entry => {
-                    entry.memRow._search_score = entry.finalScore.toFixed(3);
-                    entry.memRow._matched_query = entry.matchedQuery;
-                    return entry.memRow;
-                });
-            if (memories.length > 0 && db.markMemoriesRetrieved) {
-                db.markMemoriesRetrieved(memories.map(m => m.id));
-            }
-            if (memories.length > 0) return memories;
 
+            if (typeof onTrace === 'function') {
+                await onTrace({ phase: 'lexical_begin' });
+            }
             const lexicalFallback = runLexicalMemoryFallback(db, characterId, queryVariants, resultLimit)
                 .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters));
             if (lexicalFallback.length > 0) {
                 if (db.markMemoriesRetrieved) {
                     db.markMemoriesRetrieved(lexicalFallback.map(m => m.id));
                 }
+                if (typeof onTrace === 'function') {
+                    await onTrace({ phase: 'lexical_return', count: lexicalFallback.length });
+                }
                 return lexicalFallback;
             }
 
+            if (typeof onTrace === 'function') {
+                await onTrace({ phase: 'semantic_begin' });
+            }
             const semanticFallback = (await runSemanticMemoryFallback(db, characterId, baseQuery, resultLimit))
                 .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters));
             if (semanticFallback.length > 0 && db.markMemoriesRetrieved) {
                 db.markMemoriesRetrieved(semanticFallback.map(m => m.id));
             }
+            if (typeof onTrace === 'function') {
+                await onTrace({ phase: 'semantic_finish', count: semanticFallback.length });
+            }
             return semanticFallback;
         } catch (e) {
+            if (typeof onTrace === 'function') {
+                await onTrace({ phase: 'search_error', message: String(e?.message || e) });
+            }
             console.error(`[Memory] Search failed for ${characterId}:`, e.message);
             return [];
         }
@@ -2728,25 +3006,27 @@ Output exactly in this JSON format (and nothing else):
             }
 
             // 3. Save to Vectra store as a fallback / local cache
-            const index = await getVectorIndex(userId, characterId);
-            if (existing && typeof index.deleteItem === 'function') {
-                try {
-                    await index.deleteItem(String(memoryId));
-                } catch (e) { }
-            }
-            await index.insertItem({
-                id: String(memoryId),
-                vector: embeddingArray,
-                metadata: {
-                    memory_id: memoryId,
-                    surprise_score: normalizedMemory.surprise_score || 5,
-                    memory_type: normalizedMemory.memory_type || 'event',
-                    memory_tier: normalizedMemory.memory_tier || 'ambient',
-                    memory_focus: normalizedMemory.memory_focus || 'general',
-                    dedupe_key: normalizedMemory.dedupe_key || '',
-                    retrieval_weight: retrievalWeight
+            if (LOCAL_VECTOR_INDEX_ENABLED) {
+                const index = await getVectorIndex(userId, characterId);
+                if (existing && typeof index.deleteItem === 'function') {
+                    try {
+                        await index.deleteItem(String(memoryId));
+                    } catch (e) { }
                 }
-            });
+                await index.insertItem({
+                    id: String(memoryId),
+                    vector: embeddingArray,
+                    metadata: {
+                        memory_id: memoryId,
+                        surprise_score: normalizedMemory.surprise_score || 5,
+                        memory_type: normalizedMemory.memory_type || 'event',
+                        memory_tier: normalizedMemory.memory_tier || 'ambient',
+                        memory_focus: normalizedMemory.memory_focus || 'general',
+                        dedupe_key: normalizedMemory.dedupe_key || '',
+                        retrieval_weight: retrievalWeight
+                    }
+                });
+            }
 
             console.log(`[Memory] Stored memory for ${characterId}: ${normalizedMemory.summary} `);
 
@@ -2777,10 +3057,11 @@ Output exactly in this JSON format (and nothing else):
         updateGroupConversationDigest,
         aggregateDailyMemories,
         sweepOverflowMemories,
-        saveExtractedMemory
+        saveExtractedMemory,
+        getEmbeddingDebugStatus
     };
 
     memoryCache.set(cacheKey, instance);
     return instance;
 }
-module.exports = { getMemory, clearMemoryCache, setWsClientsResolver };
+module.exports = { getMemory, clearMemoryCache, setWsClientsResolver, getEmbeddingDebugStatus };

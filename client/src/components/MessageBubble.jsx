@@ -223,6 +223,7 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
 
     if (message.role === 'system') {
         const isApiError = content.includes('API Error');
+        const mergedCount = Math.max(1, Number(message._mergedCount || 1) || 1);
         return (
             <div style={{ textAlign: 'center', margin: '8px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '6px' }}>
                 <span style={{
@@ -237,6 +238,11 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
                 }}>
                     {content.replace('[System] ', '')}
                 </span>
+                {isApiError && mergedCount > 1 && (
+                    <span style={{ fontSize: '11px', color: '#c97b7b' }}>
+                        {lang === 'en' ? `Repeated ${mergedCount} times` : `连续出现 ${mergedCount} 次`}
+                    </span>
+                )}
                 {isApiError && onRetry && (
                     <button
                         onClick={() => onRetry(message.id)}

@@ -607,10 +607,6 @@ module.exports = function initCityDb(db) {
         return getSchedule(charId, today);
     }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    //  ★ Events & Quests Helpers
-    // ═══════════════════════════════════════════════════════════════════════
-
     function getActiveEvents() {
         return db.prepare('SELECT * FROM city_events WHERE is_active = 1 AND expires_at > ? ORDER BY created_at DESC').all(Date.now());
     }

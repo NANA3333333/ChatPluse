@@ -98,6 +98,105 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
     }
 }
 
+function parseModuleRouteJson(rawText = '') {
+    const text = String(rawText || '').trim();
+    if (!text) return null;
+
+    const codeFenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    const candidate = codeFenceMatch ? codeFenceMatch[1].trim() : text;
+
+    try {
+        const parsed = JSON.parse(candidate);
+        return {
+            city_detail: parsed?.city_detail === 1 ? 1 : 0,
+            school_detail: parsed?.school_detail === 1 ? 1 : 0,
+            society_detail: parsed?.society_detail === 1 ? 1 : 0
+        };
+    } catch (e) {
+        const readBit = (key) => {
+            const match = candidate.match(new RegExp(`"${key}"\\s*:\\s*([01])`, 'i'));
+            return match && match[1] === '1' ? 1 : 0;
+        };
+        return {
+            city_detail: readBit('city_detail'),
+            school_detail: readBit('school_detail'),
+            society_detail: readBit('society_detail')
+        };
+    }
+}
+
+async function routeContextModules(db, character, recentInput = '') {
+    const text = String(recentInput || '').trim();
+    const defaultRoutes = {
+        city_detail: 0,
+        school_detail: 0,
+        society_detail: 0
+    };
+
+    if (!text) return defaultRoutes;
+
+    const schoolRegex = /(学校|上课|下课|老师|同学|考试|作业|校园|宿舍|教室)/;
+    const societyRegex = /(公司|老板|同事|客户|部门|项目|实习|上班|工作|开会|社会关系|职位)/;
+
+    if (schoolRegex.test(text)) defaultRoutes.school_detail = 1;
+    if (societyRegex.test(text)) defaultRoutes.society_detail = 1;
+
+    const cityIntent = await didUserAskAboutCity(db, character, text);
+    defaultRoutes.city_detail = cityIntent ? 1 : 0;
+
+    const endpoint = character?.memory_api_endpoint || character?.api_endpoint || '';
+    const key = character?.memory_api_key || character?.api_key || '';
+    const model = character?.memory_model_name || character?.model_name || '';
+    if (!endpoint || !key || !model) {
+        return defaultRoutes;
+    }
+
+    try {
+        const judgePrompt = [
+            '你是私聊上下文模块路由器。',
+            '任务：判断这一轮主模型是否需要加载某些“详细模块内容”。',
+            '只输出一行 JSON，格式必须是：{"city_detail":0,"school_detail":0,"society_detail":0}',
+            '字段说明：',
+            '- city_detail=1：这轮回复需要角色最近的真实生活/商业街具体经历，例如去了哪、做了什么、吃了什么、最近外出/工作/休息轨迹，或需要借助最近现实日志解释“为什么这么累/忙/饿/没回消息”。',
+            '- city_detail=0：只是在安慰、调情、情绪确认、观点建议、普通闲聊，或只靠当前身体状态摘要就够，不需要展开商业街详细日志。',
+            '- school_detail：为未来学校模块预留，当前仅在用户明确问学校/课程/考试/老师/同学近况时设为1，否则0。',
+            '- society_detail：为未来社会模块预留，当前仅在用户明确问工作/公司/部门/老板/社会身份近况时设为1，否则0。',
+            '规则：宁可保守关闭，不要为了“可能有帮助”就打开详情。',
+            '只能输出 JSON，不能解释。'
+        ].join('\n');
+
+        const { content } = await callLLM({
+            endpoint,
+            key,
+            model,
+            messages: [
+                { role: 'system', content: judgePrompt },
+                { role: 'user', content: text }
+            ],
+            maxTokens: 40,
+            temperature: 0,
+            enableCache: true,
+            cacheDb: db,
+            cacheType: 'context_module_router',
+            cacheTtlMs: 12 * 60 * 60 * 1000,
+            cacheScope: `character:${character?.id || ''}`,
+            cacheCharacterId: character?.id || '',
+            cacheKeyExtra: 'v1',
+            cacheKeyMode: 'exact'
+        });
+        const parsed = parseModuleRouteJson(content);
+        if (!parsed) return defaultRoutes;
+        return {
+            city_detail: parsed.city_detail === 1 ? 1 : defaultRoutes.city_detail,
+            school_detail: parsed.school_detail === 1 ? 1 : defaultRoutes.school_detail,
+            society_detail: parsed.society_detail === 1 ? 1 : defaultRoutes.society_detail
+        };
+    } catch (e) {
+        console.warn('[ContextBuilder] Module router fallback failed:', e.message);
+        return defaultRoutes;
+    }
+}
+
 function buildRelationshipAnchorContext(db, character, userName, activeTargets = []) {
     if (!activeTargets || activeTargets.length === 0 || !db.getCharRelationship) return '';
 
@@ -348,6 +447,8 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     let prompt = '';
     const userProfile = db.getUserProfile ? db.getUserProfile() : { name: 'User' };
     const userName = userProfile?.name || 'User';
+    const normalizedRecentInput = String(recentInput || '').trim();
+    const moduleRoutes = await routeContextModules(db, character, normalizedRecentInput);
 
     // Token metric accumulator
     const breakdown = { base: 0, z_memory: 0, cross_group: 0, cross_private: 0, city_x_y: 0, q_impression: 0, moments: 0 };
@@ -629,14 +730,25 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
         if (db.city) {
             let cityWorldContext = '\n[===== CITY SOURCE: 商业街（真实生活）实时世界线 =====]\n';
             let hasCityData = false;
-            const normalizedRecentInput = String(recentInput || '').trim();
-            const userAskedAboutCity = await didUserAskAboutCity(db, character, normalizedRecentInput);
+            const userAskedAboutCity = moduleRoutes.city_detail === 1;
+            const cityDetailEnabled = moduleRoutes.city_detail === 1;
             cityWorldContext += getCachedContextBlock(
                 db,
                 character.id,
-                userAskedAboutCity ? 'city_rules_asked' : 'city_rules_base',
-                { template_version: 2, userAskedAboutCity },
+                cityDetailEnabled
+                    ? (userAskedAboutCity ? 'city_rules_asked' : 'city_rules_base')
+                    : 'city_rules_presence_only',
+                { template_version: 3, cityDetailEnabled, userAskedAboutCity },
                 () => {
+                    if (!cityDetailEnabled) {
+                        let staticBlock = '[商业街存在性提示]\n';
+                        staticBlock += '- 你有独立于私聊/群聊之外的真实生活与商业街世界线。\n';
+                        staticBlock += '- 商业街会影响你的身体状态、现实处境、忙碌/疲惫/饥饿等感受。\n';
+                        staticBlock += '- 如果用户这轮没有在问现实轨迹，不要主动展开“去了哪/做了什么”的详细日志。\n';
+                        staticBlock += '- 只有当用户明确或隐含地追问最近现实经历时，才需要加载商业街详细记录。\n';
+                        return staticBlock;
+                    }
+
                     let staticBlock = '[商业街规则]\n';
                     staticBlock += '[CITY SOURCE RULES]\n';
                     staticBlock += '- 下面内容是你的现实生活/商业街经历来源，不是群聊消息，也不是私聊消息。\n';
@@ -665,49 +777,55 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                 ? (db.city.getCharacterRecentLogs(character.id, limitX) || [])
                 : [];
             const limitY = parseInt(cityConfig.city_global_log_limit ?? 5, 10);
-            const globalLogs = limitY > 0 ? (db.city.getCityLogs(limitY) || []) : [];
-            cityWorldContext += getCachedContextBlock(
-                db,
-                character.id,
-                userAskedAboutCity ? 'city_runtime_asked' : 'city_runtime_base',
-                {
-                    template_version: 2,
-                    userAskedAboutCity,
-                    self_logs: recentLogs.map(l => ({ timestamp: l.timestamp, message: l.message || '' })),
-                    global_logs: globalLogs.map(l => ({ timestamp: l.timestamp, message: l.message || l.content || '' }))
-                },
-                () => {
-                    let runtimeBlock = '';
-                    if (limitX > 0) {
-                        if (recentLogs.length > 0) {
-                            hasCityData = true;
-                            runtimeBlock += '\n【本人亲历记录】\n';
-                            runtimeBlock += '只把下面这些说成“我做过/我刚经历过”。\n';
-                            for (const l of recentLogs) {
-                                const firstPersonLog = l.message.replace(new RegExp(character.name, 'g'), '我');
-                                runtimeBlock += `- [${new Date(l.timestamp).toLocaleString()}] ${firstPersonLog}\n`;
+            const globalLogs = limitY > 0
+                ? (db.city.getCityLogs(Math.max(limitY * 3, limitY)) || [])
+                    .filter(l => String(l.character_id || '') !== String(character.id || ''))
+                    .slice(0, limitY)
+                : [];
+            if (cityDetailEnabled) {
+                cityWorldContext += getCachedContextBlock(
+                    db,
+                    character.id,
+                    userAskedAboutCity ? 'city_runtime_asked' : 'city_runtime_base',
+                    {
+                        template_version: 3,
+                        userAskedAboutCity,
+                        self_logs: recentLogs.map(l => ({ timestamp: l.timestamp, message: l.message || '' })),
+                        global_logs: globalLogs.map(l => ({ timestamp: l.timestamp, message: l.message || l.content || '' }))
+                    },
+                    () => {
+                        let runtimeBlock = '';
+                        if (limitX > 0) {
+                            if (recentLogs.length > 0) {
+                                hasCityData = true;
+                                runtimeBlock += '\n【本人亲历记录】\n';
+                                runtimeBlock += '只把下面这些说成“我做过/我刚经历过”。\n';
+                                for (const l of recentLogs) {
+                                    const firstPersonLog = l.message.replace(new RegExp(character.name, 'g'), '我');
+                                    runtimeBlock += `- [${new Date(l.timestamp).toLocaleString()}] ${firstPersonLog}\n`;
+                                }
+                            } else {
+                                runtimeBlock += '\n【本人亲历记录：空】\n';
+                                runtimeBlock += '当前没有可直接引用的本人商业街行动记录。\n';
                             }
-                        } else {
-                            runtimeBlock += '\n【本人亲历记录：空】\n';
-                            runtimeBlock += '当前没有可直接引用的本人商业街行动记录。\n';
                         }
-                    }
-                    if (limitY > 0 && globalLogs.length > 0) {
-                        hasCityData = true;
-                        runtimeBlock += '\n【公共事件 / 传闻】\n';
-                        runtimeBlock += '下面这些只能当成听说/看见，不能说成“我做过”。\n';
-                        for (const l of globalLogs) {
-                            const globalMsg = l.message || l.content;
-                            if (globalMsg) runtimeBlock += `- [${new Date(l.timestamp).toLocaleString()}] ${globalMsg}\n`;
+                        if (limitY > 0 && globalLogs.length > 0) {
+                            hasCityData = true;
+                            runtimeBlock += '\n【公共事件 / 传闻】\n';
+                            runtimeBlock += '下面这些只能当成听说/看见，不能说成“我做过”。\n';
+                            for (const l of globalLogs) {
+                                const globalMsg = l.message || l.content;
+                                if (globalMsg) runtimeBlock += `- [${new Date(l.timestamp).toLocaleString()}] ${globalMsg}\n`;
+                            }
                         }
+                        runtimeBlock += '\n[商业街执行规则]\n';
+                        runtimeBlock += '- 优先用本人亲历记录回答“我做过什么”。\n';
+                        runtimeBlock += '- 公共事件只回答“我听说/我看到”。\n';
+                        runtimeBlock += '- 不要提日志、系统、后台、前端模块。\n';
+                        return runtimeBlock;
                     }
-                    runtimeBlock += '\n[商业街执行规则]\n';
-                    runtimeBlock += '- 优先用本人亲历记录回答“我做过什么”。\n';
-                    runtimeBlock += '- 公共事件只回答“我听说/我看到”。\n';
-                    runtimeBlock += '- 不要提日志、系统、后台、前端模块。\n';
-                    return runtimeBlock;
-                }
-            );
+                );
+            }
             prompt += cityWorldContext;
         }
     } catch (e) {
@@ -750,7 +868,7 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
 
     breakdown.q_impression = getDelta(startLen);
 
-    return { preamble: prompt, retrievedMemoriesContext, breakdown };
+    return { preamble: prompt, retrievedMemoriesContext, breakdown, moduleRoutes };
 }
 
 module.exports = {

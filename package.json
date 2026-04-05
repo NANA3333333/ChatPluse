@@ -11,6 +11,7 @@
     "cleanup:city-memories": "npm --prefix server run cleanup:city-memories"
   },
   "dependencies": {
+    "docx": "^9.6.1",
     "iconv-lite": "^0.7.2",
     "ws": "^8.19.0"
   }

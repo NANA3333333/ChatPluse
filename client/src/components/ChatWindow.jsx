@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import MessageBubble from './MessageBubble';
 import InputBar from './InputBar';
 import TransferModal from './TransferModal';
@@ -25,6 +25,32 @@ function normalizeMessages(list = []) {
             return (a.__fallbackIndex || 0) - (b.__fallbackIndex || 0);
         })
         .map(({ __fallbackIndex, ...msg }) => msg);
+}
+
+function collapseRepeatedApiErrors(list = []) {
+    const collapsed = [];
+    for (const msg of Array.isArray(list) ? list : []) {
+        const prev = collapsed[collapsed.length - 1];
+        const isApiError = msg?.role === 'system' && String(msg?.content || '').includes('API Error');
+        const sameAsPrev = prev
+            && prev.role === 'system'
+            && String(prev.content || '') === String(msg?.content || '')
+            && String(prev._mergeType || '') === 'api_error';
+        if (isApiError && sameAsPrev) {
+            prev._mergedIds = Array.isArray(prev._mergedIds) ? [...prev._mergedIds, msg.id] : [prev.id, msg.id];
+            prev._mergedCount = Number(prev._mergedCount || 1) + 1;
+            prev.id = msg.id;
+            prev.timestamp = msg.timestamp;
+            continue;
+        }
+        collapsed.push(isApiError ? {
+            ...msg,
+            _mergeType: 'api_error',
+            _mergedCount: 1,
+            _mergedIds: [msg.id]
+        } : msg);
+    }
+    return collapsed;
 }
 
 
@@ -61,18 +87,20 @@ function RagHeaderProgress({ progress, lang }) {
         setDisplayStep(progress.currentStep || 0);
     }, [progress?.runId, progress?.currentStep, progress]);
 
-    const totalSteps = progress?.totalSteps || 6;
+    const totalSteps = progress?.totalSteps || 7;
     const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
     const labels = [
         lang === 'en' ? '1 Summary' : '1 摘要',
-        lang === 'en' ? '2 Topics' : '2 主题',
-        lang === 'en' ? '3 Decide' : '3 决策',
-        lang === 'en' ? '4 Rewrite' : '4 改写',
-        lang === 'en' ? '5 Retrieve' : '5 召回',
-        lang === 'en' ? '6 Output' : '6 输出'
+        lang === 'en' ? '2 Route' : '2 路由',
+        lang === 'en' ? '3 Topics' : '3 主题',
+        lang === 'en' ? '4 Decide' : '4 决策',
+        lang === 'en' ? '5 Rewrite' : '5 改写',
+        lang === 'en' ? '6 Retrieve' : '6 召回',
+        lang === 'en' ? '7 Output' : '7 输出'
     ];
     const currentLabelMap = {
         summary: lang === 'en' ? 'Summary cache update' : '摘要缓存更新',
+        route: lang === 'en' ? 'Module routing' : '模块路由',
         topics: lang === 'en' ? 'Topic expansion' : '主题展开',
         decision: lang === 'en' ? 'RAG decision' : 'RAG 决策',
         rewrite: lang === 'en' ? 'Query rewrite' : '查询改写',
@@ -172,13 +200,14 @@ function ChatWindow({
     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
     const ragProgress = engineState?.[contact?.id]?.ragProgress || {
         runId: null,
-        totalSteps: 6,
+        totalSteps: 7,
         currentStep: 0,
         currentKey: 'summary',
         status: 'idle',
         skipped: false
     };
     const emotion = deriveEmotion(contact || {});
+    const displayMessages = useMemo(() => collapseRepeatedApiErrors(messages), [messages]);
 
     // Fetch most recent messages when contact changes
     useEffect(() => {
@@ -417,11 +446,9 @@ function ChatWindow({
                         </button>
                     </div>
                 )}
-                {messages.map((msg, idx) => {
-                    if (idx > 0 && messages[idx - 1].id === msg.id) return null;
-
+                {displayMessages.map((msg, idx) => {
                     const currentLimit = contact?.context_msg_limit || 60;
-                    const isBoundary = idx === Math.max(0, messages.length - currentLimit) && messages.length > currentLimit;
+                    const isBoundary = idx === Math.max(0, displayMessages.length - currentLimit) && displayMessages.length > currentLimit;
                     const boundaryElement = isBoundary ? (
                         <div key={`boundary-${msg.id}`} style={{ textAlign: 'center', margin: '30px 0', position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                             <div style={{ borderBottom: '1px dashed #ccc', position: 'absolute', top: '20px', left: '10%', right: '10%' }}></div>

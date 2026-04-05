@@ -21,8 +21,12 @@ import { resolveAvatarUrl } from './utils/avatar';
 // Allow VITE config if available, otherwise dynamically use the current host IP/Domain
 const PROTOCOL = window.location.protocol;
 const HOST = window.location.hostname;
-const API_URL = import.meta.env.VITE_API_URL || `${PROTOCOL}//${HOST}:8000/api`;
-const WS_URL = import.meta.env.VITE_WS_URL || `ws://${HOST}:8000`;
+const isLoopbackHost = HOST === '127.0.0.1' || HOST === 'localhost';
+const defaultApiOrigin = isLoopbackHost ? 'http://localhost:8000' : `${PROTOCOL}//${HOST}:8000`;
+const defaultWsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+const defaultWsHost = isLoopbackHost ? 'localhost:8000' : `${HOST}:8000`;
+const API_URL = import.meta.env.VITE_API_URL || `${defaultApiOrigin}/api`;
+const WS_URL = import.meta.env.VITE_WS_URL || `${defaultWsProtocol}//${defaultWsHost}`;
 
 function App() {
   const { token, logout, user: authUser } = useAuth();

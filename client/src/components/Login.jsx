@@ -10,6 +10,19 @@ function Login({ apiUrl }) {
     const [error, setError] = useState('');
     const [loading, setLoading] = useState(false);
 
+    const handleResetLocalState = () => {
+        [
+            'cp_custom_css',
+            'cp_theme_config',
+            'cp_theme',
+            'cp_token',
+            'cp_user',
+            'cp_avatar',
+        ].forEach((key) => localStorage.removeItem(key));
+
+        window.location.reload();
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
         setError('');
@@ -104,6 +117,9 @@ function Login({ apiUrl }) {
                 <div className="login-footer">
                     <button className="text-btn toggle-mode-btn" type="button" onClick={() => { setIsRegistering(!isRegistering); setError(''); }}>
                         {isRegistering ? '已有账号？立即登录' : '没有账号？使用邀请码注册'}
+                    </button>
+                    <button className="text-btn reset-local-btn" type="button" onClick={handleResetLocalState}>
+                        重置本地界面状态 / Reset Local UI State
                     </button>
                 </div>
             </div>

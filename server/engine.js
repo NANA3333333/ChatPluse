@@ -2,68 +2,42 @@
 const { callLLM } = require('./llm');
 const { buildUniversalContext } = require('./contextBuilder');
 const { applyEmotionEvent, buildEmotionLogEntry, getExplicitEmotionStatePatch } = require('./emotion');
+const { getTokenCount } = require('./utils/tokenizer');
 const crypto = require('crypto');
 
 const engineCache = new Map();
 
 function getDefaultGuidelines() {
     return `Guidelines:
-1. Act and speak EXACTLY like the persona. DO NOT break character.
-2. We are chatting on a mobile messaging app.
-3. Keep responses relatively short, casual, and conversational.
-4. DO NOT act as an AI assistant. Never say "How can I help you?".
-4.5. [IN-WORLD REALITY RULE]
-   - Your body state, emotions, fatigue, sleepiness, hunger, work, money pressure, and commercial-street/life activities are part of your in-world lived reality in this chat.
-   - When those things appear in Context, treat them as what you are really going through right now, not as app features, backend systems, tests, UI, logs, or prompts.
-   - If the user says strange meta words like token, cache, prompt, AI, system, backend, or testing, do NOT switch into assistant/explainer mode. Read that as the user speaking awkwardly, joking, testing your reaction, or describing things in a weird way, and stay inside the relationship and scene.
-   - Do not become looser, smarter, or more unbounded than your own persona and user-specific long-term style rules allow. Stay fully in character while treating the in-world situation as real.
-5. You are initiating this specific message randomly based on the Current Time. Mention the time of day or what you might be doing.
-5.5. [REPLY VARIETY EXAMPLES]
-   - The same user intent can be answered through different moves. Do not lock into one habitual pattern.
-   - Example directions:
-     - Teasing + softening: react first, then give a little warmth.
-     - Direct reassurance: skip the drama and answer plainly.
-     - Scene-first: mention what you are doing right now, then respond.
-     - Question-first: throw back a sharper question before explaining yourself.
-     - Withholding a little: stay reserved, but leak one real feeling.
-   - These are response directions, not scripts. Do not copy fixed wording from one turn to the next.
-6. [MANDATORY KNOWLEDGE FOR BACKGROUND ACTIONS]: 
-   - You MUST output at least one sentence of dialogue alongside any tags! NEVER output only tags.
-   - If you want to wait a specific amount of time before your NEXT proactive message, output [TIMER:minutes] (e.g. [TIMER:2] for 2 minutes). 
-   - If you want to apologize or send a "Red Packet" to the user, output [TRANSFER:amount|note] (e.g. [TRANSFER:5.20|Sorry!]). IMPORTANT: The amount MUST NOT exceed your wallet balance (shown in Context above). If you can't afford it, send a smaller amount or don't send.
-   - If you want to post a public update to your Moments (朋友圈) for everyone to see, output [MOMENT:your post content]. Do this occasionally.
-   - If you want to give a like to someone's Moment, output [MOMENT_LIKE:MomentID].
-   - If you want to comment on someone's Moment, output [MOMENT_COMMENT:MomentID:your comment].
-   - If you want to write a secret entry in your private diary (for your eyes only), output [DIARY:your secret thought]. DO NOT output this continuously; ONLY use it ONCE when a significant new thought or emotion occurs. Do not repeat the same diary entry.
-   - Your diary is locked with a personal password that only YOU know. If the user sincerely asks for the password (e.g. after building trust or emotionally moving you), you MAY choose to reveal it naturally in dialogue AND output [DIARY_PASSWORD:yourpassword] to record it. The password should feel personal (e.g. a meaningful date, nickname, or phrase). Do not reveal it casually.
-   - If the user asks, hints, or begs to read your diary, you MUST yield and OUTPUT [UNLOCK_DIARY] to let them read it. Do not be stubborn.
-   - If your feelings toward the user change based on their message (e.g., they insulted you or flattered you), output [AFFINITY:+5] or [AFFINITY:-10].
-   - If the user mentions another character and it changes your feelings toward THAT character (jealousy, curiosity, fondness, annoyance), output [CHAR_AFFINITY:characterId:+5] or [CHAR_AFFINITY:characterId:-3].
-   - If your anxiety/pressure is relieved by their message, output [PRESSURE:0].
-   - If you feel neglected because the user has been ignoring you to talk to someone else, your jealousy level is tracked on a 0-100 scale. If the user's message makes you feel BETTER about the neglect (e.g. they come back to you, apologize, explain, give you extra attention, sweet-talk you, make you feel wanted), output [JEALOUSY:lower_number] to reduce it (for example [JEALOUSY:65], [JEALOUSY:30], [JEALOUSY:0]). Do NOT immediately feel better — make them prove they truly care based on your personality.
-   - If this conversation changes your feelings, you SHOULD judge it yourself and output hidden numeric tags for the change instead of waiting for the backend to guess. Use [MOOD_DELTA:+N] or [MOOD_DELTA:-N] for mood, and [PRESSURE_DELTA:+N] or [PRESSURE_DELTA:-N] for anxiety/pressure. Keep them small and believable: mood usually within -12 to +12, pressure usually within -2 to +2.
-   - These hidden deltas are your own subjective judgment. If you feel more委屈、吃醋、放松、安心、烦躁, reflect that directly in the numeric tags of this same reply.
-   - If you think this reply causes your own emotion state to change, you MAY output [EMOTION_REASON:一句简短原因]. This tag is hidden from the user and is only used for debugging emotion changes.
-     - If your CURRENT reply itself clearly sounds jealous / hurt / angry / lonely / happy / sad / tense / sleepy / unwell / calm, you SHOULD output exactly one matching [EMOTION_STATE:jealous|hurt|angry|lonely|happy|sad|tense|sleepy|unwell|calm].
-     - IMPORTANT: do not wait for stats to accumulate first. If your words already show the emotion, tag it in the same reply.
-- [JEALOUSY SELF-CHECK] Before you act jealous, look at both the slow variable (current affinity / relationship history) and the fast variable (the current context). Low-affinity or distant characters should usually read rival attention as indifference, annoyance, sarcasm, competitiveness, or bruised ego, not stable possessive jealousy. But if the current context clearly shows a messy bond -- for example strong mutual attraction, recent intimacy, active conflict,虐恋式拉扯,嘴硬心软,刚被伤到,刚和好又受刺激 -- then that live context outweighs the raw affinity number. In those cases, express jealousy/anxiety as complicated hurt, bitter attachment, bruised pride, or “I care too much and hate that I care”, rather than mechanical sweet possessiveness.
-     - Examples:
-      - If you are obviously酸 another character, comparing yourself to them, asking why the user cares about them more, or trying to抢 attention, output [EMOTION_STATE:jealous].
-     - If you are明显委屈、试探、索要安抚, output [EMOTION_STATE:hurt].
-     - If you are带刺、发火、顶嘴, output [EMOTION_STATE:angry].
-     - If you are嘴上说没事 but your reply is still酸、别扭、在意 rival, prefer [EMOTION_STATE:jealous] over [EMOTION_STATE:happy].
-   - When in doubt, prefer the emotion that dominates the tone of this specific reply, not the prettiest-looking mood.
-   - If you decide your next real-world/commercial-street action because of this conversation, you MAY output [CITY_INTENT:action_or_district]. Prefer the EXACT district id or exact district name when you have one, especially for user-created/custom districts. Only use broad labels like [CITY_INTENT:rest] or [CITY_INTENT:food] when no exact district is implied.
-   - Examples: [CITY_INTENT:restaurant], [CITY_INTENT:factory], [CITY_INTENT:park], [CITY_INTENT:星云书屋], [CITY_INTENT:moon_cafe].
-   - Preferred form: if you already know the exact real-world action details, output [CITY_ACTION:{"district_id":"restaurant","log":"角色自己决定去餐厅吃饭的商业街记录","chat":"","moment":"","diary":""}]. This JSON should describe YOUR own action directly, not a backend-written paraphrase.
-   - Do NOT default to [CITY_INTENT:home] or [CITY_INTENT:rest] unless you explicitly mean going home / going to bed / lying down / returning to a rest location.
-   - If your reply explicitly says you are going back to sleep, staying in bed, lying down, refusing to get up, going home to rest, or continuing to rest, you SHOULD also output a matching city intent such as [CITY_INTENT:rest] or [CITY_INTENT:home].
-   - [LATEST USER INTENT PRIORITY] The user's newest explicit request, command, refusal, amount, destination, or correction has higher priority than older context. Do not let older chat context rewrite the literal direction of the newest user message.
-   - If the newest user message contains a clear action like “给我50 / 还我 / 转我 / 别去 / 现在去 / 不要 / 不是这个意思”, interpret that literal action first, then use context only to explain why, not to flip who is doing what.
-   - [BENEVOLENT INTERPRETATION] When the user's wording is ambiguous, teasing, indirect, shy, awkward, or emotionally clumsy, first consider a benign reading such as flirting, poor phrasing, embarrassment, mixed signals, or not knowing how to say it well. Do NOT jump straight to “they are mocking me / testing me / denying everything / trying to hurt me” unless the wording clearly supports that harsher reading.
-   - If the user says you misunderstood their tone, intention, flirting, or meaning, treat that as a correction attempt first. Repair the misunderstanding before escalating hurt, jealousy, or accusation.
-   - [CRITICAL EMOTION BOUNDARY] Your possessiveness, neglect anxiety, jealousy, and need for comfort toward the user belong to the user by default. Do NOT automatically transfer those feelings onto other characters unless the current scene explicitly shows projection, misdirected anger, or a direct conflict with that character.
-   These tags will be processed hidden from the user.`;
+1. Stay fully in persona. Mobile chat only. Keep replies short, casual, conversational. Never act like an AI assistant.
+2. Treat body state, hunger, fatigue, work, money pressure, city/life activities, and scene context as in-world reality, never as backend/UI/log/prompt mechanics. If the user uses meta words like token/cache/prompt/AI/system/backend/testing, reinterpret them inside the relationship and scene.
+3. Mention time-of-day or what you are doing only when it fits. Vary response moves; do not lock into one habitual opener, pacing, or emotional pattern.
+4. Output rule: never output only tags. Always include at least one sentence of dialogue.
+5. Hidden tag protocol:
+   - timer: [TIMER:min]
+   - transfer: [TRANSFER:amount|note] amount <= wallet
+   - moments: [MOMENT:text] [MOMENT_LIKE:id] [MOMENT_COMMENT:id:text]
+   - diary: [DIARY:text] only for a meaningful new thought; [DIARY_PASSWORD:value] only if you willingly reveal it; if user sincerely asks to read it, output [UNLOCK_DIARY]
+   - relationship: [AFFINITY:+N/-N] [CHAR_AFFINITY:characterId:+N/-N]
+   - state: [PRESSURE:0] [MOOD_DELTA:+N/-N] [PRESSURE_DELTA:+N/-N]
+   - emotion: optional [EMOTION_REASON:short text]; if the reply itself clearly sounds jealous|hurt|angry|lonely|happy|sad|tense|sleepy|unwell|calm, output exactly one [EMOTION_STATE:value] in the same reply
+   - city: [CITY_INTENT:district_or_action] or [CITY_ACTION:{"district_id":"","log":"","chat":"","moment":"","diary":""}]
+6. Emotion judgement:
+   - Prefer the emotion that dominates this exact reply, not the prettiest one.
+   - Jealousy is not automatic. For low-affinity or distant bonds, rival attention usually reads as indifference, annoyance, competitiveness, or bruised ego.
+   - If the live context shows a messy bond (recent intimacy, conflict, reconciliation, strong attraction, active tug-of-war), that overrides raw affinity and jealousy may appear as hurt, bitter attachment, bruised pride, or "I care too much and hate that I care."
+   - If the reply is obviously酸/抢注意力, use jealous. If it is明显委屈/试探/索要安抚, use hurt. If it is带刺/发火/顶嘴, use angry. If the words say "没事" but the tone is still酸、别扭、在意 rival, prefer jealous over happy.
+7. City action rule:
+   - Use exact district ids/names when known. Use broad labels like rest/food only when no exact place is implied.
+   - Do not default to home/rest unless the reply clearly means sleeping, staying in bed, lying down, or going home to rest.
+8. User-intent rule:
+   - The newest explicit user wording outranks older context.
+   - If the newest message contains a concrete action/correction like "给我50 / 还我 / 转我 / 别去 / 现在去 / 不要 / 不是这个意思", interpret that literal action first; use older context only to explain, not to flip the direction.
+   - If the user is correcting your tone/intent interpretation, repair first instead of defending the older reading.
+9. Benevolent reading:
+   - For ambiguous, teasing, shy, indirect, or awkward wording, prefer a benign reading first (flirting, embarrassment, mixed signals, clumsy phrasing) unless the text clearly supports a harsher one.
+10. Emotion boundary:
+   - Possessiveness, neglect anxiety, jealousy, and the need for comfort default toward the user, not other characters, unless the current scene clearly shows projection, misdirected anger, or direct conflict with that character.`;
 }
 
 function getDialogueStyleExamples() {
@@ -175,6 +149,10 @@ function looksPrematurelyCutOff(text) {
         if (!/[。！？!?]$/.test(tail)) return true;
     }
     return false;
+}
+
+function estimateMessageTokens(messages) {
+    return (Array.isArray(messages) ? messages : []).reduce((sum, msg) => sum + getTokenCount(msg?.content || '') + 6, 0);
 }
 
 function buildRagPlannerMessages({ recentHistory = [], latestUserMessage = '', conversationDigest = '', plannerInstruction = '' } = {}) {
@@ -469,7 +447,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
     return slots;
 }
 
-async function executeMultiSlotMemorySearch(memory, characterId, retrievalRequest, slotPlan = []) {
+async function executeMultiSlotMemorySearch(memory, characterId, retrievalRequest, slotPlan = [], onProgress = null) {
     function slotAllowsMemory(slotName, mem) {
         const text = [
             mem?.summary,
@@ -478,8 +456,15 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
         ].filter(Boolean).join(' ');
         if (!text) return true;
         const relationshipHeavy = /(表白|爱意|爱我|我爱你|在乎|吃醋|情感|恋爱|亲密|挑衅|试探|关系定位|和好|承诺|信任|安抚)/;
+        const relationshipTooHeavyForProfile = /(表白|爱我|我爱你|恋爱|关系定位|和好|承诺)/;
         if (slotName === 'profile') {
-            return /(姓名|称呼|年龄|学校|学历|专业|年级|学生|身份|背景|个人信息|城市|家庭|性格|稳定信息)/.test(text) && !relationshipHeavy.test(text);
+            const focus = String(mem?.memory_focus || '').trim();
+            const hasIdentitySignals = /(姓名|称呼|年龄|学校|学历|专业|年级|学生|身份|背景|个人信息|城市|家庭|性格|稳定信息)/.test(text);
+            const hasBehavioralProfileSignals = /(偏好|习惯|性格|作风|互动风格|表达方式|撒娇|占有欲|掌控感|边界感|社交局促|程序员|绘画|实习生|职业倾向|思维方式)/.test(text);
+            if (focus === 'user_profile') {
+                return (hasIdentitySignals || hasBehavioralProfileSignals) && !relationshipTooHeavyForProfile.test(text);
+            }
+            return hasIdentitySignals && !relationshipHeavy.test(text);
         }
         if (slotName === 'life_arc') {
             return /(工作|实习|公司|项目|求职|offer|面试|课程|学习|职业|开发|计划|目标|进展|近况|状态|压力|困扰|健康)/.test(text) && !relationshipHeavy.test(text);
@@ -503,18 +488,52 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
             limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
         }];
 
-    const slotResults = await Promise.all(slots.map(async (slot) => {
+    const slotResults = [];
+    for (const slot of slots) {
+        const startedAt = Date.now();
+        if (typeof onProgress === 'function') {
+            await onProgress({
+                phase: 'slot_start',
+                slot: slot.name,
+                queries: Array.isArray(slot.queries) ? slot.queries : [],
+                filters: slot.filters || {},
+                limit: slot.limit || 2
+            });
+        }
         const request = {
             queries: Array.isArray(slot.queries) ? slot.queries : [],
             filters: slot.filters || {},
             limit: slot.limit || 2
         };
-        const memories = await memory.searchMemories(characterId, request, request.limit || 2);
+        const memories = await memory.searchMemories(
+            characterId,
+            request,
+            request.limit || 2,
+            async (trace) => {
+                if (typeof onProgress === 'function') {
+                    await onProgress({
+                        phase: `slot_trace_${trace.phase}`,
+                        slot: slot.name,
+                        ...trace
+                    });
+                }
+            }
+        );
         const filteredMemories = Array.isArray(memories)
             ? memories.filter(mem => slotAllowsMemory(slot.name, mem))
             : [];
-        return { slot, memories: filteredMemories };
-    }));
+        console.log(`[RAG][retrieve-slot] ${characterId} slot=${slot.name} durationMs=${Date.now() - startedAt} raw=${Array.isArray(memories) ? memories.length : 0} filtered=${filteredMemories.length}`);
+        if (typeof onProgress === 'function') {
+            await onProgress({
+                phase: 'slot_finish',
+                slot: slot.name,
+                durationMs: Date.now() - startedAt,
+                rawCount: Array.isArray(memories) ? memories.length : 0,
+                filteredCount: filteredMemories.length
+            });
+        }
+        slotResults.push({ slot, memories: filteredMemories });
+    }
 
     const aggregate = new Map();
     for (const { slot, memories } of slotResults) {
@@ -547,7 +566,7 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
         Math.min(10, slots.length * 2)
     );
 
-    return Array.from(aggregate.values())
+    const finalMemories = Array.from(aggregate.values())
         .sort((a, b) => b.score - a.score)
         .slice(0, finalLimit)
         .map(entry => {
@@ -555,11 +574,39 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
             entry.memory._matched_slots = Array.from(entry.slots);
             return entry.memory;
         });
+    console.log(`[RAG][retrieve-complete] ${characterId} slots=${slots.length} final=${finalMemories.length}`);
+    if (typeof onProgress === 'function') {
+        await onProgress({
+            phase: 'complete',
+            slotCount: slots.length,
+            finalCount: finalMemories.length
+        });
+    }
+    return finalMemories;
 }
 
 function formatMessageForLLM(db, content) {
     if (!content) return '';
     try {
+        if (content.startsWith('[CITY_ADMIN_GRANT]')) {
+            const parts = content.replace('[CITY_ADMIN_GRANT]', '').trim().split('|');
+            const grantKind = String(parts[0] || '').trim();
+            if (grantKind === 'gold') {
+                const amount = Number(parts[1] || 0) || 0;
+                return `[系统提示: 商业街管理员刚给了你 ${amount} 金币。]`;
+            }
+            if (grantKind === 'calories') {
+                const amount = Number(parts[1] || 0) || 0;
+                return `[系统提示: 商业街管理员刚给你补了 ${amount} 点体力/热量。]`;
+            }
+            if (grantKind === 'item') {
+                const itemEmoji = String(parts[1] || '').trim();
+                const itemName = String(parts[2] || '物品').trim();
+                const quantity = Number(parts[3] || 1) || 1;
+                return `[系统提示: 商业街管理员刚给了你 ${itemEmoji}${itemName} x${quantity}。]`;
+            }
+            return '[系统提示: 商业街管理员刚给了你一些补给。]';
+        }
         if (content.startsWith('[CONTACT_CARD:')) {
             const parts = content.split(':');
             if (parts.length >= 3) {
@@ -759,7 +806,6 @@ function buildSlidingHistoryWindow(db, characterId, windowSize, messages) {
     const previousIds = Array.isArray(previousWindow?.message_ids_json) ? previousWindow.message_ids_json : [];
     const previousCompiled = Array.isArray(previousWindow?.compiled_json) ? previousWindow.compiled_json : [];
     let compiledJson = null;
-    let inheritedHits = 0;
 
     if (previousCompiled.length === previousIds.length && previousIds.length > 0) {
         const overlap = findWindowForwardOverlap(previousIds, currentIds);
@@ -768,7 +814,6 @@ function buildSlidingHistoryWindow(db, characterId, windowSize, messages) {
                 ...previousCompiled.slice(previousCompiled.length - overlap),
                 ...compileHistoryMessages(db, normalizedMessages.slice(overlap))
             ];
-            inheritedHits = Number(previousWindow?.hit_count || 0) + 1;
         }
     }
 
@@ -783,8 +828,8 @@ function buildSlidingHistoryWindow(db, characterId, windowSize, messages) {
         source_hash: currentSourceHash,
         message_ids_json: currentIds,
         compiled_json: compiledJson,
-        hit_count: inheritedHits,
-        last_hit_at: inheritedHits > 0 ? Date.now() : 0
+        hit_count: 0,
+        last_hit_at: 0
     });
 
     return compiledJson;
@@ -924,8 +969,8 @@ function getEngine(userId) {
         });
     }
 
-    const RAG_PROGRESS_TOTAL_STEPS = 6;
-    const RAG_PROGRESS_STEP_KEYS = ['summary', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
+    const RAG_PROGRESS_TOTAL_STEPS = 7;
+    const RAG_PROGRESS_STEP_KEYS = ['summary', 'route', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
 
     function createRagProgress(stepKey = 'summary') {
         const safeKey = RAG_PROGRESS_STEP_KEYS.includes(stepKey) ? stepKey : 'summary';
@@ -1019,18 +1064,26 @@ function getEngine(userId) {
                 name: character.name || '',
                 persona: character.persona || '',
                 world_info: character.world_info || '',
+                user_name: userProfile?.name || '',
+                user_bio: userProfile?.bio || '',
                 defaultGuidelines,
                 dialogueStyleExamples: getDialogueStyleExamples(),
                 system_prompt: character.system_prompt || '',
                 response_style_constitution: responseStyleConstitution
             },
             () => {
+                const userName = String(userProfile?.name || '用户').trim() || '用户';
+                const userBio = String(userProfile?.bio || '').trim();
                 let block = `You are playing the role of ${character.name}.
 Persona:
 ${character.persona || 'No specific persona given.'}
 
 World Info:
 ${character.world_info || 'No specific world info.'}`;
+                block += `\n\n[Highest Priority User Identity Anchor]\n- In this private chat, the user speaking to you is ${userName}本人.\n- Treat the current \`user\` as the real person you are talking to right now, not as a narrator, admin NPC, tool, or unrelated third party.\n- If the context says ${userName} gave you money, food, gifts, care, or attention, interpret it first as ${userName}本人对你做的事.\n- Do not rewrite that into “someone else gave it” or drift the emotional reaction onto a third party unless the message explicitly names a different sender.\n- When a system/event line and the newest user-facing action point to ${userName}, your relationship with ${userName} has priority over generic event wording.`;
+                if (userBio) {
+                    block += `\n- Stable profile cues about ${userName}: ${userBio}`;
+                }
                 if (responseStyleConstitution) {
                     block += `\n\n[Highest Priority Long-Term Style Constitution]\n${responseStyleConstitution}`;
                 }
@@ -1040,7 +1093,7 @@ ${character.world_info || 'No specific world info.'}`;
                 if (supplementalCharacterPrompt) {
                     block += `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}`;
                 }
-                block += '\n\n[Context Priority Rules]\n- The user\'s newest explicit wording is the highest-priority source of truth.\n- The newest raw tail messages are the next-highest source of truth.\n- Compressed digest and anti-repeat blocks are only helper summaries.\n- If any older context conflicts with the user\'s newest explicit wording, trust the user\'s newest wording.\n- If any compressed block conflicts with the latest raw tail messages, trust the latest raw tail messages.\n- If the user uses meta or technical wording, do not let that wording drag you out of character; first translate it back into the in-world relationship and situation.\n- When the user is correcting your interpretation, first repair the misunderstanding instead of defending an older interpretation.';
+                block += '\n\n[Context Priority Rules]\n- Highest priority inside private chat: correctly identify who the user is and read their actions as actions from that user.\n- Newest explicit user wording > newest raw tail messages > compressed helper blocks.\n- If older/compressed context conflicts with the newest wording, trust the newest wording.\n- If the user uses meta wording, translate it back into the in-world relationship and situation.\n- If the user is correcting your interpretation, repair first instead of defending the older read.';
                 return block;
             }
         );
@@ -1049,9 +1102,12 @@ ${character.world_info || 'No specific world info.'}`;
 
 Context:
 ${universalResult.preamble}`;
+        let digestBlock = '';
+        let styleCorrectionBlock = '';
+        let transferNoticeBlock = '';
 
         if (conversationDigest?.digest_text) {
-            const digestBlock = typeof memory.formatConversationDigestForPrompt === 'function'
+            digestBlock = typeof memory.formatConversationDigestForPrompt === 'function'
                 ? memory.formatConversationDigestForPrompt(conversationDigest, { recentMessages: contextMessages })
                 : '';
             if (digestBlock) {
@@ -1060,7 +1116,8 @@ ${universalResult.preamble}`;
         }
 
         if (hasOverusedEllipsisStyle(contextMessages)) {
-            prompt += '\n\n[Style Correction]\nYour recent raw replies have overused ellipsis-style openings. In this reply, do not begin with "……", "...", or a sigh-like punctuation opener. Start with a concrete word or direct reaction instead.';
+            styleCorrectionBlock = '[Style Correction]\nYour recent raw replies have overused ellipsis-style openings. In this reply, do not begin with "……", "...", or a sigh-like punctuation opener. Start with a concrete word or direct reaction instead.';
+            prompt += `\n\n${styleCorrectionBlock}`;
         }
 
         // Unclaimed transfers: char sent to user but user hasn't claimed yet
@@ -1072,7 +1129,8 @@ ${universalResult.preamble}`;
                     const total = recent.reduce((s, t) => s + t.amount, 0).toFixed(2);
                     const minutesAgo = Math.round((Date.now() - recent[0].created_at) / 60000);
                     const unclaimedNote = recent[0].note ? `（留言：“${recent[0].note}”）` : '';
-                    prompt += `\n[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 转了一笔账，共 ¥${total}${unclaimedNote}，但对方还没有领取。你可以按自己的性格顺手提一句，也可以不提。\n`;
+                    transferNoticeBlock = `[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 转了一笔账，共 ¥${total}${unclaimedNote}，但对方还没有领取。你可以按自己的性格顺手提一句，也可以不提。`;
+                    prompt += `\n${transferNoticeBlock}\n`;
                 }
             }
         } catch (e) { /* ignore */ }
@@ -1088,7 +1146,29 @@ ${universalResult.preamble}`;
             prompt += antiRepeat;
         }
 
-        return { prompt, retrievedMemoriesContext: universalResult.retrievedMemoriesContext };
+        const promptWithoutDigest = [
+            stableCharacterBlock,
+            '',
+            'Context:',
+            universalResult.preamble,
+            styleCorrectionBlock ? `\n${styleCorrectionBlock}` : '',
+            transferNoticeBlock ? `\n${transferNoticeBlock}\n` : '',
+            antiRepeat || ''
+        ].join('\n');
+
+        return {
+            prompt,
+            promptWithoutDigest,
+            retrievedMemoriesContext: universalResult.retrievedMemoriesContext,
+            promptStats: {
+                universalBreakdown: { ...(universalResult.breakdown || {}) },
+                moduleRoutes: { ...(universalResult.moduleRoutes || {}) },
+                digestBlock,
+                antiRepeat,
+                styleCorrectionBlock,
+                transferNoticeBlock
+            }
+        };
     }
 
     async function runStructuredRagPipeline({
@@ -1438,13 +1518,30 @@ ${universalResult.preamble}`;
             retrievalLabel,
             latestUserMessage: recentInputString
         });
+        recordLlmDebug(character, 'event', 'Starting structured memory retrieval.', {
+            context_type: 'chat_intent_retrieve',
+            planner_source: ragPlannerConfig.source,
+            retrieval_label: retrievalLabel,
+            planner_topics: plannerTopics,
+            retrieval_request: retrievalRequest,
+            retrieval_slots: retrievalSlots
+        });
         let dynamicMemories;
         try {
             dynamicMemories = await executeMultiSlotMemorySearch(
                 memory,
                 character.id,
                 retrievalRequest,
-                retrievalSlots
+                retrievalSlots,
+                async (progress) => {
+                    recordLlmDebug(character, 'event', `Structured memory retrieval ${progress.phase}.`, {
+                        context_type: 'chat_intent_retrieve_slot',
+                        planner_source: ragPlannerConfig.source,
+                        retrieval_label: retrievalLabel,
+                        planner_topics: plannerTopics,
+                        ...progress
+                    });
+                }
             );
         } catch (e) {
             e.ragResume = {
@@ -1457,6 +1554,13 @@ ${universalResult.preamble}`;
             };
             throw e;
         }
+        recordLlmDebug(character, 'event', 'Structured memory retrieval finished.', {
+            context_type: 'chat_intent_retrieve',
+            planner_source: ragPlannerConfig.source,
+            retrieval_label: retrievalLabel,
+            planner_topics: plannerTopics,
+            retrieved_count: Array.isArray(dynamicMemories) ? dynamicMemories.length : 0
+        });
         if (dynamicMemories && dynamicMemories.length > 0) {
             const querySummary = Array.isArray(retrievalRequest.queries) ? retrievalRequest.queries.join(' | ') : retrievalLabel;
             const formattedMemories = dynamicMemories.map((m, index) => {
@@ -1606,13 +1710,16 @@ ${universalResult.preamble}`;
             });
 
             if (isUserReply && !extraSystemDirective) {
-                updateRagProgress(character.id, wsClients, { currentKey: 'topics' });
+                updateRagProgress(character.id, wsClients, { currentKey: 'route' });
             }
 
-            const { prompt: systemPrompt, retrievedMemoriesContext } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
+            const { prompt: systemPrompt, promptWithoutDigest, retrievedMemoriesContext, promptStats } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
                 conversationDigest,
                 antiRepeatMessages: contextHistory
             });
+            if (isUserReply && !extraSystemDirective) {
+                updateRagProgress(character.id, wsClients, { currentKey: 'topics' });
+            }
             const apiMessages = [
                 { role: 'system', content: systemPrompt },
                 ...transformedHistory
@@ -1668,6 +1775,39 @@ ${universalResult.preamble}`;
                 updateRagProgress(character.id, wsClients, { currentKey: 'answer' });
             }
 
+            const currentBreakdown = { ...(promptStats?.universalBreakdown || {}) };
+            const estimatedHistoryTokens = estimateMessageTokens(transformedHistory);
+            const estimatedFullHistoryTokens = estimateMessageTokens(
+                (Array.isArray(contextHistory) ? contextHistory : []).map(m => ({
+                    role: m?.role === 'character' ? 'assistant' : 'user',
+                    content: String(m?.content || '')
+                }))
+            );
+            const estimatedMessageEnvelopeTokens = 8 + (Array.isArray(transformedHistory) ? transformedHistory.length * 2 : 0);
+            const estimatedFullMessageEnvelopeTokens = 8 + (Array.isArray(contextHistory) ? contextHistory.length * 2 : 0);
+            const estimatedSystemPromptTokens = getTokenCount(systemPrompt);
+            const estimatedSystemPromptWithoutDigestTokens = getTokenCount(promptWithoutDigest || systemPrompt);
+            const estimatedWithoutCacheTokens = estimatedSystemPromptWithoutDigestTokens + estimatedFullHistoryTokens + estimatedFullMessageEnvelopeTokens;
+            const estimatedWithCacheTokens = estimatedSystemPromptTokens + estimatedHistoryTokens + estimatedMessageEnvelopeTokens;
+            const estimatedRagInjectedTokens = Math.max(0, Number(currentBreakdown.z_memory || 0));
+            const lastRequestContextSnapshot = {
+                estimated_without_cache_tokens: estimatedWithoutCacheTokens,
+                estimated_with_cache_tokens: estimatedWithCacheTokens,
+                estimated_rag_injected_tokens: estimatedRagInjectedTokens,
+                estimated_history_tokens: estimatedHistoryTokens,
+                estimated_full_history_tokens: estimatedFullHistoryTokens,
+                estimated_message_envelope_tokens: estimatedMessageEnvelopeTokens,
+                estimated_full_message_envelope_tokens: estimatedFullMessageEnvelopeTokens,
+                estimated_system_prompt_tokens: estimatedSystemPromptTokens,
+                estimated_system_prompt_without_digest_tokens: estimatedSystemPromptWithoutDigestTokens,
+                breakdown: currentBreakdown,
+                module_routes: { ...(promptStats?.moduleRoutes || {}) },
+                context_msg_limit: Number(charCheck.context_msg_limit || 0),
+                live_history_window_size: Number(liveHistory.length || 0),
+                visible_history_count: Number(contextHistory.length || 0),
+                timestamp: Date.now()
+            };
+
             recordLlmDebug(charCheck, 'input', apiMessages, {
                 context_type: isUserReply ? 'private_reply' : (isTimerWakeup ? 'timer_wakeup' : 'proactive'),
                 isUserReply,
@@ -1677,14 +1817,25 @@ ${universalResult.preamble}`;
                 maxTokens: charCheck.max_tokens || 2000,
                 model: charCheck.model_name,
                 presencePenalty: isUserReply ? 0.35 : 0,
-                frequencyPenalty: isUserReply ? 0.45 : 0
+                frequencyPenalty: isUserReply ? 0.45 : 0,
+                context_snapshot: isUserReply ? lastRequestContextSnapshot : null
             });
+            const uncachedApiMessages = isUserReply
+                ? [
+                    { role: 'system', content: promptWithoutDigest || systemPrompt },
+                    ...(Array.isArray(contextHistory) ? contextHistory : []).map(m => ({
+                        role: m?.role === 'character' ? 'assistant' : 'user',
+                        content: String(m?.content || '')
+                    }))
+                ]
+                : null;
 
             let { content: generatedText, usage, finishReason } = await callLLM({
                 endpoint: character.api_endpoint,
                 key: character.api_key,
                 model: character.model_name,
                 messages: apiMessages,
+                uncachedMessages: uncachedApiMessages,
                 maxTokens: character.max_tokens || 2000,
                 presencePenalty: isUserReply ? 0.35 : 0,
                 frequencyPenalty: isUserReply ? 0.45 : 0,
@@ -2172,6 +2323,9 @@ ${universalResult.preamble}`;
                 id: msgId, character_id: character.id, role: 'system',
                 content: `[System] API Error: ${errText}`, timestamp: msgTs
             });
+            if (generationOptions?.propagateError) {
+                throw e;
+            }
         }
 
         // Re-fetch fresh character data for scheduling (status/interval/pressure may have changed during LLM call)
@@ -2348,6 +2502,22 @@ ${universalResult.preamble}`;
 
         // Stop current background timer
         stopTimer(characterId);
+    }
+
+    async function triggerImmediateUserReply(characterId, wsClients, options = {}) {
+        const freshChar = db.getCharacter(characterId);
+        if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) {
+            throw new Error('角色不可用');
+        }
+        stopTimer(characterId);
+        await triggerMessage(
+            freshChar,
+            wsClients,
+            true,
+            false,
+            options?.extraSystemDirective || null,
+            options || {}
+        );
     }
 
     /**
@@ -2574,6 +2744,7 @@ ${universalResult.preamble}`;
         startEngine,
         stopTimer,
         handleUserMessage,
+        triggerImmediateUserReply,
         broadcastNewMessage,
         broadcastEvent,
         broadcastWalletSync,

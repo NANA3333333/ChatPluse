@@ -2,6 +2,7 @@
 import { Plus, Trash2, ToggleLeft, ToggleRight, Save, DollarSign, Heart, Edit3, X, Power, Package, ShoppingBag, AlertTriangle } from 'lucide-react';
 import { resolveAvatarUrl } from '../../utils/avatar';
 import { deriveEmotion } from '../../utils/emotion';
+import SchoolGrowthPanel from '../cityGrowth/SchoolGrowthPanel';
 
 const FALLBACK_AVATAR = 'https://api.dicebear.com/7.x/shapes/svg?seed=User';
 const avatarSrc = (url, apiUrl) => resolveAvatarUrl(url, apiUrl) || FALLBACK_AVATAR;
@@ -40,7 +41,7 @@ const stateColor = (value, inverted = false) => {
 
 const CONFIG_LABELS = {
     dlc_enabled: 'DLC 总开关',
-    city_actions_paused: '暂停主动活动',
+    city_actions_paused: '暂停生理流逝',
     metabolism_rate: '基础代谢 (每 tick)',
     inflation: '通货膨胀倍率',
     work_bonus: '打工奖金倍率',
@@ -142,6 +143,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
     const [editing, setEditing] = useState(null);
     const [editingItem, setEditingItem] = useState(null);
     const [giveItemTarget, setGiveItemTarget] = useState(null); // { charId, charName }
+    const [actionNotice, setActionNotice] = useState(null);
     const [viewInventory, setViewInventory] = useState(null); // { charName, inventory: [] }
     const [loading, setLoading] = useState(true);
     const [mayorRunning, setMayorRunning] = useState(false);
@@ -156,8 +158,20 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
     const [previewTimeSkipMinutes, setPreviewTimeSkipMinutes] = useState(0);
     const [isSkippingTime, setIsSkippingTime] = useState(false);
     const refreshTimerRef = React.useRef(null);
+    const actionNoticeTimerRef = React.useRef(null);
     const token = localStorage.getItem('token');
     const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+    const showActionNotice = useCallback((kind, message) => {
+        setActionNotice({ kind, message });
+        if (actionNoticeTimerRef.current) {
+            clearTimeout(actionNoticeTimerRef.current);
+        }
+        actionNoticeTimerRef.current = setTimeout(() => {
+            actionNoticeTimerRef.current = null;
+            setActionNotice(null);
+        }, 3500);
+    }, []);
 
     const fetchAll = useCallback(async () => {
         try {
@@ -215,6 +229,10 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                 clearTimeout(refreshTimerRef.current);
                 refreshTimerRef.current = null;
             }
+            if (actionNoticeTimerRef.current) {
+                clearTimeout(actionNoticeTimerRef.current);
+                actionNoticeTimerRef.current = null;
+            }
         };
     }, [fetchAll]);
 
@@ -236,9 +254,52 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
     };
     const deleteItemAction = async (id) => { if (!confirm(`确认删除商品 "${id}" 吗？`)) return; await fetch(`${apiUrl}/city/items/${id}`, { method: 'DELETE', headers }); fetchAll(); };
 
-    const giveGold = async (charId, charName) => { const a = prompt(`给 ${charName} 发多少金币？`, '100'); if (!a) return; await fetch(`${apiUrl}/city/give-gold`, { method: 'POST', headers, body: JSON.stringify({ characterId: charId, amount: Number(a) }) }); fetchAll(); };
-    const feedChar = async (charId, charName) => { const c = prompt(`给 ${charName} 补多少体力？`, '1000'); if (!c) return; await fetch(`${apiUrl}/city/feed`, { method: 'POST', headers, body: JSON.stringify({ characterId: charId, calories: Number(c) }) }); fetchAll(); };
-    const giveItem = async (charId, itemId) => { await fetch(`${apiUrl}/city/give-item`, { method: 'POST', headers, body: JSON.stringify({ characterId: charId, itemId, quantity: 1 }) }); setGiveItemTarget(null); fetchAll(); };
+    const giveGold = async (charId, charName) => {
+        const a = prompt(`给 ${charName} 发多少金币？`, '100');
+        if (!a) return;
+        try {
+            const res = await fetch(`${apiUrl}/city/give-gold`, { method: 'POST', headers, body: JSON.stringify({ characterId: charId, amount: Number(a) }) });
+            const data = await res.json();
+            if (!res.ok || data?.success === false) throw new Error(data?.error || '发金币失败');
+            fetchAll();
+            alert(`已给 ${charName} 发放 ${Number(a) || 0} 金币。`);
+        } catch (e) {
+            alert(`发金币失败: ${e.message}`);
+        }
+    };
+    const feedChar = async (charId, charName) => {
+        const c = prompt(`给 ${charName} 补多少体力？`, '1000');
+        if (!c) return;
+        try {
+            const res = await fetch(`${apiUrl}/city/feed`, { method: 'POST', headers, body: JSON.stringify({ characterId: charId, calories: Number(c) }) });
+            const data = await res.json();
+            if (!res.ok || data?.success === false) throw new Error(data?.error || '补体力失败');
+            fetchAll();
+            alert(`已给 ${charName} 补充 ${Number(c) || 0} 点体力。`);
+        } catch (e) {
+            alert(`补体力失败: ${e.message}`);
+        }
+    };
+    const giveItem = async (charId, itemId) => {
+        const targetName = giveItemTarget?.charName || '该角色';
+        const item = items.find(it => it.id === itemId);
+        setGiveItemTarget(null);
+        showActionNotice('success', `已送出 ${item?.emoji || ''}${item?.name || '物品'} 给 ${targetName}，角色回复正在后台生成。`);
+        void (async () => {
+            try {
+                const res = await fetch(`${apiUrl}/city/give-item`, {
+                    method: 'POST',
+                    headers,
+                    body: JSON.stringify({ characterId: charId, itemId, quantity: 1 })
+                });
+                const data = await res.json();
+                if (!res.ok || data?.success === false) throw new Error(data?.error || '送物品失败');
+                fetchAll();
+            } catch (e) {
+                showActionNotice('error', `送物品失败: ${e.message}`);
+            }
+        })();
+    };
     const deleteEvent = async (id) => { await fetch(`${apiUrl}/city/events/${id}`, { method: 'DELETE', headers }); fetchAll(); };
     const deleteQuest = async (id) => { await fetch(`${apiUrl}/city/quests/${id}`, { method: 'DELETE', headers }); fetchAll(); };
 
@@ -301,13 +362,30 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
     };
 
     const dlcEnabled = config.dlc_enabled === '1' || config.dlc_enabled === 'true';
-    const actionsPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
+    const physiologyPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
     if (loading) return <div style={{ padding: '20px', textAlign: 'center', color: '#999' }}>加载中...</div>;
 
     const mayorEnabled = config.mayor_enabled === '1' || config.mayor_enabled === 'true';
 
     return (
         <div style={{ padding: '16px', maxWidth: '1100px', margin: '0 auto', overflowY: 'auto', height: '100%' }}>
+            {actionNotice?.message && (
+                <div style={{
+                    position: 'sticky',
+                    top: '8px',
+                    zIndex: 30,
+                    marginBottom: '12px',
+                    padding: '10px 14px',
+                    borderRadius: '12px',
+                    fontSize: '13px',
+                    fontWeight: '500',
+                    backgroundColor: actionNotice.kind === 'error' ? '#fdecea' : '#edf7ed',
+                    color: actionNotice.kind === 'error' ? '#c62828' : '#2e7d32',
+                    border: `1px solid ${actionNotice.kind === 'error' ? '#f5c2c7' : '#b7dfb9'}`
+                }}>
+                    {actionNotice.message}
+                </div>
+            )}
 
             <div style={{ ...sectionStyle, border: dlcEnabled ? '2px solid #4caf50' : '2px solid #f44336' }}>
                 <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -325,22 +403,20 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                 </div>
             </div>
 
-            <div style={{ ...sectionStyle, border: !dlcEnabled ? '2px solid #bdbdbd' : actionsPaused ? '2px solid #ff9800' : '2px solid #4caf50', opacity: dlcEnabled ? 1 : 0.82 }}>
+            <div style={{ ...sectionStyle, border: physiologyPaused ? '2px solid #ff9800' : '2px solid #4caf50', opacity: 1 }}>
                     <div style={{ padding: '16px 20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                         <div>
                             <h3 style={{ margin: 0, fontSize: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                <Power size={18} color={!dlcEnabled ? '#9e9e9e' : actionsPaused ? '#ff9800' : '#4caf50'} /> 暂停主动活动
+                                <Power size={18} color={physiologyPaused ? '#ff9800' : '#4caf50'} /> 暂停生理流逝
                             </h3>
                             <p style={{ margin: '4px 0 0', fontSize: '12px', color: '#888' }}>
-                                {!dlcEnabled
-                                    ? '当前 DLC 总开关处于关闭状态。这里是预设项：重新启用商业街后，会按这里的设置决定是否继续主动活动。'
-                                    : actionsPaused
-                                    ? '角色不会继续跑日程、主动行动和社交，但睡眠债、饱腹值等被动生理仍会随时间变化。'
-                                    : '角色会继续自主行动并消耗 API；被动生理也会继续变化。'}
+                                {physiologyPaused
+                                    ? '角色的精力、睡眠债、压力、饱腹感、胃负担、健康等生理变量将暂停随时间流逝。'
+                                    : '角色的生理变量会继续随时间流逝；这与是否参与商业街活动分开控制。'}
                             </p>
                         </div>
-                        <button style={btnStyle(actionsPaused ? '#4caf50' : '#ff9800')} onClick={() => updateConfig('city_actions_paused', actionsPaused ? '0' : '1')}>
-                            {actionsPaused ? <><ToggleLeft size={16} /> 恢复主动活动</> : <><ToggleRight size={16} /> 暂停主动活动</>}
+                        <button style={btnStyle(physiologyPaused ? '#4caf50' : '#ff9800')} onClick={() => updateConfig('city_actions_paused', physiologyPaused ? '0' : '1')}>
+                            {physiologyPaused ? <><ToggleLeft size={16} /> 恢复生理流逝</> : <><ToggleRight size={16} /> 暂停生理流逝</>}
                         </button>
                     </div>
                 </div>
@@ -384,14 +460,16 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                         <div>15. 主情绪对群聊：生气更容易呛人或反驳；委屈更容易沉默或轻微带刺；开心更容易接话和活跃；寂寞更想被注意；困倦和难受更容易潜水和少参与。</div>
                         <div>16. 主情绪对商业街：难受和困倦更偏向医疗或休息；委屈和伤心更偏向安全、熟悉、低刺激地点；寂寞更偏向公共场所和休闲区；生气和烦躁更偏向散心、发泄或转移注意力；开心更偏向娱乐、探索和主动活动。</div>
                         <div>17. 实时刷新：收到私聊消息、群聊消息、商业街更新和联系人刷新事件时，前端会自动刷新联系人情绪，不需要手动刷新页面。</div>
-                        <div>18. 暂停主动活动：开启后，商业街角色不会继续跑日程、主动行动和社交，但睡眠债、饱腹值、精力等被动生理仍会随时间流逝。</div>
-                        <div>19. 被动生理结算周期：角色的“商业街活动频率 (次/小时)”现在也会决定被动生理多久结算一次。频率越高，精力、睡眠债、饱腹感、胃负担等变化越平滑；频率越低，变化会更成块，但同一段总时间内的整体生理消耗仍尽量保持一致。</div>
+                        <div>18. 商业街活动开关：关闭上方 DLC 总开关后，角色不再继续参与商业街活动、日程与社交。</div>
+                        <div>19. 生理流逝开关：开启“暂停生理流逝”后，精力、睡眠债、压力、饱腹感、胃负担、健康等变量会停止随时间变化。</div>
                         <div>20. 场景化私聊：角色在工作中、睡觉中、吃饭中时，私聊和群聊语气会带上当前场景，不再像完全空闲时那样聊天。</div>
                         <div>21. 工作打扰：角色在工作中被用户频繁私聊或群聊点名时，会累计分心值；工作结束时可能少赚一点钱，压力也会上升。</div>
                         <div>22. 睡眠打扰：角色在睡觉时被用户频繁私聊或群聊点名时，会累计睡眠打断值；休息结束时睡眠债恢复会变差，精力也会受影响。</div>
                     </div>
                 </details>
             </div>
+
+            <SchoolGrowthPanel apiUrl={apiUrl} headers={headers} />
 
             <div style={sectionStyle}>
                 <div style={headerStyle}>

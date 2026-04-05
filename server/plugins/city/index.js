@@ -1,6 +1,8 @@
 ﻿const cron = require('node-cron');
 const crypto = require('crypto');
 const initCityDb = require('./cityDb');
+const initCityGrowthDb = require('../cityGrowth/growthDb');
+const schoolLogic = require('../cityGrowth/schoolLogic');
 const { buildUniversalContext } = require('../../contextBuilder');
 const { deriveEmotion, applyEmotionEvent, getEmotionBehaviorGuidance, buildEmotionLogEntry } = require('../../emotion');
 
@@ -57,6 +59,41 @@ module.exports = function initCityPlugin(app, context) {
         if (entry) db.addEmotionLog(entry);
     }
 
+    async function triggerAdminGrantChat(userId, char, grantKind, details = {}) {
+        if (!char?.id) return null;
+        const db = ensureCityDb(getUserDb(userId));
+        const engine = getEngine(userId);
+        const wsClients = getWsClients(userId);
+        if (!engine || typeof engine.triggerImmediateUserReply !== 'function') {
+            throw new Error('私聊引擎不可用');
+        }
+
+        const amount = Number(details.amount || 0);
+        const itemName = String(details.itemName || '').trim();
+        const itemEmoji = String(details.itemEmoji || '').trim();
+        const quantity = Number(details.quantity || 1) || 1;
+        const userName = String(db.getUserProfile()?.name || '用户').trim() || '用户';
+        const noticeContent = grantKind === 'gold'
+            ? `${userName}刚给了你 ${amount} 金币。`
+            : grantKind === 'calories'
+                ? `${userName}刚给你补了 ${amount} 点体力/热量。`
+                : `${userName}刚给了你 ${itemEmoji}${itemName} x${quantity}。`;
+
+        const { id: msgId, timestamp: msgTs } = db.addMessage(char.id, 'system', noticeContent);
+        const newMessage = {
+            id: msgId,
+            character_id: char.id,
+            role: 'system',
+            content: noticeContent,
+            timestamp: msgTs,
+            read: 0
+        };
+        engine?.broadcastNewMessage?.(wsClients, newMessage);
+        engine?.broadcastEvent?.(wsClients, { type: 'refresh_contacts' });
+        await engine.triggerImmediateUserReply(char.id, wsClients, { propagateError: true });
+        return newMessage;
+    }
+
     function slugifyCityId(value, fallbackPrefix) {
         const base = String(value || '')
             .trim()
@@ -107,6 +144,14 @@ module.exports = function initCityPlugin(app, context) {
             db.city = initCityDb(rawDb);
         }
         return db;
+    }
+
+    function ensureCityGrowthDb(db) {
+        if (!db.cityGrowth) {
+            const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : db;
+            db.cityGrowth = initCityGrowthDb(rawDb);
+        }
+        return db.cityGrowth;
     }
 
     // City virtual clock
@@ -279,8 +324,7 @@ module.exports = function initCityPlugin(app, context) {
     async function maybeTriggerSuggestedCityAction(userId, characterId, content, sourceLabel = '私聊') {
         const db = ensureCityDb(context.getUserDb(userId));
         const config = db.city.getConfig();
-        const actionsPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
-        if (config.dlc_enabled === '0' || config.dlc_enabled === 'false' || actionsPaused) return { triggered: false, reason: 'city_paused' };
+        if (config.dlc_enabled === '0' || config.dlc_enabled === 'false') return { triggered: false, reason: 'city_paused' };
 
         const char = db.getCharacter(characterId);
         if (!char || char.status !== 'active' || char.sys_survival === 0) return { triggered: false, reason: 'character_inactive' };
@@ -571,6 +615,7 @@ ${normalizedReply || '（空）'}
 3. log 要像商业街活动记录，1-2句，贴近角色刚才那句私聊的真实语气。
 4. chat / moment / diary 默认可留空；只有当角色刚才那句私聊里已经明显带出这些内容时才填写。
 5. 不要写系统、后台、模板、日志、触发器。
+6. 如果目标地点属于吃饭/购物场景，不要提前编造“具体买了/吃了哪件商品”；商品结算会在后续真实发生。
 
 严格返回 JSON 对象：
 {
@@ -902,8 +947,7 @@ ${normalizedReply || '（空）'}
     async function maybeExecuteReplyCityIntent(userId, characterId, intentText, replyText = '') {
         const db = ensureCityDb(context.getUserDb(userId));
         const config = db.city.getConfig();
-        const actionsPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
-        if (config.dlc_enabled === '0' || config.dlc_enabled === 'false' || actionsPaused) return { triggered: false, reason: 'city_paused' };
+        if (config.dlc_enabled === '0' || config.dlc_enabled === 'false') return { triggered: false, reason: 'city_paused' };
 
         const char = db.getCharacter(characterId);
         if (!char || char.status !== 'active' || char.sys_survival === 0) return { triggered: false, reason: 'character_inactive' };
@@ -938,8 +982,7 @@ ${normalizedReply || '（空）'}
     async function maybeExecuteReplyCityAction(userId, characterId, actionPayload, replyText = '') {
         const db = ensureCityDb(context.getUserDb(userId));
         const config = db.city.getConfig();
-        const actionsPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
-        if (config.dlc_enabled === '0' || config.dlc_enabled === 'false' || actionsPaused) {
+        if (config.dlc_enabled === '0' || config.dlc_enabled === 'false') {
             return { triggered: false, reason: 'city_paused' };
         }
 
@@ -1010,8 +1053,15 @@ ${normalizedReply || '（空）'}
             const isSleeping = char.city_status === 'sleeping';
             const isComa = char.city_status === 'coma';
             const atHome = (char.location || 'home') === 'home';
+            const slowTick = minuteMark % 10 === 0;
+            const mediumTick = minuteMark % 5 === 0;
 
-            state.sleep_debt = clamp(state.sleep_debt + (isSleeping ? -5 : 1), 0, 100);
+            // Passive survival should drift gradually. The old minute-by-minute
+            // penalties were stacking too aggressively and made "paused actions"
+            // look broken because stats still collapsed very fast.
+            if (slowTick) {
+                state.sleep_debt = clamp(state.sleep_debt + (isSleeping ? -2 : 1), 0, 100);
+            }
 
             if (minuteMark % 12 === 0) {
                 state.satiety = clamp(state.satiety - 1, 0, 100);
@@ -1019,39 +1069,48 @@ ${normalizedReply || '（空）'}
             if (minuteMark % 6 === 0) {
                 state.stomach_load = clamp(state.stomach_load - 2, 0, 100);
             }
-            if (state.stomach_load >= 65) {
+            if (slowTick && state.stomach_load >= 75) {
                 state.sleep_debt = clamp(state.sleep_debt + 1, 0, 100);
             }
 
-            let energyDelta = isSleeping ? 6 : -1;
-            if (calories < 800) energyDelta -= 1;
-            if (state.sleep_debt > 70) energyDelta -= 1;
-            if (state.health < 40) energyDelta -= 1;
-            if (state.stomach_load > 75) energyDelta -= 1;
-            const sleepDisruption = clamp(parseInt(char.sleep_disruption ?? 0, 10) || 0, 0, 100);
-            if (isSleeping && sleepDisruption > 0) {
-                energyDelta -= Math.max(1, Math.ceil(sleepDisruption / 8));
-                state.sleep_debt = clamp(state.sleep_debt + Math.max(1, Math.ceil(sleepDisruption / 10)), 0, 100);
+            if (mediumTick) {
+                let energyDelta = isSleeping ? 2 : 0;
+                if (!isSleeping && slowTick) energyDelta -= 1;
+                if (calories < 800) energyDelta -= 1;
+                if (state.sleep_debt > 70) energyDelta -= 1;
+                if (state.health < 40) energyDelta -= 1;
+                if (state.stomach_load > 75) energyDelta -= 1;
+                const sleepDisruption = clamp(parseInt(char.sleep_disruption ?? 0, 10) || 0, 0, 100);
+                if (isSleeping && sleepDisruption > 0) {
+                    energyDelta -= Math.max(1, Math.ceil(sleepDisruption / 20));
+                    if (slowTick) {
+                        state.sleep_debt = clamp(state.sleep_debt + Math.max(1, Math.ceil(sleepDisruption / 25)), 0, 100);
+                    }
+                }
+                state.energy = clamp(state.energy + energyDelta, 0, 100);
             }
-            state.energy = clamp(state.energy + energyDelta, 0, 100);
 
-            let stressDelta = 0;
-            if ((char.wallet ?? 0) < 20) stressDelta += 1;
-            if (calories < 500) stressDelta += 1;
-            if (state.sleep_debt > 80) stressDelta += 1;
-            if (state.stomach_load > 80) stressDelta += 1;
-            if (isSleeping || atHome) stressDelta -= 1;
-            if (isComa) stressDelta += 2;
-            state.stress = clamp(state.stress + stressDelta, 0, 100);
+            if (slowTick) {
+                let stressDelta = 0;
+                if ((char.wallet ?? 0) < 20) stressDelta += 1;
+                if (calories < 500) stressDelta += 1;
+                if (state.sleep_debt > 80) stressDelta += 1;
+                if (state.stomach_load > 80) stressDelta += 1;
+                if (isSleeping || atHome) stressDelta -= 1;
+                if (isComa) stressDelta += 2;
+                state.stress = clamp(state.stress + stressDelta, 0, 100);
 
-            state.social_need = clamp(state.social_need + (atHome ? 1 : -2), 0, 100);
+                state.social_need = clamp(state.social_need + (atHome ? 1 : -1), 0, 100);
+            }
 
-            let healthDelta = 0;
-            if (calories === 0) healthDelta -= 4;
-            else if (calories < 400) healthDelta -= 1;
-            if (state.sleep_debt > 90) healthDelta -= 1;
-            if (isSleeping && calories > 900) healthDelta += 1;
-            state.health = clamp(state.health + healthDelta, 0, 100);
+            if (slowTick) {
+                let healthDelta = 0;
+                if (calories === 0) healthDelta -= 2;
+                else if (calories < 400) healthDelta -= 1;
+                if (state.sleep_debt > 90) healthDelta -= 1;
+                if (isSleeping && calories > 900) healthDelta += 1;
+                state.health = clamp(state.health + healthDelta, 0, 100);
+            }
         }
 
         state.mood = calculateDerivedMood(state);
@@ -1273,6 +1332,8 @@ ${normalizedReply || '（空）'}
         const emotionGuidance = getEmotionBehaviorGuidance(char);
         hardConstraintText += `\n- 主情绪：${emotionGuidance.emotion.label} ${emotionGuidance.emotion.emoji}`;
         hardConstraintText += `\n- 情绪影响：${emotionGuidance.cityAction}`;
+        const growthDb = ensureCityGrowthDb(context.getUserDb(char.user_id || 'default'));
+        const schoolPromptBlock = schoolLogic.buildSchoolPromptBlock(growthDb, char);
 
         return `[世界背景]
 ${universalContext?.preamble || ''}
@@ -1295,6 +1356,7 @@ ${universalContext?.preamble || ''}
 精力=${state.energy} 睡眠债=${state.sleep_debt} 心情=${state.mood} 压力=${state.stress}
 社交需求=${state.social_need} 健康=${state.health} 饱腹=${state.satiety} 胃负担=${state.stomach_load}
 身体等级=${physicalCondition.label} | 后果=${physicalCondition.summary}${sensation}${eventInfo}
+${schoolPromptBlock ? '\n' + schoolPromptBlock : ''}
 
 ${taskInstruction}
 [行动约束]${hardConstraintText}
@@ -1559,35 +1621,44 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             res.json({ success: true, schedule: JSON.parse(schedule.schedule_json) });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
-    app.post('/api/city/give-gold', authMiddleware, (req, res) => {
+    app.post('/api/city/give-gold', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
             const { characterId, amount } = req.body;
             const char = req.db.getCharacter(characterId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
-            const newWallet = (char.wallet || 0) + Number(amount);
+            const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
+            const giftAmount = Number(amount) || 0;
+            const newWallet = (char.wallet || 0) + giftAmount;
             req.db.updateCharacter(characterId, { wallet: newWallet });
-            req.db.city.logAction(characterId, 'GIFT', `管理员给了 ${char.name} ${amount} 金币 🎁`, 0, Number(amount));
+            req.db.city.logAction(characterId, 'GIFT', `${userName}给 ${char.name} 送了 ${giftAmount} 金币 🎁`, 0, giftAmount);
 
             const wsClients = getWsClients(req.user.id);
             const engine = getEngine(req.user.id);
             if (engine && typeof engine.broadcastWalletSync === 'function') {
                 engine.broadcastWalletSync(wsClients, characterId);
             }
+            await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'gold', {
+                amount: giftAmount
+            });
 
             res.json({ success: true, wallet: newWallet });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
-    app.post('/api/city/feed', authMiddleware, (req, res) => {
+    app.post('/api/city/feed', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
             const { characterId, calories } = req.body;
             const char = req.db.getCharacter(characterId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
+            const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
             const addCals = Number(calories) || 1000;
             const newCals = Math.min(4000, (char.calories ?? 2000) + addCals);
             req.db.updateCharacter(characterId, { calories: newCals, city_status: newCals > 500 ? 'idle' : 'hungry' });
-            req.db.city.logAction(characterId, 'FED', `管理员投喂了 ${char.name} (+${addCals}卡) 🍱`, addCals, 0);
+            req.db.city.logAction(characterId, 'FED', `${userName}给 ${char.name} 送了补给 (+${addCals}卡) 🍱`, addCals, 0);
+            await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'calories', {
+                amount: addCals
+            });
             res.json({ success: true, calories: newCals });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -1624,7 +1695,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
     });
 
     // Admin: give item to a character
-    app.post('/api/city/give-item', authMiddleware, (req, res) => {
+    app.post('/api/city/give-item', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
             const { characterId, itemId, quantity } = req.body;
@@ -1632,8 +1703,15 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             const item = req.db.city.getItem(itemId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
             if (!item) return res.status(404).json({ error: '物品不存在' });
-            req.db.city.addToInventory(characterId, itemId, quantity || 1);
-            req.db.city.logAction(characterId, 'GIVE_ITEM', `管理员给了 ${char.name} ${item.emoji}${item.name} x${quantity || 1} 🎁`, 0, 0);
+            const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
+            const safeQuantity = quantity || 1;
+            req.db.city.addToInventory(characterId, itemId, safeQuantity);
+            req.db.city.logAction(characterId, 'GIVE_ITEM', `${userName}给 ${char.name} 送了 ${item.emoji}${item.name} x${safeQuantity} 🎁`, 0, 0);
+            await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'item', {
+                itemName: item.name,
+                itemEmoji: item.emoji,
+                quantity: safeQuantity
+            });
             res.json({ success: true, inventory: req.db.city.getInventory(characterId) });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -1772,10 +1850,11 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                     ensureCityDb(db);
 
                     const config = db.city.getConfig();
-                    if (config.dlc_enabled === '0' || config.dlc_enabled === 'false') continue;
+                    const cityActivityEnabled = !(config.dlc_enabled === '0' || config.dlc_enabled === 'false');
+                    const physiologyPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
+                    if (!cityActivityEnabled && physiologyPaused) continue;
 
                     const districts = db.city.getEnabledDistricts();
-                    const actionsPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
                     const metabolismRate = parseInt(config.metabolism_rate) || 20;
 
                     // Adjust metabolism drain to be per-minute based (originally 20 per 15-min tick)
@@ -1806,7 +1885,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         const passiveInterval = getPassiveTickIntervalMinutes(char.city_action_frequency || 1);
                         const shouldApplyPassiveTick = currentMinute % passiveInterval === 0;
 
-                        if (shouldApplyPassiveTick) {
+                        if (!physiologyPaused && shouldApplyPassiveTick) {
                             let currentCityStatus = char.city_status ?? 'idle';
                             const passiveState = applyPassiveSurvivalTick(
                                 { ...char, city_status: currentCityStatus },
@@ -1856,7 +1935,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                             }
                         }
 
-                        if (actionsPaused) {
+                        if (!cityActivityEnabled) {
                             continue;
                         }
 
@@ -1890,8 +1969,12 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                             c.status === 'active' && c.sys_city_social !== 0
                         );
                         await checkSocialCollisions(socialCandidates, db, user.id, districts, config, minuteKey);
-                    } else if (actionsPaused) {
-                        console.log(`[City] ⏸️ ${user.username}: 主动活动已暂停，被动生理仍在流逝 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                    } else if (!cityActivityEnabled && !physiologyPaused) {
+                        console.log(`[City] ⏸️ ${user.username}: 商业街活动已暂停，仅保留生理流逝 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                    } else if (cityActivityEnabled && physiologyPaused) {
+                        console.log(`[City] 🫀 ${user.username}: 生理流逝已暂停，商业街活动继续运行 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                    } else if (!cityActivityEnabled && physiologyPaused) {
+                        console.log(`[City] ⏹️ ${user.username}: 商业街活动与生理流逝均已暂停 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
                     }
                 } catch (e) {
                     console.error(`[City] 用户 ${user.username} 出错:`, e.message);
@@ -2309,6 +2392,27 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         let dCal = -(district.cal_cost || 0) + (district.cal_reward || 0);
         let dMoney = -(district.money_cost || 0) * inflation + (district.money_reward || 0) * workBonus;
         let stateEffects = getDistrictStateEffects(district, richNarrations);
+        const growthDb = ensureCityGrowthDb(db);
+        const schoolProfile = schoolLogic.getCharacterSchoolProfile(growthDb, char.id);
+        stateEffects = schoolLogic.applySchoolPerksToState(district, stateEffects, schoolProfile, currentState);
+
+        if (district.type === 'work' && dMoney > 0 && schoolProfile.vocational > 0) {
+            const vocationalBonus = schoolProfile.vocational >= 70
+                ? 0.22
+                : schoolProfile.vocational >= 40
+                    ? 0.12
+                    : schoolProfile.vocational >= 20
+                        ? 0.06
+                        : 0;
+            if (vocationalBonus > 0) {
+                dMoney = Math.round(dMoney * (1 + vocationalBonus));
+                stateEffects = {
+                    ...stateEffects,
+                    stress: stateEffects.stress - (schoolProfile.vocational >= 70 ? 3 : 1),
+                    mood: stateEffects.mood + (schoolProfile.vocational >= 70 ? 2 : 1)
+                };
+            }
+        }
 
         // Apply active event effects
         if (activeEvents && activeEvents.length > 0) {
@@ -2328,7 +2432,8 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         }
 
         // Robust narration extractor: if 'log' is missing but other fields exist, use them as fallback
-        const getLogText = (defaultString) => {
+        const getLogText = (defaultString, options = {}) => {
+            if (options.forceDefault) return defaultString;
             if (!richNarrations) return defaultString;
             const candidates = [
                 richNarrations.log,
@@ -2392,7 +2497,9 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                             stomach_load: (stateEffects.stomach_load || 0) + loadBoost,
                             sleep_debt: (stateEffects.sleep_debt || 0) + Math.round(loadBoost * 0.6)
                         };
-                        const eatLog = getLogText(`${buildActionFallbackLog(char, district, db)} 顺手点了 ${item.emoji}${item.name}，坐下就把这口热乎的先吃进去了。`);
+                        // For itemized restaurant/shop actions, the final log must reflect the
+                        // actual settled item instead of an earlier LLM guess.
+                        const eatLog = getLogText(`${buildActionFallbackLog(char, district, db)} 顺手点了 ${item.emoji}${item.name}，坐下就把这口热乎的先吃进去了。`, { forceDefault: true });
                         db.city.logAction(char.id, 'EAT', eatLog, dCal, dMoney, district.id);
                         broadcastCityEvent(userId, char.id, 'EAT', eatLog);
                         broadcastCityToChat(userId, char, eatLog, 'EAT', richNarrations);
@@ -2400,7 +2507,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         db.city.addToInventory(char.id, item.id, 1);
                         dMoney = -itemCost;
                         dCal = -(district.cal_cost || 0); // walking there costs calories
-                        const buyLog = getLogText(`${buildActionFallbackLog(char, district, db)} 最后挑了 ${item.emoji}${item.name} 带走。`);
+                        const buyLog = getLogText(`${buildActionFallbackLog(char, district, db)} 最后挑了 ${item.emoji}${item.name} 带走。`, { forceDefault: true });
                         db.city.logAction(char.id, 'BUY', buyLog, dCal, dMoney, district.id);
                         broadcastCityEvent(userId, char.id, 'BUY', buyLog);
                         broadcastCityToChat(userId, char, buyLog, 'BUY', richNarrations);
@@ -2468,7 +2575,19 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 db.city.logAction(char.id, 'BROKE', brokeLog, 0, 0, district.id);
                 return;
             }
-            const normalLog = getLogText(buildActionFallbackLog(char, district, db));
+            let normalLog = getLogText(buildActionFallbackLog(char, district, db));
+            if (district.type === 'education') {
+                const studyResult = schoolLogic.getSchoolActionEffects(growthDb, char, district, currentState);
+                if (studyResult) {
+                    growthDb.addCharacterCourseMastery(char.id, studyResult.course.id, studyResult.gain);
+                    stateEffects = {
+                        ...stateEffects,
+                        mood: stateEffects.mood + 2,
+                        stress: stateEffects.stress - 1
+                    };
+                    normalLog = `${normalLog} 这次主要上了 ${studyResult.course.emoji}${studyResult.course.name}，熟练度 +${studyResult.gain}，现在是 ${studyResult.afterMastery}/100。${schoolLogic.describeSchoolUnlock(studyResult.course.id, studyResult.unlockedTier)}`.trim();
+                }
+            }
             db.city.logAction(char.id, district.id.toUpperCase(), normalLog, dCal, dMoney, district.id);
             if (richNarrations) broadcastCityToChat(userId, char, normalLog, district.id.toUpperCase(), richNarrations);
         }
