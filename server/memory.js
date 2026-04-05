@@ -10,7 +10,7 @@ const qdrant = require('./qdrant');
 const LOCAL_EMBEDDING_MODEL = process.env.LOCAL_EMBEDDING_MODEL || 'Xenova/bge-m3';
 const LOCAL_EMBEDDING_DIM = Number(process.env.LOCAL_EMBEDDING_DIM || 1024);
 const LOCAL_EMBEDDING_INDEX_TAG = process.env.LOCAL_EMBEDDING_INDEX_TAG || 'bge_m3_1024';
-const MEMORY_QUERY_EXPANSION_ENABLED = process.env.MEMORY_QUERY_EXPANSION_ENABLED === '1';
+const MEMORY_QUERY_EXPANSION_ENABLED = process.env.MEMORY_QUERY_EXPANSION_ENABLED !== '0';
 const LOCAL_VECTOR_INDEX_ENABLED = process.env.LOCAL_VECTOR_INDEX_ENABLED === '1';
 
 // Dynamic import for transformers.js

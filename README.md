@@ -5,7 +5,7 @@
 > **2026-04-05 最新修复说明**
 > - 修掉了私聊里 RAG `retrieve` 阶段会卡死的问题，根因是聊天链里不该现场自愈重建索引。
 > - 实时聊天链默认不再让本地 `vectra` 参与自动回退，当前主路径是 `Qdrant + SQLite 正文 + lexical/semantic fallback`。
-> - 关闭了默认的额外检索查询扩展步骤，不再在检索前额外绕一层小模型加工。
+> - 保留了检索前的查询扩展设计，只修掉了会把实时链路拖死的部分。
 > - 放松了 `profile` 槽过滤，轻度关系化的用户画像记忆不再被白白筛掉。
 > - 连续相同的 API 报错现在会在私聊里合并显示，不再一条一条刷屏。
 > - 商业街管理员赠送物品/钱/体力现在会按正常私聊链触发角色反馈并进入后续上下文。
@@ -304,7 +304,7 @@ Today’s work focused on the Claude private-chat path, the RAG retrieval pipeli
 
 - Removed chat-time self-healing index rebuilds from the live retrieval path. Previously, a normal private-chat request could enter `retrieve`, decide the index looked unhealthy, and start rebuilding during the reply, which caused long hangs and heavy local CPU usage.
 - Disabled vectra in the real-time retrieval path by default. The current live path is effectively `Qdrant + SQLite memory content + lexical/semantic fallback`. Local vectra is now opt-in only via `LOCAL_VECTOR_INDEX_ENABLED=1`.
-- Disabled the extra “expand retrieval queries with another LLM call” step by default. It can still be re-enabled with `MEMORY_QUERY_EXPANSION_ENABLED=1`, but it no longer slows down the standard retrieval path out of the box.
+- Kept the retrieval-query expansion step as part of the design, but removed the parts of the live path that were causing retrieval to stall.
 - Added finer-grained retrieval tracing so logs now show retrieve start/end, per-slot progress, Qdrant query phases, and fallback phases. This makes it much easier to tell whether a request is stuck in topics, rewrite, retrieve, or main output.
 - Added `GET /api/system/embedding-status` to inspect the local `bge-m3` embedding runtime: loaded state, active jobs, recent latency, and errors.
 - Relaxed profile-slot filtering so lightly relationship-tinted user-profile memories can still be injected. This fixes a case where valid profile memories were being retrieved and then discarded because they mentioned possessiveness, teasing style, or interaction habits.
