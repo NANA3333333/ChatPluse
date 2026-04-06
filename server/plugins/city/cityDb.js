@@ -12,6 +12,9 @@ module.exports = function initCityDb(db) {
     try { db.exec("ALTER TABLE characters ADD COLUMN sys_city_social INTEGER DEFAULT 1;"); } catch (e) { }
     try { db.exec("ALTER TABLE characters ADD COLUMN is_scheduled INTEGER DEFAULT 1;"); } catch (e) { }
     try { db.exec("ALTER TABLE characters ADD COLUMN city_action_frequency INTEGER DEFAULT 1;"); } catch (e) { }
+    try { db.exec("ALTER TABLE characters ADD COLUMN city_status_started_at INTEGER DEFAULT 0;"); } catch (e) { }
+    try { db.exec("ALTER TABLE characters ADD COLUMN city_status_until_at INTEGER DEFAULT 0;"); } catch (e) { }
+    try { db.exec("ALTER TABLE characters ADD COLUMN city_medical_last_recovery_at INTEGER DEFAULT 0;"); } catch (e) { }
 
     // ═══════════════════════════════════════════════════════════════════════
     //  2. City Action Logs
@@ -321,6 +324,63 @@ module.exports = function initCityDb(db) {
     // ═══════════════════════════════════════════════════════════════════════
 
     // --- Logs ---
+    const STRUCTURED_CITY_LOG_ACTIONS = new Set([
+        'GIFT',
+        'FED',
+        'GIVE_ITEM',
+        'MAYOR',
+        'EVENT',
+        'QUEST',
+        'ANNOUNCE',
+        'TIMESKIP',
+        'BUY',
+        'EAT',
+        'STARVE',
+        'BROKE'
+    ]);
+
+    function stripTrailingClosers(text) {
+        return String(text || '').trim().replace(/[\s"'”’」』）)\]}\.~]+$/u, '');
+    }
+
+    function endsWithEmojiLike(text) {
+        const stripped = stripTrailingClosers(text);
+        if (!stripped) return false;
+        return /[\p{Extended_Pictographic}\p{Emoji_Presentation}]$/u.test(stripped);
+    }
+
+    function hasNaturalSentenceEnding(text) {
+        const normalized = String(text || '').trim();
+        if (!normalized) return false;
+        return /[。？！!?…][\s"'”’」』）)\]}\.~]*$/u.test(normalized) || endsWithEmojiLike(normalized);
+    }
+
+    function shouldDetectTruncation(log) {
+        const actionType = String(log?.action_type || '').trim().toUpperCase();
+        const content = String(log?.content || '').trim();
+        if (!content) return false;
+        if (/\[系统提示\]|系统提示|系统广播|城市广播/u.test(content)) return false;
+        if (STRUCTURED_CITY_LOG_ACTIONS.has(actionType)) return false;
+        return true;
+    }
+
+    function decorateCityLogForUser(log) {
+        const originalContent = String(log?.content || '').trim();
+        const isTruncated = shouldDetectTruncation(log) && !hasNaturalSentenceEnding(originalContent);
+        return {
+            ...log,
+            is_truncated: isTruncated,
+            truncated_original_content: isTruncated ? originalContent : null,
+        };
+    }
+
+    function isVisibleCityLogForCharacter(log) {
+        const content = String(log?.content || '').trim();
+        if (!content) return false;
+        if (!shouldDetectTruncation(log)) return true;
+        return hasNaturalSentenceEnding(content);
+    }
+
     function logAction(charId, actionType, content, dCal = 0, dMoney = 0, loc = '') {
         const now = Date.now();
         const normalizedContent = String(content || '').replace(/\s+/g, ' ').trim();
@@ -349,14 +409,28 @@ module.exports = function initCityDb(db) {
         `).run(charId, actionType, content, dCal, dMoney, loc, now);
     }
 
-    function getCityLogs(limit = 100) {
-        return db.prepare(`
-            SELECT c.name as char_name, c.avatar as char_avatar, l.* 
-            FROM city_logs l 
-            LEFT JOIN characters c ON l.character_id = c.id
-            ORDER BY l.timestamp DESC 
-            LIMIT ?
-        `).all(limit);
+    function getCityLogs(arg1 = 100, arg2 = null) {
+        const hasCharacterFilter = typeof arg1 === 'string';
+        const characterId = hasCharacterFilter ? arg1 : null;
+        const limitInput = hasCharacterFilter ? arg2 : arg1;
+        const limit = Number.isFinite(Number(limitInput)) ? Math.max(1, Number(limitInput)) : 100;
+        const rows = hasCharacterFilter
+            ? db.prepare(`
+                SELECT c.name as char_name, c.avatar as char_avatar, l.* 
+                FROM city_logs l 
+                LEFT JOIN characters c ON l.character_id = c.id
+                WHERE l.character_id = ?
+                ORDER BY l.timestamp DESC 
+                LIMIT ?
+            `).all(characterId, limit)
+            : db.prepare(`
+                SELECT c.name as char_name, c.avatar as char_avatar, l.* 
+                FROM city_logs l 
+                LEFT JOIN characters c ON l.character_id = c.id
+                ORDER BY l.timestamp DESC 
+                LIMIT ?
+            `).all(limit);
+        return rows.map(decorateCityLogForUser);
     }
 
     // Get recent city logs for a specific character, regardless of day.
@@ -368,7 +442,14 @@ module.exports = function initCityDb(db) {
             WHERE character_id = ?
             ORDER BY timestamp DESC 
             LIMIT ?
-        `).all(charId, limit);
+        `)
+            .all(charId, limit * 3)
+            .filter(isVisibleCityLogForCharacter)
+            .slice(0, limit)
+            .map(log => ({
+                ...log,
+                message: String(log.message || '').trim()
+            }));
     }
 
     // Get recent city logs for someone else at a specific location
@@ -381,7 +462,14 @@ module.exports = function initCityDb(db) {
             WHERE character_id = ? AND timestamp >= ? AND location = ?
             ORDER BY timestamp DESC 
             LIMIT ?
-        `).all(otherCharId, startOfDay.getTime(), locId, limit);
+        `)
+            .all(otherCharId, startOfDay.getTime(), locId, limit * 3)
+            .filter(isVisibleCityLogForCharacter)
+            .slice(0, limit)
+            .map(log => ({
+                ...log,
+                message: String(log.message || '').trim()
+            }));
     }
 
     function clearAllLogs() {

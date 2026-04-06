@@ -359,6 +359,8 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
     const estimatedO = contextStats?.q_impression ?? 0;
     const estimatedRagInjectedTokens = contextStats?.estimated_rag_injected_tokens ?? 0;
     const estimatedOtherTokens = contextStats?.last_conversation_other_tokens ?? 0;
+    const lastConversationRoutedToCity = Boolean(contextStats?.last_conversation_routed_to_city);
+    const lastConversationUsedRag = Boolean(contextStats?.last_conversation_used_rag);
     const actualInputTokens = contextStats?.last_conversation_prompt_tokens || contextStats?.last_actual_prompt_tokens || 0;
     const actualSavedTokens = Math.max(0, lastRoundEstimatedWithoutCache - actualInputTokens);
     const actualSavedRate = lastRoundEstimatedWithoutCache > 0
@@ -545,6 +547,8 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                             <div style={{ display: 'flex', justifyContent: 'space-between', borderTop: '1px dashed #eee', paddingTop: '8px', marginTop: '4px' }}><span style={{ color: '#666', fontWeight: '600' }}>{lang === 'en' ? 'Actual Input Tokens' : '实际输入 token'}</span><span style={{ fontWeight: '700', color: '#8e44ad' }}>{actualInputTokens} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Round RAG Injected' : '上一轮 RAG 注入 token'}</span><span style={{ fontWeight: '500', color: '#d97706' }}>{estimatedRagInjectedTokens} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Round Other Overhead' : '上一轮其他类 T'}</span><span style={{ fontWeight: '500', color: '#7c3aed' }}>{estimatedOtherTokens} T</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Round Routed to City' : '上一轮是否路由到商业街内容'}</span><span style={{ fontWeight: '500', color: lastConversationRoutedToCity ? '#e67e22' : '#7f8c8d' }}>{lastConversationRoutedToCity ? (lang === 'en' ? 'Yes' : '是') : (lang === 'en' ? 'No' : '否')}</span></div>
+                            <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Last Round Used RAG' : '上一轮是否使用了 RAG'}</span><span style={{ fontWeight: '500', color: lastConversationUsedRag ? '#8e44ad' : '#7f8c8d' }}>{lastConversationUsedRag ? (lang === 'en' ? 'Yes' : '是') : (lang === 'en' ? 'No' : '否')}</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Cache Hit Rate (No RAG)' : '排除 RAG 的缓存命中率'}</span><span style={{ fontWeight: '500', color: '#2563eb' }}>{cacheOnlyHitRatePercent}%</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Cache Saved (No RAG)' : '排除 RAG 的缓存节约 token'}</span><span style={{ fontWeight: '500', color: '#2563eb' }}>{cacheOnlySavedTokens} T</span></div>
                             <div style={{ display: 'flex', justifyContent: 'space-between' }}><span style={{ color: '#666' }}>{lang === 'en' ? 'Cache + RAG Saved' : '缓存库 + RAG 总节约 token'}</span><span style={{ fontWeight: '500', color: '#16a34a' }}>{totalSavedIncludingRagTokens} T ({totalSavedIncludingRagRatePercent}%)</span></div>

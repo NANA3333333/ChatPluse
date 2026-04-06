@@ -2,16 +2,25 @@ import React, { createContext, useState, useContext } from 'react';
 
 export const AuthContext = createContext();
 
+function readStoredUser() {
+    const saved = localStorage.getItem('cp_user');
+    if (!saved) return null;
+    try {
+        return JSON.parse(saved);
+    } catch (error) {
+        console.warn('[AuthContext] Failed to parse cp_user from localStorage. Clearing corrupted state.', error);
+        localStorage.removeItem('cp_user');
+        return null;
+    }
+}
+
 export function useAuth() {
     return useContext(AuthContext);
 }
 
 export function AuthProvider({ children }) {
     const [token, setToken] = useState(localStorage.getItem('cp_token'));
-    const [user, setUser] = useState(() => {
-        const saved = localStorage.getItem('cp_user');
-        return saved ? JSON.parse(saved) : null;
-    });
+    const [user, setUser] = useState(() => readStoredUser());
 
     const login = (newToken, newUser) => {
         setToken(newToken);

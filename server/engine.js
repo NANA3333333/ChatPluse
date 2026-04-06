@@ -3,9 +3,14 @@ const { callLLM } = require('./llm');
 const { buildUniversalContext } = require('./contextBuilder');
 const { applyEmotionEvent, buildEmotionLogEntry, getExplicitEmotionStatePatch } = require('./emotion');
 const { getTokenCount } = require('./utils/tokenizer');
+const { enqueueBackgroundTask } = require('./backgroundQueue');
 const crypto = require('crypto');
 
 const engineCache = new Map();
+const PRIVATE_AUTONOMY_DISABLED = process.env.CP_PRIVATE_AUTONOMY === '0';
+const GROUP_AUTONOMY_DISABLED = process.env.CP_GROUP_AUTONOMY === '0';
+let loggedPrivateAutonomyDisabled = false;
+let loggedGroupAutonomyDisabled = false;
 
 function getDefaultGuidelines() {
     return `Guidelines:
@@ -891,6 +896,15 @@ function getEngine(userId) {
     const ragFailureCache = new Map();
     const dedupBlockCounts = new Map(); // Track consecutive dedup blocks per character
     let stateBroadcastInterval = null;
+
+    function queueEngineTask(keySuffix, task, options = {}) {
+        return enqueueBackgroundTask({
+            key: `engine:${userId}:${keySuffix}`,
+            dedupeKey: options.dedupeKey ? `engine:${userId}:${options.dedupeKey}` : '',
+            maxPending: options.maxPending ?? 1,
+            task
+        });
+    }
 
     function recordTokenUsage(characterId, contextType, usage) {
         if (!usage || usage.cached) return;
@@ -1854,42 +1868,51 @@ ${universalResult.preamble}`;
             });
 
             if ((finishReason === 'length' || looksPrematurelyCutOff(generatedText)) && generatedText) {
-                try {
-                    const continuation = await callLLM({
-                        endpoint: character.api_endpoint,
-                        key: character.api_key,
-                        model: character.model_name,
-                        messages: [
-                            ...apiMessages,
-                            { role: 'assistant', content: generatedText },
-                            { role: 'user', content: '[系统续写] 你上一条消息被截断了。不要重说前文，只把刚才没说完的那句话自然续完并收尾。输出纯文本。' }
-                        ],
-                        maxTokens: Math.min(character.max_tokens || 2000, 300),
-                        presencePenalty: isUserReply ? 0.2 : 0,
-                        frequencyPenalty: isUserReply ? 0.3 : 0,
-                        enableCache: !!isUserReply,
-                        cacheDb: db,
-                        cacheType: 'private_chat_reply_continuation',
-                        cacheTtlMs: 24 * 60 * 60 * 1000,
-                        cacheScope: `character:${character.id}`,
-                        cacheCharacterId: character.id,
-                        cacheKeyMode: 'private_prefix',
-                        enablePromptCacheHints: !!isUserReply,
-                        returnUsage: true,
-                        debugAttempt: buildLlmAttemptRecorder(character, {
-                            context_type: 'private_reply_continuation'
-                        })
-                    });
-                    if (continuation?.content) {
-                        generatedText = `${generatedText}${continuation.content.startsWith('\n') ? '' : ''}${continuation.content}`.trim();
+                const continuationMaxAttempts = 3;
+                const continuationMaxTokens = Math.min(character.max_tokens || 2000, 800);
+                for (let continuationIndex = 0; continuationIndex < continuationMaxAttempts; continuationIndex++) {
+                    try {
+                        const continuation = await callLLM({
+                            endpoint: character.api_endpoint,
+                            key: character.api_key,
+                            model: character.model_name,
+                            messages: [
+                                ...apiMessages,
+                                { role: 'assistant', content: generatedText },
+                                { role: 'user', content: '[系统续写] 你上一条消息被截断了。不要重说前文，只把刚才没说完的那句话自然续完并收尾。输出纯文本。' }
+                            ],
+                            maxTokens: continuationMaxTokens,
+                            presencePenalty: isUserReply ? 0.2 : 0,
+                            frequencyPenalty: isUserReply ? 0.3 : 0,
+                            enableCache: !!isUserReply,
+                            cacheDb: db,
+                            cacheType: 'private_chat_reply_continuation',
+                            cacheTtlMs: 24 * 60 * 60 * 1000,
+                            cacheScope: `character:${character.id}`,
+                            cacheCharacterId: character.id,
+                            cacheKeyMode: 'private_prefix',
+                            enablePromptCacheHints: !!isUserReply,
+                            returnUsage: true,
+                            debugAttempt: buildLlmAttemptRecorder(character, {
+                                context_type: 'private_reply_continuation'
+                            })
+                        });
+                        const continuationText = String(continuation?.content || '').trim();
+                        if (!continuationText) break;
+                        generatedText = `${generatedText}${continuationText}`.trim();
                         if (continuation.usage) {
                             usage = usage || { prompt_tokens: 0, completion_tokens: 0 };
                             usage.prompt_tokens = (usage.prompt_tokens || 0) + (continuation.usage.prompt_tokens || 0);
                             usage.completion_tokens = (usage.completion_tokens || 0) + (continuation.usage.completion_tokens || 0);
                         }
+                        finishReason = continuation.finishReason || finishReason;
+                        if (!(finishReason === 'length' || looksPrematurelyCutOff(generatedText))) {
+                            break;
+                        }
+                    } catch (continuationErr) {
+                        console.warn(`[Engine] Continuation failed for ${character.name}: ${continuationErr.message}`);
+                        break;
                     }
-                } catch (continuationErr) {
-                    console.warn(`[Engine] Continuation failed for ${character.name}: ${continuationErr.message}`);
                 }
             }
 
@@ -2372,8 +2395,17 @@ ${universalResult.preamble}`;
         console.log(`[Engine] Next message for ${character.name} scheduled in ${Math.round(delay / 60000)} minutes. ${exactDelayMs ? '(Self-Scheduled)' : ''}`);
 
         const timerId = setTimeout(() => {
-            console.log(`[DEBUG] Timeout fired for ${character.name}! Executing triggerMessage.`);
-            triggerMessage(character, wsClients, false, !!exactDelayMs);
+            console.log(`[DEBUG] Timeout fired for ${character.name}! Queueing proactive trigger.`);
+            queueEngineTask(
+                `char:${character.id}`,
+                () => triggerMessage(character, wsClients, false, !!exactDelayMs),
+                {
+                    dedupeKey: `proactive:${character.id}`,
+                    maxPending: 1
+                }
+            ).catch(err => {
+                console.error(`[Engine] Failed to run proactive task for ${character.name}:`, err.message);
+            });
         }, delay);
 
         timers.set(character.id, {
@@ -2396,6 +2428,14 @@ ${universalResult.preamble}`;
 
     // Loop through all active characters and start their engines
     function startEngine(wsClients) {
+        if (PRIVATE_AUTONOMY_DISABLED) {
+            if (!loggedPrivateAutonomyDisabled) {
+                console.warn('[Engine] Private proactive timers are disabled by CP_PRIVATE_AUTONOMY=0.');
+                loggedPrivateAutonomyDisabled = true;
+            }
+            broadcastEngineState(wsClients);
+            return;
+        }
         console.log('[Engine] Starting background timers...');
         const characters = db.getCharacters();
         for (const char of characters) {
@@ -2546,7 +2586,18 @@ ${universalResult.preamble}`;
                     setTimeout(() => {
                         // Re-fetch to get updated jealousy_level
                         const freshChar = db.getCharacter(char.id);
-                        if (freshChar) triggerJealousyMessage(freshChar, wsClients, activeCharacterId);
+                        if (freshChar) {
+                            queueEngineTask(
+                                `char:${freshChar.id}`,
+                                () => triggerJealousyMessage(freshChar, wsClients, activeCharacterId),
+                                {
+                                    dedupeKey: `jealousy:${freshChar.id}`,
+                                    maxPending: 1
+                                }
+                            ).catch(err => {
+                                console.error(`[Engine] Failed to run jealousy task for ${freshChar.name}:`, err.message);
+                            });
+                        }
                     }, delayMs);
                 }
             }
@@ -2619,6 +2670,7 @@ ${universalResult.preamble}`;
     }
 
     function scheduleGroupProactive(groupId, wsClients) {
+        if (GROUP_AUTONOMY_DISABLED) return;
         stopGroupProactiveTimer(groupId);
         const profile = db.getUserProfile();
         if (!profile?.group_proactive_enabled) return;
@@ -2628,7 +2680,18 @@ ${universalResult.preamble}`;
         const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
 
         console.log(`[GroupProactive] Group ${groupId}: next fire in ${Math.round(delay / 60000)} min`);
-        const handle = setTimeout(() => triggerGroupProactive(groupId, wsClients), delay);
+        const handle = setTimeout(() => {
+            queueEngineTask(
+                `group:${groupId}`,
+                () => triggerGroupProactive(groupId, wsClients),
+                {
+                    dedupeKey: `group-proactive:${groupId}`,
+                    maxPending: 1
+                }
+            ).catch(err => {
+                console.error(`[Engine] Failed to run group proactive task for ${groupId}:`, err.message);
+            });
+        }, delay);
         groupProactiveTimers.set(groupId, handle);
     }
 
@@ -2718,6 +2781,13 @@ ${universalResult.preamble}`;
     }
 
     function startGroupProactiveTimers(wsClients) {
+        if (GROUP_AUTONOMY_DISABLED) {
+            if (!loggedGroupAutonomyDisabled) {
+                console.warn('[Engine] Group proactive timers are disabled by CP_GROUP_AUTONOMY=0.');
+                loggedGroupAutonomyDisabled = true;
+            }
+            return;
+        }
         const groups = db.getGroups();
         for (const g of groups) {
             scheduleGroupProactive(g.id, wsClients);

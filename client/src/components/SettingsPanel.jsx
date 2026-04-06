@@ -41,11 +41,35 @@ const getDefaultGuidelines = (lang) => {
    以上方括号标签都会在处理时对用户隐藏，但效果会生效。`;
 };
 
+function getLocalFallbackProfile() {
+    let localUser = null;
+    try {
+        const raw = localStorage.getItem('cp_user');
+        localUser = raw ? JSON.parse(raw) : null;
+    } catch {
+        localUser = null;
+    }
+
+    return {
+        name: localUser?.username || 'User',
+        username: localUser?.username || 'User',
+        avatar: localStorage.getItem('cp_avatar') || '',
+        bio: '',
+        theme: localStorage.getItem('cp_theme') || 'light',
+        theme_config: localStorage.getItem('cp_theme_config') || '',
+        custom_css: localStorage.getItem('cp_custom_css') || '',
+        banner: '',
+        wallet: 0,
+        moments_token_limit: 500,
+        moments_reaction_rate: 30,
+    };
+}
+
 
 function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) {
     const { t, lang } = useLanguage();
     const { login, updateUser } = useAuth();
-    const [profile, setProfile] = useState(null);
+    const [profile, setProfile] = useState(() => getLocalFallbackProfile());
     const [isEditing, setIsEditing] = useState(false);
     const [themeAccordion, setThemeAccordion] = useState({ ai_gen: false, accent: true, bg: false, text: false, bubbles: false, advanced: false });
     const [editName, setEditName] = useState('');
@@ -55,6 +79,8 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const [editMomentsTokenLimit, setEditMomentsTokenLimit] = useState(500);
     const [editMomentsReactionRate, setEditMomentsReactionRate] = useState(30);
     const [memoryStatus, setMemoryStatus] = useState(null);
+    const [backgroundQueueStats, setBackgroundQueueStats] = useState(null);
+    const [expandedBackgroundGroups, setExpandedBackgroundGroups] = useState({});
     const [accountUsername, setAccountUsername] = useState('');
     const [accountCurrentPassword, setAccountCurrentPassword] = useState('');
     const [accountNewPassword, setAccountNewPassword] = useState('');
@@ -62,6 +88,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const [accountSaving, setAccountSaving] = useState(false);
     const [accountMessage, setAccountMessage] = useState('');
     const [accountError, setAccountError] = useState('');
+    const [profileLoadError, setProfileLoadError] = useState('');
 
     // Theme Editor states
     const [editThemeConfig, setEditThemeConfig] = useState({});
@@ -117,6 +144,172 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         return status?.statusNote || '';
     };
 
+    const describeBackgroundQueue = (queueKey = '') => {
+        const key = String(queueKey || '');
+        const parts = key.split(':');
+        const queueType = parts[0] || '';
+        const scope = parts[2] || '';
+
+        if (queueType === 'city') {
+            return {
+                name: lang === 'en' ? 'City Tick' : '商业街分钟结算',
+                description: lang === 'en'
+                    ? 'Processes survival drift, hospital recovery, city actions, schedules, and encounters for one user.'
+                    : '处理一个用户的生理流逝、医院恢复、商业街行动、日程和相遇。'
+            };
+        }
+
+        if (queueType === 'engine' && scope === 'group') {
+            return {
+                name: lang === 'en' ? 'Group Proactive Message' : '群聊主动消息',
+                description: lang === 'en'
+                    ? 'Lets a group member speak proactively without all groups firing at once.'
+                    : '让群成员主动开口，但不会让所有群同时挤在一起触发。'
+            };
+        }
+
+        if (queueType === 'engine' && scope === 'char') {
+            return {
+                name: lang === 'en' ? 'Private Proactive Message' : '私聊主动消息',
+                description: lang === 'en'
+                    ? 'Sends a character’s proactive private message in order instead of all at once.'
+                    : '按顺序处理角色的私聊主动消息，避免同时爆发。'
+            };
+        }
+
+        return {
+            name: lang === 'en' ? 'Background Task' : '后台任务',
+            description: lang === 'en'
+                ? 'A queued background job managed by the server.'
+                : '由后端队列统一调度的后台任务。'
+        };
+    };
+
+    const getBackgroundTaskStatusLabel = (status = '') => {
+        const normalized = String(status || '').toLowerCase();
+        if (normalized === 'running') return lang === 'en' ? 'Running' : '执行中';
+        if (normalized === 'queued') return lang === 'en' ? 'Queued' : '排队中';
+        if (normalized === 'completed') return lang === 'en' ? 'Completed' : '已完成';
+        if (normalized === 'failed') return lang === 'en' ? 'Failed' : '失败';
+        return lang === 'en' ? 'Unknown' : '未知';
+    };
+
+    const getBackgroundTaskStatusStyle = (status = '') => {
+        const normalized = String(status || '').toLowerCase();
+        if (normalized === 'running') return { background: '#ecfdf5', color: '#166534' };
+        if (normalized === 'queued') return { background: '#eff6ff', color: '#1d4ed8' };
+        if (normalized === 'completed') return { background: '#f3f4f6', color: '#4b5563' };
+        if (normalized === 'failed') return { background: '#fef2f2', color: '#b91c1c' };
+        return { background: '#f3f4f6', color: '#6b7280' };
+    };
+
+    const formatBackgroundTaskTime = (task) => {
+        const ts = Number(task?.finishedAt || task?.startedAt || task?.queuedAt || 0);
+        if (!ts) return lang === 'en' ? 'No time' : '暂无时间';
+        return new Date(ts).toLocaleString();
+    };
+
+    const describeBackgroundTaskGroup = (queueKey = '') => {
+        const key = String(queueKey || '');
+        const parts = key.split(':');
+        const queueType = parts[0] || '';
+        const scope = parts[2] || '';
+        const targetId = parts[3] || '';
+
+        if (queueType === 'engine' && scope === 'char') {
+            const contact = contacts.find(c => String(c.id) === String(targetId));
+            return {
+                groupKey: `char:${targetId}`,
+                name: contact?.name || (lang === 'en' ? 'Character Task' : '角色任务'),
+                description: lang === 'en'
+                    ? 'Private proactive tasks for this character.'
+                    : '这个角色的私聊主动任务。'
+            };
+        }
+
+        if (queueType === 'engine' && scope === 'group') {
+            return {
+                groupKey: `group:${targetId}`,
+                name: lang === 'en' ? `Group ${targetId}` : `群聊 ${targetId}`,
+                description: lang === 'en'
+                    ? 'Proactive tasks for this group.'
+                    : '这个群聊的主动任务。'
+            };
+        }
+
+        if (queueType === 'city') {
+            return {
+                groupKey: 'city-system',
+                name: lang === 'en' ? 'City System' : '商业街系统',
+                description: lang === 'en'
+                    ? 'City-world ticking and state progression tasks.'
+                    : '商业街世界线推进和状态巡逻任务。'
+            };
+        }
+
+        return {
+            groupKey: `other:${key}`,
+            name: lang === 'en' ? 'Other Background Tasks' : '其他后台任务',
+            description: lang === 'en'
+                ? 'Other queued server tasks.'
+                : '其他由后端排队执行的任务。'
+        };
+    };
+
+    const getBackgroundGroupSummary = (tasks = []) => {
+        const latestTask = [...tasks].sort((a, b) => {
+            const aTime = Number(a?.finishedAt || a?.startedAt || a?.queuedAt || 0);
+            const bTime = Number(b?.finishedAt || b?.startedAt || b?.queuedAt || 0);
+            return bTime - aTime;
+        })[0] || null;
+
+        if (tasks.some(task => String(task?.status || '').toLowerCase() === 'running')) {
+            return { status: 'running', latestTask };
+        }
+        if (tasks.some(task => String(task?.status || '').toLowerCase() === 'queued')) {
+            return { status: 'queued', latestTask };
+        }
+        if (tasks.some(task => String(task?.status || '').toLowerCase() === 'failed')) {
+            return { status: 'failed', latestTask };
+        }
+        return { status: latestTask?.status || 'completed', latestTask };
+    };
+
+    const backgroundTaskGroups = (() => {
+        const tasks = Array.isArray(backgroundQueueStats?.recentTasks) ? backgroundQueueStats.recentTasks : [];
+        const grouped = new Map();
+
+        for (const task of tasks) {
+            const meta = describeBackgroundTaskGroup(task.key);
+            const existing = grouped.get(meta.groupKey) || {
+                ...meta,
+                tasks: []
+            };
+            existing.tasks.push(task);
+            grouped.set(meta.groupKey, existing);
+        }
+
+        return [...grouped.values()]
+            .map(group => {
+                const summary = getBackgroundGroupSummary(group.tasks);
+                return {
+                    ...group,
+                    summaryStatus: summary.status,
+                    latestTask: summary.latestTask,
+                    tasks: [...group.tasks].sort((a, b) => {
+                        const aTime = Number(a?.finishedAt || a?.startedAt || a?.queuedAt || 0);
+                        const bTime = Number(b?.finishedAt || b?.startedAt || b?.queuedAt || 0);
+                        return bTime - aTime;
+                    })
+                };
+            })
+            .sort((a, b) => {
+                const aTime = Number(a?.latestTask?.finishedAt || a?.latestTask?.startedAt || a?.latestTask?.queuedAt || 0);
+                const bTime = Number(b?.latestTask?.finishedAt || b?.latestTask?.startedAt || b?.latestTask?.queuedAt || 0);
+                return bTime - aTime;
+            });
+    })();
+
     const searchableMemories = Number(memoryStatus?.indexedPoints || 0);
     const recalledMemories = Number(memoryStatus?.everRetrievedMemoriesCount || 0);
     const ragRecallRate = searchableMemories > 0
@@ -146,6 +339,19 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         }
     }, [apiUrl]);
 
+    const loadBackgroundQueueStats = useCallback(async () => {
+        try {
+            const headers = { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` };
+            const res = await fetch(`${apiUrl}/system/background-queue`, { headers });
+            const data = await res.json();
+            if (data.success) {
+                setBackgroundQueueStats(data.stats || null);
+            }
+        } catch (e) {
+            console.error('Failed to fetch background queue stats:', e);
+        }
+    }, [apiUrl]);
+
     const fetchModels = async (endpoint, key, setList, setFetching, setError) => {
         if (!endpoint || !key) { setError('请先填写 Endpoint 和 Key'); return; }
         setFetching(true); setError(''); setList([]);
@@ -162,10 +368,34 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     useEffect(() => {
         // Fetch user profile
         const headers = { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` };
+        const fallbackProfile = getLocalFallbackProfile();
+        setProfile(prev => prev || fallbackProfile);
+        setEditName(prev => prev || fallbackProfile.name || '');
+        setEditAvatar(prev => prev || fallbackProfile.avatar || '');
+        setEditBanner(prev => prev || fallbackProfile.banner || '');
+        setEditBio(prev => prev || fallbackProfile.bio || '');
+        setAccountUsername(prev => prev || fallbackProfile.username || '');
+        setEditMomentsTokenLimit(prev => prev ?? fallbackProfile.moments_token_limit);
+        setEditMomentsReactionRate(prev => prev ?? fallbackProfile.moments_reaction_rate);
+        if (fallbackProfile.theme_config) {
+            try {
+                setEditThemeConfig(prev => (Object.keys(prev || {}).length ? prev : JSON.parse(fallbackProfile.theme_config)));
+            } catch {
+                setEditThemeConfig(prev => prev || {});
+            }
+        }
+        if (fallbackProfile.custom_css) {
+            setEditCustomCss(prev => prev || fallbackProfile.custom_css);
+        }
 
-        fetch(`${apiUrl}/user`, { headers })
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+        fetch(`${apiUrl}/user`, { headers, signal: controller.signal })
             .then(res => res.json())
             .then(data => {
+                clearTimeout(timeoutId);
+                setProfileLoadError('');
                 setProfile(data);
                 setEditName(data.name || '');
                 setEditAvatar(data.avatar || '');
@@ -188,7 +418,11 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                     setEditCustomCss(data.custom_css);
                 }
             })
-            .catch(console.error);
+            .catch((err) => {
+                clearTimeout(timeoutId);
+                console.error(err);
+                setProfileLoadError(err?.name === 'AbortError' ? 'Profile request timed out.' : (err?.message || 'Failed to load profile.'));
+            });
 
         const fetchCharacters = () => {
             fetch(`${apiUrl}/characters`, { headers })
@@ -199,10 +433,20 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
 
         fetchCharacters();
         loadMemoryStatus();
+        loadBackgroundQueueStats();
+
+        const backgroundQueueTimer = setInterval(() => {
+            loadBackgroundQueueStats();
+        }, 5000);
 
         window.addEventListener('refresh_contacts', fetchCharacters);
-        return () => window.removeEventListener('refresh_contacts', fetchCharacters);
-    }, [apiUrl, loadMemoryStatus]);
+        return () => {
+            clearTimeout(timeoutId);
+            controller.abort();
+            clearInterval(backgroundQueueTimer);
+            window.removeEventListener('refresh_contacts', fetchCharacters);
+        };
+    }, [apiUrl, loadMemoryStatus, loadBackgroundQueueStats]);
 
     const handleSaveProfile = async () => {
         const updated = { ...profile, name: editName, avatar: editAvatar, banner: editBanner, bio: editBio };
@@ -583,11 +827,15 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         }
     };
 
-    if (!profile) return <div className="loading-text">Loading settings...</div>;
-
     return (
         <>
             <div style={{ padding: '30px', maxWidth: '600px', margin: '0 auto', width: '100%', display: 'flex', flexDirection: 'column', gap: '30px' }}>
+                {profileLoadError && (
+                    <div style={{ padding: '10px 12px', borderRadius: '8px', border: '1px solid #fde68a', background: '#fffbeb', color: '#92400e', fontSize: '12px', lineHeight: 1.5 }}>
+                        {lang === 'en' ? 'Live profile sync is delayed. Showing local fallback data for now.' : '实时用户资料同步超时，当前先显示本地兜底数据。'}
+                        <div style={{ marginTop: '4px', color: '#a16207' }}>{profileLoadError}</div>
+                    </div>
+                )}
 
                 {/* User Profile Section */}
                 <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee' }}>
@@ -1199,6 +1447,155 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             {lang === 'en' ? 'Latest status note:' : '最近状态说明：'} {memoryStatus.lastError}
                         </div>
                     )}
+                </div>
+
+                <div style={{ backgroundColor: '#fff', padding: '20px', borderRadius: '8px', border: '1px solid #eee', marginTop: '20px' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', marginBottom: '16px' }}>
+                        <h2 style={{ margin: 0, fontSize: '18px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                            <Database size={20} /> {lang === 'en' ? 'Background Tasks' : '后台任务队列'}
+                        </h2>
+                        <button
+                            onClick={loadBackgroundQueueStats}
+                            style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '8px 12px', backgroundColor: '#f7f7f7', color: '#333', border: '1px solid #ddd', borderRadius: '6px', cursor: 'pointer', fontSize: '13px' }}
+                        >
+                            <RefreshCw size={15} /> {lang === 'en' ? 'Refresh' : '刷新'}
+                        </button>
+                    </div>
+
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginBottom: '14px', fontSize: '13px', color: '#374151' }}>
+                        <div style={{ padding: '8px 12px', borderRadius: '999px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
+                            {lang === 'en' ? 'Running now' : '当前执行中'}: <strong>{backgroundQueueStats?.activeWorkers ?? 0}</strong>
+                        </div>
+                        <div style={{ padding: '8px 12px', borderRadius: '999px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
+                            {lang === 'en' ? 'Waiting' : '排队中'}: <strong>{backgroundQueueStats?.pendingTasks ?? 0}</strong>
+                        </div>
+                        <div style={{ padding: '8px 12px', borderRadius: '999px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
+                            {lang === 'en' ? 'Queue lanes' : '队列通道'}: <strong>{backgroundQueueStats?.queueCount ?? 0}</strong>
+                        </div>
+                        <div style={{ padding: '8px 12px', borderRadius: '999px', background: '#f8fafc', border: '1px solid #e5e7eb' }}>
+                            {lang === 'en' ? 'Global limit' : '全局上限'}: <strong>{backgroundQueueStats?.globalConcurrency ?? 0}</strong>
+                        </div>
+                    </div>
+
+                    <div style={{ border: '1px solid #e5e7eb', borderRadius: '10px', background: '#fff' }}>
+                        <table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed' }}>
+                            <thead>
+                                <tr style={{ background: '#f8fafc', textAlign: 'left' }}>
+                                    <th style={{ width: '24%', padding: '10px 12px', fontSize: '12px', color: '#6b7280', fontWeight: 600 }}>{lang === 'en' ? 'Task Name' : '任务名'}</th>
+                                    <th style={{ width: '38%', padding: '10px 12px', fontSize: '12px', color: '#6b7280', fontWeight: 600 }}>{lang === 'en' ? 'What it does' : '它在做什么'}</th>
+                                    <th style={{ width: '14%', padding: '10px 12px', fontSize: '12px', color: '#6b7280', fontWeight: 600 }}>{lang === 'en' ? 'Status' : '状态'}</th>
+                                    <th style={{ width: '24%', padding: '10px 12px', fontSize: '12px', color: '#6b7280', fontWeight: 600 }}>{lang === 'en' ? 'Last Updated' : '最近时间'}</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {backgroundTaskGroups.map((group, index) => {
+                                    const isExpanded = !!expandedBackgroundGroups[group.groupKey];
+                                    const statusStyle = getBackgroundTaskStatusStyle(group.summaryStatus);
+                                    return (
+                                        <React.Fragment key={group.groupKey}>
+                                            <tr
+                                                style={{ borderTop: index === 0 ? 'none' : '1px solid #f1f5f9', cursor: 'pointer' }}
+                                                onClick={() => setExpandedBackgroundGroups(prev => ({ ...prev, [group.groupKey]: !prev[group.groupKey] }))}
+                                            >
+                                                <td style={{ padding: '10px 12px', verticalAlign: 'top' }}>
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                                        {isExpanded ? <ChevronDown size={14} color="#6b7280" /> : <ChevronRight size={14} color="#6b7280" />}
+                                                        <div>
+                                                            <div style={{ fontSize: '13px', fontWeight: 600, color: '#111827', lineHeight: 1.4 }}>{group.name}</div>
+                                                            <div style={{ marginTop: '4px', fontSize: '11px', color: '#9ca3af', lineHeight: 1.35 }}>
+                                                                {lang === 'en' ? `${group.tasks.length} tasks in last 24h` : `近 24 小时 ${group.tasks.length} 条任务`}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                                <td style={{ padding: '10px 12px', fontSize: '12px', color: '#4b5563', lineHeight: 1.45, verticalAlign: 'top' }}>
+                                                    {group.description}
+                                                </td>
+                                                <td style={{ padding: '10px 12px', fontSize: '12px', verticalAlign: 'top' }}>
+                                                    <span style={{
+                                                        display: 'inline-flex',
+                                                        alignItems: 'center',
+                                                        padding: '3px 8px',
+                                                        borderRadius: '999px',
+                                                        background: statusStyle.background,
+                                                        color: statusStyle.color,
+                                                        fontWeight: 600
+                                                    }}>
+                                                        {getBackgroundTaskStatusLabel(group.summaryStatus)}
+                                                    </span>
+                                                </td>
+                                                <td style={{ padding: '10px 12px', fontSize: '12px', color: '#4b5563', verticalAlign: 'top' }}>
+                                                    {group.latestTask ? formatBackgroundTaskTime(group.latestTask) : (lang === 'en' ? 'No time' : '暂无时间')}
+                                                </td>
+                                            </tr>
+                                            {isExpanded && (
+                                                <tr>
+                                                    <td colSpan="4" style={{ padding: '0 12px 12px 34px', background: '#fcfcfd' }}>
+                                                        <div style={{ border: '1px solid #eef2f7', borderRadius: '8px', overflow: 'hidden' }}>
+                                                            {group.tasks.slice(0, 12).map((task, taskIndex) => {
+                                                                const taskMeta = describeBackgroundQueue(task.key);
+                                                                const taskStyle = getBackgroundTaskStatusStyle(task.status);
+                                                                return (
+                                                                    <div
+                                                                        key={task.id || `${task.key}-${taskIndex}`}
+                                                                        style={{
+                                                                            display: 'grid',
+                                                                            gridTemplateColumns: '28% 18% 54%',
+                                                                            gap: '10px',
+                                                                            padding: '10px 12px',
+                                                                            borderTop: taskIndex === 0 ? 'none' : '1px solid #f1f5f9',
+                                                                            alignItems: 'start',
+                                                                            background: '#fff'
+                                                                        }}
+                                                                    >
+                                                                        <div style={{ fontSize: '12px', color: '#111827', lineHeight: 1.45 }}>
+                                                                            <div style={{ fontWeight: 600 }}>{taskMeta.name}</div>
+                                                                            <div style={{ marginTop: '4px', fontSize: '11px', color: '#9ca3af', wordBreak: 'break-all' }}>{task.key}</div>
+                                                                        </div>
+                                                                        <div>
+                                                                            <span style={{
+                                                                                display: 'inline-flex',
+                                                                                alignItems: 'center',
+                                                                                padding: '2px 8px',
+                                                                                borderRadius: '999px',
+                                                                                background: taskStyle.background,
+                                                                                color: taskStyle.color,
+                                                                                fontSize: '12px',
+                                                                                fontWeight: 600
+                                                                            }}>
+                                                                                {getBackgroundTaskStatusLabel(task.status)}
+                                                                            </span>
+                                                                        </div>
+                                                                        <div style={{ fontSize: '12px', color: '#4b5563', lineHeight: 1.45 }}>
+                                                                            <div>{formatBackgroundTaskTime(task)}</div>
+                                                                            {task.error ? (
+                                                                                <div style={{ marginTop: '4px', fontSize: '11px', color: '#b91c1c' }}>
+                                                                                    {task.error}
+                                                                                </div>
+                                                                            ) : null}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            )}
+                                        </React.Fragment>
+                                    );
+                                })}
+                                {!backgroundTaskGroups.length && (
+                                    <tr>
+                                        <td colSpan="4" style={{ padding: '16px 12px', fontSize: '13px', color: '#6b7280', textAlign: 'center' }}>
+                                            {lang === 'en'
+                                                ? 'No background tasks in the last 24 hours. New tasks will stay here until they expire.'
+                                                : '最近 24 小时还没有后台任务记录。新任务出现后会一直留在这里，直到 24 小时后清空。'}
+                                        </td>
+                                    </tr>
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
 
                 {/* Data Management */}

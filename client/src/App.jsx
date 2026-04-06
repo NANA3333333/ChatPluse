@@ -21,10 +21,9 @@ import { resolveAvatarUrl } from './utils/avatar';
 // Allow VITE config if available, otherwise dynamically use the current host IP/Domain
 const PROTOCOL = window.location.protocol;
 const HOST = window.location.hostname;
-const isLoopbackHost = HOST === '127.0.0.1' || HOST === 'localhost';
-const defaultApiOrigin = isLoopbackHost ? 'http://localhost:8000' : `${PROTOCOL}//${HOST}:8000`;
+const defaultApiOrigin = `${PROTOCOL}//${HOST}:8000`;
 const defaultWsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-const defaultWsHost = isLoopbackHost ? 'localhost:8000' : `${HOST}:8000`;
+const defaultWsHost = `${HOST}:8000`;
 const API_URL = import.meta.env.VITE_API_URL || `${defaultApiOrigin}/api`;
 const WS_URL = import.meta.env.VITE_WS_URL || `${defaultWsProtocol}//${defaultWsHost}`;
 
@@ -34,6 +33,7 @@ function App() {
   const [activeTab, setActiveTab] = useState('chats'); // 'chats', 'contacts', 'settings'
   const [activeContactId, setActiveContactId] = useState(null);
   const [contacts, setContacts] = useState([]);
+  const [contactsLoadError, setContactsLoadError] = useState('');
   const [activeContactSnapshot, setActiveContactSnapshot] = useState(null);
 
   const [incomingMessageQueue, setIncomingMessageQueue] = useState([]);
@@ -118,7 +118,7 @@ function App() {
 
   const fetchContacts = useCallback(() => {
     if (!token) return;
-    fetch(`${API_URL}/characters`, {
+    return fetch(`${API_URL}/characters`, {
       headers: { 'Authorization': `Bearer ${token}` }
     })
       .then(res => {
@@ -126,6 +126,7 @@ function App() {
         return res.json();
       })
       .then(data => {
+        setContactsLoadError('');
         setContacts(prev => data.map(newContact => {
           const existing = prev.find(p => p.id === newContact.id);
           if (existing) {
@@ -138,8 +139,13 @@ function App() {
           }
           return newContact;
         }));
+        return data;
       })
-      .catch(err => console.error('Failed to load contacts:', err));
+      .catch(err => {
+        console.error('Failed to load contacts:', err);
+        setContactsLoadError(err.message || 'Failed to load contacts');
+        return [];
+      });
   }, [token]);
 
   const scheduleContactsRefresh = useCallback((delay = 350) => {
@@ -160,45 +166,53 @@ function App() {
       return;
     }
     setIsLoaded(true);
-    fetchContacts();
     const headers = {
       'Authorization': `Bearer ${token}`
     };
 
-    fetch(`${API_URL}/user`, { headers })
-      .then(res => {
-        if (!res.ok) throw new Error('API Error');
-        return res.json();
-      })
-      .then(data => {
-        setUserProfile(data);
-        if (data.theme) localStorage.setItem('cp_theme', data.theme);
-        if (data.theme_config) {
-          localStorage.setItem('cp_theme_config', typeof data.theme_config === 'string' ? data.theme_config : JSON.stringify(data.theme_config));
-        }
-        if (data.custom_css) localStorage.setItem('cp_custom_css', data.custom_css);
-        if (data.avatar) localStorage.setItem('cp_avatar', data.avatar);
-      })
-      .catch(err => {
-        console.error('Failed fetching user profile:', err);
-      });
+    fetchContacts().then((loadedContacts) => {
+      if (!activeContactRef.current && !activeGroupId && Array.isArray(loadedContacts) && loadedContacts.length > 0) {
+        const first = loadedContacts[0];
+        setActiveContactId(first.id);
+        setActiveContactSnapshot(first);
+        activeContactRef.current = first.id;
+      }
 
-    fetch(`${API_URL}/groups`, { headers })
-      .then(res => {
-        if (!res.ok) throw new Error('API Error');
-        return res.json();
-      })
-      .then(data => { setGroups(data); setGroupChatEnabled(true); })
-      .catch(err => { console.warn('[DLC] Group Chat DLC not available:', err.message); setGroupChatEnabled(false); });
+      fetch(`${API_URL}/user`, { headers })
+        .then(res => {
+          if (!res.ok) throw new Error('API Error');
+          return res.json();
+        })
+        .then(data => {
+          setUserProfile(data);
+          if (data.theme) localStorage.setItem('cp_theme', data.theme);
+          if (data.theme_config) {
+            localStorage.setItem('cp_theme_config', typeof data.theme_config === 'string' ? data.theme_config : JSON.stringify(data.theme_config));
+          }
+          if (data.custom_css) localStorage.setItem('cp_custom_css', data.custom_css);
+          if (data.avatar) localStorage.setItem('cp_avatar', data.avatar);
+        })
+        .catch(err => {
+          console.error('Failed fetching user profile:', err);
+        });
 
-    fetch(`${API_URL}/system/announcement`, { headers })
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && data.announcement) {
-          setGlobalAnnouncement(data.announcement.content);
-        }
-      })
-      .catch(err => console.error('Failed to load announcement:', err));
+      fetch(`${API_URL}/groups`, { headers })
+        .then(res => {
+          if (!res.ok) throw new Error('API Error');
+          return res.json();
+        })
+        .then(data => { setGroups(data); setGroupChatEnabled(true); })
+        .catch(err => { console.warn('[DLC] Group Chat DLC not available:', err.message); setGroupChatEnabled(false); });
+
+      fetch(`${API_URL}/system/announcement`, { headers })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success && data.announcement) {
+            setGlobalAnnouncement(data.announcement.content);
+          }
+        })
+        .catch(err => console.error('Failed to load announcement:', err));
+    });
   }, [token]);
 
   // Listen for iframe postMessage from SillyTavern parent
@@ -465,21 +479,28 @@ function App() {
         </div>
         <div className="list-container">
           {activeTab === 'chats' && (
-            <ContactList
-              apiUrl={API_URL}
-              contacts={contacts}
-              activeId={activeContactId}
-              engineState={engineState}
-              onSelect={(id) => {
-                const selected = contacts.find(c => c.id === id);
-                setActiveContactId(id);
-                if (selected) setActiveContactSnapshot(selected);
-                activeContactRef.current = id;
-                setActiveGroupId(null);
-                // Clear unread badge
-                setContacts(prev => prev.map(c => c.id === id ? { ...c, unread: 0 } : c));
-              }}
-            />
+            <>
+              {contactsLoadError && contacts.length === 0 && (
+                <div style={{ padding: '14px 16px', color: '#c0392b', fontSize: '12px', lineHeight: 1.5 }}>
+                  Failed to load contacts: {contactsLoadError}
+                </div>
+              )}
+              <ContactList
+                apiUrl={API_URL}
+                contacts={contacts}
+                activeId={activeContactId}
+                engineState={engineState}
+                onSelect={(id) => {
+                  const selected = contacts.find(c => c.id === id);
+                  setActiveContactId(id);
+                  if (selected) setActiveContactSnapshot(selected);
+                  activeContactRef.current = id;
+                  setActiveGroupId(null);
+                  // Clear unread badge
+                  setContacts(prev => prev.map(c => c.id === id ? { ...c, unread: 0 } : c));
+                }}
+              />
+            </>
           )}
           {activeTab === 'chats' && groupChatEnabled && groups.length > 0 && (
             <div style={{ borderTop: '1px solid #eee' }}>

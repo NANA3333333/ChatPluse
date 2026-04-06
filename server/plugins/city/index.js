@@ -3,11 +3,20 @@ const crypto = require('crypto');
 const initCityDb = require('./cityDb');
 const initCityGrowthDb = require('../cityGrowth/growthDb');
 const schoolLogic = require('../cityGrowth/schoolLogic');
+const { enqueueBackgroundTask } = require('../../backgroundQueue');
 const { buildUniversalContext } = require('../../contextBuilder');
 const { deriveEmotion, applyEmotionEvent, getEmotionBehaviorGuidance, buildEmotionLogEntry } = require('../../emotion');
 
 // Phase 5: Social encounter cooldown - prevents same pair from chatting every tick
 const socialCooldowns = new Map(); // key: "charA_id::charB_id" -> timestamp
+const CITY_BACKGROUND_SAFE_MODE = process.env.CP_SAFE_MODE !== '0';
+const CITY_LIGHT_TICK_MODE = process.env.CP_CITY_LIGHT_TICK !== '0';
+const CITY_ENABLE_AUTONOMOUS_ACTIONS = process.env.CP_CITY_ACTIONS !== '0';
+const CITY_ENABLE_SCHEDULE_GENERATION = process.env.CP_CITY_SCHEDULES !== '0';
+const CITY_ENABLE_SOCIAL_COLLISIONS = process.env.CP_CITY_SOCIAL !== '0';
+const MEDICAL_RECOVERY_INTERVAL_MINUTES = 5;
+const MEDICAL_RECOVERY_INTERVAL_MS = MEDICAL_RECOVERY_INTERVAL_MINUTES * 60 * 1000;
+const MEDICAL_STAY_MINUTES_PER_TICK = 60;
 
 module.exports = function initCityPlugin(app, context) {
     const { getWsClients, authMiddleware, authDb, callLLM, getEngine, getMemory, getUserDb } = context;
@@ -1838,50 +1847,154 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         return Math.max(1, Math.round(20 / safeFrequency));
     }
 
+    function getMedicalStayMinutes(district) {
+        const durationTicks = Math.max(1, parseInt(district?.duration_ticks, 10) || 1);
+        return Math.max(MEDICAL_RECOVERY_INTERVAL_MINUTES, durationTicks * MEDICAL_STAY_MINUTES_PER_TICK);
+    }
+
+    function getMedicalStatusTiming(char, fallbackNowMs) {
+        const startedAt = Number(char.city_status_started_at || 0) || fallbackNowMs;
+        let untilAt = Number(char.city_status_until_at || 0) || 0;
+        if (!untilAt || untilAt <= startedAt) {
+            untilAt = startedAt + MEDICAL_STAY_MINUTES_PER_TICK * 60 * 1000;
+        }
+        const lastRecoveryAt = Number(char.city_medical_last_recovery_at || 0) || startedAt;
+        return { startedAt, untilAt, lastRecoveryAt };
+    }
+
+    function settleMedicalRecovery(char, district, cityNowMs) {
+        if (char.city_status !== 'medical') return null;
+        const { startedAt, untilAt, lastRecoveryAt } = getMedicalStatusTiming(char, cityNowMs);
+        const effectiveEnd = Math.min(cityNowMs, untilAt);
+        const completedBefore = Math.max(0, Math.floor((Math.max(lastRecoveryAt, startedAt) - startedAt) / MEDICAL_RECOVERY_INTERVAL_MS));
+        const completedNow = Math.max(0, Math.floor((Math.max(effectiveEnd, startedAt) - startedAt) / MEDICAL_RECOVERY_INTERVAL_MS));
+        const intervalsToApply = completedNow - completedBefore;
+        if (intervalsToApply <= 0) return null;
+
+        const stayIntervals = Math.max(1, Math.floor((untilAt - startedAt) / MEDICAL_RECOVERY_INTERVAL_MS));
+        const calRewardTotal = Math.max(0, Number(district?.cal_reward || 0));
+        const calPerInterval = calRewardTotal > 0 ? Math.max(1, Math.round(calRewardTotal / stayIntervals)) : 0;
+        const effects = { energy: 0, sleep_debt: 0, stress: 0, social_need: 0, health: 0, mood: 0, satiety: 0, stomach_load: 0 };
+
+        for (let i = 1; i <= intervalsToApply; i++) {
+            const intervalIndex = completedBefore + i;
+            effects.health += 3;
+            if (intervalIndex % 2 === 0) effects.stress -= 1;
+            if (intervalIndex % 3 === 0) {
+                effects.energy += 1;
+                effects.sleep_debt -= 1;
+            }
+        }
+
+        const nextState = applyStateEffectsToCharacter(char, effects);
+        const nextCalories = Math.min(4000, Math.max(0, (Number(char.calories || 0)) + calPerInterval * intervalsToApply));
+        return {
+            patch: {
+                calories: nextCalories,
+                energy: nextState.energy,
+                sleep_debt: nextState.sleep_debt,
+                mood: nextState.mood,
+                stress: nextState.stress,
+                social_need: nextState.social_need,
+                health: nextState.health,
+                satiety: nextState.satiety,
+                stomach_load: nextState.stomach_load,
+                city_medical_last_recovery_at: startedAt + completedNow * MEDICAL_RECOVERY_INTERVAL_MS
+            },
+            intervalsToApply
+        };
+    }
+
+    function queueCityTask(userId, task, options = {}) {
+        return enqueueBackgroundTask({
+            key: `city:${userId}`,
+            dedupeKey: options.dedupeKey ? `city:${userId}:${options.dedupeKey}` : '',
+            maxPending: options.maxPending ?? 1,
+            task
+        });
+    }
+
     // Tick every minute
     const tickRate = '* * * * *';
 
-    cron.schedule(tickRate, async () => {
+    if (CITY_BACKGROUND_SAFE_MODE && !CITY_LIGHT_TICK_MODE) {
+        console.warn('[City DLC] CP_SAFE_MODE is enabled. Autonomous city cron is disabled for stability.');
+    } else {
+        if (CITY_BACKGROUND_SAFE_MODE && CITY_LIGHT_TICK_MODE) {
+            console.warn('[City DLC] CP_SAFE_MODE is enabled. Running city cron in light mode.');
+        }
+        cron.schedule(tickRate, async () => {
         try {
             const users = authDb.getAllUsers();
             for (const user of users) {
-                try {
-                    const db = context.getUserDb(user.id);
-                    ensureCityDb(db);
+                queueCityTask(
+                    user.id,
+                    async () => {
+                        const db = context.getUserDb(user.id);
+                        ensureCityDb(db);
 
-                    const config = db.city.getConfig();
-                    const cityActivityEnabled = !(config.dlc_enabled === '0' || config.dlc_enabled === 'false');
-                    const physiologyPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
-                    if (!cityActivityEnabled && physiologyPaused) continue;
+                        const config = db.city.getConfig();
+                        const cityActivityEnabled = !(config.dlc_enabled === '0' || config.dlc_enabled === 'false');
+                        const physiologyPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
+                        if (!cityActivityEnabled && physiologyPaused) return;
 
-                    const districts = db.city.getEnabledDistricts();
-                    const metabolismRate = parseInt(config.metabolism_rate) || 20;
+                        const districts = db.city.getEnabledDistricts();
+                        const metabolismRate = parseInt(config.metabolism_rate) || 20;
 
                     // Adjust metabolism drain to be per-minute based (originally 20 per 15-min tick)
                     // If old tick means 20 cals/15min, then 1 min = 20/15 = 1.33 cals per real-time minute.
-                    const minuteMetabolism = Math.max(1, Math.round(metabolismRate / 15));
+                        const minuteMetabolism = Math.max(1, Math.round(metabolismRate / 15));
 
-                    const characters = db.getCharacters().filter(c =>
-                        c.status === 'active' && c.sys_survival !== 0
-                    );
-                    if (characters.length === 0) continue;
+                        const characters = db.getCharacters().filter(c =>
+                            c.status === 'active' && c.sys_survival !== 0
+                        );
+                        if (characters.length === 0) return;
 
-                    const cityDate = getCityDate(config);
-                    const currentMinute = cityDate.getMinutes();
-                    const minuteKey = cityDate.toISOString().substring(0, 16); // YYYY-MM-DDTHH:MM
-                    const hourString = cityDate.toISOString().substring(0, 13); // "YYYY-MM-DDTHH"
+                        const cityDate = getCityDate(config);
+                        const currentMinute = cityDate.getMinutes();
+                        const minuteKey = cityDate.toISOString().substring(0, 16); // YYYY-MM-DDTHH:MM
+                        const hourString = cityDate.toISOString().substring(0, 13); // "YYYY-MM-DDTHH"
 
-                    if (typeof db.city?.clearExpiredActionGuards === 'function') {
-                        db.city.clearExpiredActionGuards(Date.now() - 6 * 60 * 60 * 1000);
-                    }
-                    if (typeof db.city?.clearExpiredSocialGuards === 'function') {
-                        db.city.clearExpiredSocialGuards(Date.now());
-                    }
+                        if (typeof db.city?.clearExpiredActionGuards === 'function') {
+                            db.city.clearExpiredActionGuards(Date.now() - 6 * 60 * 60 * 1000);
+                        }
+                        if (typeof db.city?.clearExpiredSocialGuards === 'function') {
+                            db.city.clearExpiredSocialGuards(Date.now());
+                        }
 
-                    let actedCount = 0;
-                    let actingChars = [];
+                        let actedCount = 0;
+                        let actingChars = [];
 
-                    for (const char of characters) {
+                        for (const char of characters) {
+                        const cityNowMs = cityDate.getTime();
+                        if (char.city_status === 'medical') {
+                            const medicalDistrict = db.city.getDistrict(char.location || 'hospital') || { id: 'hospital', name: '医院', cal_reward: 0 };
+                            const medicalRecovery = settleMedicalRecovery(char, medicalDistrict, cityNowMs);
+                            if (medicalRecovery) {
+                                db.updateCharacter(char.id, medicalRecovery.patch);
+                                logEmotionTransitionToState(
+                                    db,
+                                    char,
+                                    { ...char, ...medicalRecovery.patch },
+                                    'city_medical_recovery',
+                                    `角色在医院停留期间完成了 ${medicalRecovery.intervalsToApply} 次 5 分钟治疗结算，状态得到逐步恢复。`
+                                );
+                                Object.assign(char, medicalRecovery.patch);
+                            }
+
+                            const { untilAt } = getMedicalStatusTiming(char, cityNowMs);
+                            if (cityNowMs >= untilAt) {
+                                const dischargePatch = {
+                                    city_status: (char.calories ?? 0) < 500 ? 'hungry' : 'idle',
+                                    city_status_started_at: 0,
+                                    city_status_until_at: 0,
+                                    city_medical_last_recovery_at: 0
+                                };
+                                db.updateCharacter(char.id, dischargePatch);
+                                Object.assign(char, dischargePatch);
+                            }
+                        }
+
                         const passiveInterval = getPassiveTickIntervalMinutes(char.city_action_frequency || 1);
                         const shouldApplyPassiveTick = currentMinute % passiveInterval === 0;
 
@@ -1935,12 +2048,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                             }
                         }
 
+                        if (CITY_BACKGROUND_SAFE_MODE && CITY_LIGHT_TICK_MODE && !CITY_ENABLE_AUTONOMOUS_ACTIONS) {
+                            continue;
+                        }
+
                         if (!cityActivityEnabled) {
                             continue;
                         }
 
                         // Generate schedule at 6:00 sharp; maybeGenerateSchedule is idempotent and only generates once per day
-                        if (cityDate.getHours() >= 6 && char.api_endpoint && char.api_key && char.model_name) {
+                        if (CITY_ENABLE_SCHEDULE_GENERATION && cityDate.getHours() >= 6 && char.api_endpoint && char.api_key && char.model_name) {
                             await maybeGenerateSchedule(char, db, districts, config);
                         }
 
@@ -1960,36 +2077,63 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                             actingChars.push(char);
                             await simulateCharacter(char, db, user.id, districts, config, 0); // passing 0 for metabolism since it's passively drained above
                         }
-                    }
+                        }
 
-                    if (actedCount > 0) {
-                        console.log(`[City] 🔔 ${user.username}: ${actedCount}/${characters.length} 个角色在 ${hourString}:${String(currentMinute).padStart(2, '0')} 行动`);
-                        // Phase 5: after characters move, check for location collisions
-                        const socialCandidates = db.getCharacters().filter(c =>
-                            c.status === 'active' && c.sys_city_social !== 0
-                        );
-                        await checkSocialCollisions(socialCandidates, db, user.id, districts, config, minuteKey);
-                    } else if (!cityActivityEnabled && !physiologyPaused) {
-                        console.log(`[City] ⏸️ ${user.username}: 商业街活动已暂停，仅保留生理流逝 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
-                    } else if (cityActivityEnabled && physiologyPaused) {
-                        console.log(`[City] 🫀 ${user.username}: 生理流逝已暂停，商业街活动继续运行 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
-                    } else if (!cityActivityEnabled && physiologyPaused) {
-                        console.log(`[City] ⏹️ ${user.username}: 商业街活动与生理流逝均已暂停 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                        if (actedCount > 0) {
+                            console.log(`[City] 🔔 ${user.username}: ${actedCount}/${characters.length} 个角色在 ${hourString}:${String(currentMinute).padStart(2, '0')} 行动`);
+                            // Phase 5: after characters move, check for location collisions
+                            const socialCandidates = db.getCharacters().filter(c =>
+                                c.status === 'active' && c.sys_city_social !== 0
+                            );
+                            if (CITY_ENABLE_SOCIAL_COLLISIONS) {
+                                await checkSocialCollisions(socialCandidates, db, user.id, districts, config, minuteKey);
+                            }
+                        } else if (!cityActivityEnabled && !physiologyPaused) {
+                            console.log(`[City] ⏸️ ${user.username}: 商业街活动已暂停，仅保留生理流逝 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                        } else if (cityActivityEnabled && physiologyPaused) {
+                            console.log(`[City] 🫀 ${user.username}: 生理流逝已暂停，商业街活动继续运行 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                        } else if (!cityActivityEnabled && physiologyPaused) {
+                            console.log(`[City] ⏹️ ${user.username}: 商业街活动与生理流逝均已暂停 (${hourString}:${String(currentMinute).padStart(2, '0')})`);
+                        }
+                    },
+                    {
+                        dedupeKey: `minute:${new Date().toISOString().slice(0, 16)}`,
+                        maxPending: 1
                     }
-                } catch (e) {
+                ).catch((e) => {
                     console.error(`[City] 用户 ${user.username} 出错:`, e.message);
-                }
+                });
             }
         } catch (e) {
             console.error('[City] 致命错误:', e.message);
         }
-    });
+        });
+    }
 
     // Core simulation
 
     async function simulateCharacter(char, db, userId, districts, config, metabolismRate) {
         let currentCals = Math.max(0, (char.calories ?? 2000) - metabolismRate);
         let currentCityStatus = char.city_status ?? 'idle';
+        const cityNowMs = getCityDate(config).getTime();
+
+        if (currentCityStatus === 'medical') {
+            const { untilAt } = getMedicalStatusTiming(char, cityNowMs);
+            if (cityNowMs < untilAt) {
+                db.updateCharacter(char.id, { calories: currentCals, city_status: currentCityStatus });
+                return;
+            }
+            currentCityStatus = currentCals < 500 ? 'hungry' : 'idle';
+            const releaseMedicalPatch = {
+                calories: currentCals,
+                city_status: currentCityStatus,
+                city_status_started_at: 0,
+                city_status_until_at: 0,
+                city_medical_last_recovery_at: 0
+            };
+            db.updateCharacter(char.id, releaseMedicalPatch);
+            Object.assign(char, releaseMedicalPatch);
+        }
 
         // Auto-eat from backpack when very hungry
         if (currentCals < 800) {
@@ -2564,8 +2708,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 db.city.logAction(char.id, district.id.toUpperCase(), punishLog, dCal, dMoney, district.id);
                 if (richNarrations) broadcastCityToChat(userId, char, punishLog, district.id.toUpperCase(), richNarrations);
             } else {
-                // Actually sick/starving, gets the +1500 cals
-                const normalLog = getLogText(buildActionFallbackLog(char, district, db));
+                // Actually sick/starving: admit to hospital and recover every 5 minutes during the stay.
+                dCal = -(district.cal_cost || 0);
+                stateEffects = { energy: 0, sleep_debt: 0, stress: 0, social_need: 0, health: 0, mood: 0, satiety: 0, stomach_load: 0 };
+                const normalLog = getLogText(`${buildActionFallbackLog(char, district, db)} 先办了手续，准备留在医院里慢慢治疗。`, { forceDefault: true });
                 db.city.logAction(char.id, district.id.toUpperCase(), normalLog, dCal, dMoney, district.id);
                 if (richNarrations) broadcastCityToChat(userId, char, normalLog, district.id.toUpperCase(), richNarrations);
             }
@@ -2595,15 +2741,24 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const newCals = Math.min(4000, Math.max(0, currentCals + dCal));
         const newWallet = Math.max(0, (char.wallet || 0) + dMoney);
         const nextState = applyStateEffectsToCharacter(char, stateEffects);
-        const newCityStatus = district.duration_ticks > 1
-            ? (district.type === 'work' ? 'working' : district.type === 'rest' ? 'sleeping' : 'eating')
-            : (newCals < 500 ? 'hungry' : 'idle');
+        const newCityStatus = district.type === 'medical' && currentCals < 800
+            ? 'medical'
+            : district.duration_ticks > 1
+                ? (district.type === 'work' ? 'working' : district.type === 'rest' ? 'sleeping' : 'eating')
+                : (newCals < 500 ? 'hungry' : 'idle');
+
+        const medicalStayMinutes = district.type === 'medical' && newCityStatus === 'medical'
+            ? getMedicalStayMinutes(district)
+            : 0;
 
         const actionPatch = {
             calories: newCals,
             city_status: newCityStatus,
             location: district.id,
             wallet: newWallet,
+            city_status_started_at: newCityStatus === 'medical' ? cityNowMs : 0,
+            city_status_until_at: newCityStatus === 'medical' ? cityNowMs + medicalStayMinutes * 60 * 1000 : 0,
+            city_medical_last_recovery_at: newCityStatus === 'medical' ? cityNowMs : 0,
             work_distraction: newCityStatus === 'working' ? 0 : (char.work_distraction ?? 0),
             sleep_disruption: newCityStatus === 'sleeping' ? 0 : (char.sleep_disruption ?? 0),
             ...nextState

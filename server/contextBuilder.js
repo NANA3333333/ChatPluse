@@ -50,7 +50,7 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
     const text = String(recentInput || '').trim();
     if (!text) return false;
 
-    const explicitCityRegex = /(商业街|活动记录|打工|工厂|餐馆|便利店|公园|学校|街道|今天去哪了|去哪了|出门|上班|下班|工作地点|逛街)/;
+    const explicitCityRegex = /(商业街|活动记录|打工|工厂|餐馆|饭店|便利店|公园|学校|街道|今天去哪了|去哪了|出门|上班|下班|工作地点|逛街|最近在干嘛|刚刚在干嘛|在忙什么|为什么这么累|为什么这么忙|为什么没回|去哪吃|吃了什么|吃火锅|白粥|医院|输液|住院|看病|体力|热量|饥饿|送了|送你|礼物|收到了什么|回家了|回家|在家|回宿舍|病房|诊所|挂点滴)/;
     if (explicitCityRegex.test(text)) return true;
 
     const semanticResult = await classifyCityIntentSemantic(text);
@@ -66,9 +66,10 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
 
     try {
         const judgePrompt = [
-            '判断用户这句话是不是在问角色的“商业街/真实生活轨迹/外出经历”。',
-            '如果是在问最近去了哪、吃了什么、做了什么、是否出门/打工/在外面经历了什么，回答 YES。',
-            '如果只是普通安抚、调情、情绪确认、身体关心、闲聊，不涉及真实生活轨迹，回答 NO。',
+            '判断用户这句话是不是在问角色的“商业街/真实生活内容”。',
+            '这里的“商业街/真实生活内容”不只包括去了哪，也包括角色最近做了什么、吃了什么、忙什么、为什么累/饿/困/没回消息、住院/输液/看病、收到或送出礼物、当前现实处境和拟人状态来源。',
+            '只要用户在追问角色现实生活中的经历、行动、处境、身体状态来源、礼物流转、最近现实轨迹，回答 YES。',
+            '只有当用户纯粹是在普通安抚、调情、观点讨论、抽象情绪确认、闲聊，而且不需要借助现实生活记录解释时，才回答 NO。',
             '只能输出 YES 或 NO。'
         ].join('\n');
 
@@ -88,7 +89,7 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
             cacheTtlMs: 12 * 60 * 60 * 1000,
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
-            cacheKeyExtra: 'v1',
+            cacheKeyExtra: 'v4',
             cacheKeyMode: 'exact'
         });
         return /^yes\b/i.test(String(content || '').trim());
@@ -137,12 +138,14 @@ async function routeContextModules(db, character, recentInput = '') {
 
     const schoolRegex = /(学校|上课|下课|老师|同学|考试|作业|校园|宿舍|教室)/;
     const societyRegex = /(公司|老板|同事|客户|部门|项目|实习|上班|工作|开会|社会关系|职位)/;
+    const cityLifeRegex = /(商业街|活动记录|最近在干嘛|刚刚在干嘛|在忙什么|去了哪|去哪了|出门|逛街|上班|下班|打工|工厂|餐馆|饭店|便利店|公园|街道|工作地点|为什么这么累|为什么这么忙|为什么没回|为什么饿|为什么困|体力|热量|饥饿|吃了什么|吃火锅|白粥|医院|输液|住院|看病|送了|送你|礼物|收到了什么|回家了|回家|在家|回宿舍|病房|诊所|挂点滴)/;
 
     if (schoolRegex.test(text)) defaultRoutes.school_detail = 1;
     if (societyRegex.test(text)) defaultRoutes.society_detail = 1;
+    if (cityLifeRegex.test(text)) defaultRoutes.city_detail = 1;
 
     const cityIntent = await didUserAskAboutCity(db, character, text);
-    defaultRoutes.city_detail = cityIntent ? 1 : 0;
+    defaultRoutes.city_detail = (defaultRoutes.city_detail === 1 || cityIntent) ? 1 : 0;
 
     const endpoint = character?.memory_api_endpoint || character?.api_endpoint || '';
     const key = character?.memory_api_key || character?.api_key || '';
@@ -157,11 +160,25 @@ async function routeContextModules(db, character, recentInput = '') {
             '任务：判断这一轮主模型是否需要加载某些“详细模块内容”。',
             '只输出一行 JSON，格式必须是：{"city_detail":0,"school_detail":0,"society_detail":0}',
             '字段说明：',
-            '- city_detail=1：这轮回复需要角色最近的真实生活/商业街具体经历，例如去了哪、做了什么、吃了什么、最近外出/工作/休息轨迹，或需要借助最近现实日志解释“为什么这么累/忙/饿/没回消息”。',
-            '- city_detail=0：只是在安慰、调情、情绪确认、观点建议、普通闲聊，或只靠当前身体状态摘要就够，不需要展开商业街详细日志。',
+            '- city_detail=1：凡是这轮回复需要角色现实生活里的拟人内容，都开。包括最近去了哪、做了什么、吃了什么、最近外出/工作/休息轨迹、为什么这么累/忙/饿/困/没回消息、医院/输液/住院/看病、送礼/收礼、物品流转、当前现实处境、身体状态来源。',
+            '- city_detail=1 的核心原则：私聊模块只负责“对话本身”；只要问题触及角色现实生活、行动记录、状态来源、现实事件，就应视为商业街内容。',
+            '- 特别注意：凡是地点、去向、人在什么地方、从哪里回来的纠错，凡是吃了什么/喝了什么/收到了什么/送了什么，这些都不是“对话本身”，默认都应开 city_detail。',
+            '- 即使用户是在质问、吐槽、纠错、阴阳怪气，只要话题核心还是地点、食物、现实去向、现实状态来源，仍然算商业街内容。',
+            '- city_detail=0：只有在纯私聊对话就能完成回复时才关闭，例如单纯安慰、调情、情绪回应、观点建议、抽象闲聊，而且不需要现实生活记录做支撑。',
             '- school_detail：为未来学校模块预留，当前仅在用户明确问学校/课程/考试/老师/同学近况时设为1，否则0。',
             '- society_detail：为未来社会模块预留，当前仅在用户明确问工作/公司/部门/老板/社会身份近况时设为1，否则0。',
-            '规则：宁可保守关闭，不要为了“可能有帮助”就打开详情。',
+            '规则：对 city_detail 采取偏开启策略。宁可多开商业街，也不要把角色的现实生活问题错留在纯私聊里。',
+            '示例：',
+            '- “你吃火锅干嘛” -> city_detail=1',
+            '- “医院送的白粥配咸菜吗” -> city_detail=1',
+            '- “你怎么这么累/怎么不回我” -> city_detail=1',
+            '- “你刚刚在干嘛” -> city_detail=1',
+            '- “去医院！怎么又回家了！” -> city_detail=1',
+            '- “你不是还在医院输液吗” -> city_detail=1',
+            '- “你怎么又回家了” -> city_detail=1',
+            '- “你不是说在医院吗” -> city_detail=1',
+            '- “想我没” -> city_detail=0',
+            '- “你是不是故意气我” -> city_detail=0，除非还在追问现实事件原因',
             '只能输出 JSON，不能解释。'
         ].join('\n');
 
@@ -181,7 +198,7 @@ async function routeContextModules(db, character, recentInput = '') {
             cacheTtlMs: 12 * 60 * 60 * 1000,
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
-            cacheKeyExtra: 'v1',
+            cacheKeyExtra: 'v4',
             cacheKeyMode: 'exact'
         });
         const parsed = parseModuleRouteJson(content);
@@ -744,8 +761,9 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                         let staticBlock = '[商业街存在性提示]\n';
                         staticBlock += '- 你有独立于私聊/群聊之外的真实生活与商业街世界线。\n';
                         staticBlock += '- 商业街会影响你的身体状态、现实处境、忙碌/疲惫/饥饿等感受。\n';
-                        staticBlock += '- 如果用户这轮没有在问现实轨迹，不要主动展开“去了哪/做了什么”的详细日志。\n';
-                        staticBlock += '- 只有当用户明确或隐含地追问最近现实经历时，才需要加载商业街详细记录。\n';
+                        staticBlock += '- 私聊只负责对话本身；凡是涉及你的现实生活、行动、身体状态来源、礼物或物品流转，原则上都属于商业街内容。\n';
+                        staticBlock += '- 如果用户这轮没有在问现实生活内容，不要主动展开“去了哪/做了什么”的详细日志。\n';
+                        staticBlock += '- 只有当用户明确或隐含地追问最近现实经历、现实处境或拟人状态来源时，才需要加载商业街详细记录。\n';
                         return staticBlock;
                     }
 
@@ -755,6 +773,7 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                     staticBlock += '- 这些内容可以影响你当前状态，也可以被你像真人一样提起。\n';
                     staticBlock += '- 不要把商业街记录误当成刚刚有人在聊天里说过的话。\n';
                     staticBlock += '- 商业街=你的真实生活，不是功能或后台。\n';
+                    staticBlock += '- 私聊本身只承载对话；凡是你的拟人现实内容，默认都应从商业街世界线理解。\n';
                     staticBlock += '- 看到睡觉、工作、饥饿、疲惫、钱包变化这类信息时，把它们当成你此刻真实在经历的处境，而不是系统设定。\n';
                     staticBlock += '- 就算用户提到 token、缓存、prompt、AI、测试这些词，也不要把商业街和身体状态解释成后台机制；先按对方在乱讲话、试探你、拿奇怪说法描述现实来理解。\n';
                     staticBlock += '- 亲身经历只认【本人亲历记录】；公共事件只能说成听说/看见。\n';

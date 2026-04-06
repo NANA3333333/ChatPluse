@@ -42,7 +42,7 @@ const activeEmbeddingJobs = new Map();
 
 let globalWsClientsResolver = null;
 const activeSweepJobs = new Set();
-const SWEEP_COOLDOWN_MS = 5 * 60 * 1000;
+const SWEEP_COOLDOWN_MS = 10 * 1000;
 function setWsClientsResolver(resolver) {
     globalWsClientsResolver = resolver;
 }
@@ -2681,13 +2681,29 @@ Output exactly in this JSON format (and nothing else):
         const now = Date.now();
 
         if (activeSweepJobs.has(sweepKey)) {
+            const error = 'Another long-term memory sweep is already running.';
             console.log(`[Memory] Sweep skipped for ${character.name}: another sweep is already running.`);
-            return 0;
+            updateSweepStatus(character.id, {
+                sweep_last_error: error,
+                sweep_last_saved_count: 0
+            });
+            return { status: 'running', savedCount: 0, error };
         }
 
         if (lastRunAt > 0 && (now - lastRunAt) < SWEEP_COOLDOWN_MS) {
-            console.log(`[Memory] Sweep skipped for ${character.name}: cooldown active (${Math.ceil((SWEEP_COOLDOWN_MS - (now - lastRunAt)) / 1000)}s remaining).`);
-            return 0;
+            const remainingSeconds = Math.ceil((SWEEP_COOLDOWN_MS - (now - lastRunAt)) / 1000);
+            const error = `Memory sweep cooldown active. Try again in ${remainingSeconds}s.`;
+            console.log(`[Memory] Sweep skipped for ${character.name}: cooldown active (${remainingSeconds}s remaining).`);
+            updateSweepStatus(character.id, {
+                sweep_last_error: error,
+                sweep_last_saved_count: 0
+            });
+            return {
+                status: 'cooldown',
+                savedCount: 0,
+                error,
+                remainingSeconds
+            };
         }
 
         activeSweepJobs.add(sweepKey);
@@ -2748,13 +2764,13 @@ Output exactly in this JSON format (and nothing else):
             return String(a.id || '').localeCompare(String(b.id || ''));
         });
 
-        if (activityEntries.length === 0) {
-            updateSweepStatus(character.id, {
-                sweep_last_error: '',
-                sweep_last_saved_count: 0
-            });
-            return 0;
-        }
+            if (activityEntries.length === 0) {
+                updateSweepStatus(character.id, {
+                    sweep_last_error: '',
+                    sweep_last_saved_count: 0
+                });
+                return { status: 'done', savedCount: 0 };
+            }
 
         const batchSize = Math.max(12, Math.min(30, Math.ceil(sweepLimit / 3)));
         const totalBatches = Math.ceil(activityEntries.length / batchSize);
@@ -2850,7 +2866,7 @@ Output exactly in this JSON format (and nothing else):
                     ],
                     maxTokens: 2200,
                     temperature: 0.2,
-                    enableCache: true,
+                    enableCache: false,
                     cacheDb: getDb(),
                     cacheType: 'memory_sweep',
                     cacheTtlMs: 30 * 24 * 60 * 60 * 1000,
@@ -2878,7 +2894,11 @@ Output exactly in this JSON format (and nothing else):
                         sweep_last_error: `Batch ${batchIndex + 1}/${totalBatches} did not return a JSON object.`,
                         sweep_last_saved_count: 0
                     });
-                    return 0;
+                    return {
+                        status: 'failed',
+                        savedCount: 0,
+                        error: `Batch ${batchIndex + 1}/${totalBatches} did not return a JSON object.`
+                    };
                 }
 
                 let parsed = null;
@@ -2889,7 +2909,11 @@ Output exactly in this JSON format (and nothing else):
                         sweep_last_error: `Batch ${batchIndex + 1}/${totalBatches} returned invalid JSON.`,
                         sweep_last_saved_count: 0
                     });
-                    return 0;
+                    return {
+                        status: 'failed',
+                        savedCount: 0,
+                        error: `Batch ${batchIndex + 1}/${totalBatches} returned invalid JSON.`
+                    };
                 }
 
                 rollingSummary = String(parsed?.rolling_summary || rollingSummary || '').trim();
@@ -2924,14 +2948,18 @@ Output exactly in this JSON format (and nothing else):
                 sweep_last_saved_count: savedCount
             });
             console.log(`[Memory] Sweep completed for ${character.name}, saved ${savedCount} memories across ${totalBatches} batch(es).`);
-            return savedCount;
+            return { status: 'done', savedCount };
         } catch (e) {
             updateSweepStatus(character.id, {
                 sweep_last_error: e.message || 'Memory sweep failed.',
                 sweep_last_saved_count: 0
             });
             console.error(`[Memory] Sweep failed for ${character.id}:`, e.message);
-            return 0;
+            return {
+                status: 'failed',
+                savedCount: 0,
+                error: e.message || 'Memory sweep failed.'
+            };
         } finally {
             activeSweepJobs.delete(sweepKey);
         }

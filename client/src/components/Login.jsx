@@ -15,8 +15,6 @@ function Login({ apiUrl }) {
             'cp_custom_css',
             'cp_theme_config',
             'cp_theme',
-            'cp_token',
-            'cp_user',
             'cp_avatar',
         ].forEach((key) => localStorage.removeItem(key));
 

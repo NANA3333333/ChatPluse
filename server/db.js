@@ -165,6 +165,9 @@ function getUserDb(userId) {
             city_ignore_streak INTEGER DEFAULT 0,
             city_last_outreach_at INTEGER DEFAULT 0,
             city_post_ignore_reaction INTEGER DEFAULT 0,
+            city_status_started_at INTEGER DEFAULT 0,
+            city_status_until_at INTEGER DEFAULT 0,
+            city_medical_last_recovery_at INTEGER DEFAULT 0,
             stat_int INTEGER DEFAULT 50,
             stat_sta INTEGER DEFAULT 50,
             stat_cha INTEGER DEFAULT 50,
@@ -888,6 +891,7 @@ function getUserDb(userId) {
         'status', 'pressure_level', 'last_user_msg_time', 'is_blocked', 'system_prompt', 'max_tokens',
         'sys_proactive', 'sys_timer', 'sys_pressure', 'sys_jealousy', 'is_diary_unlocked', 'diary_password', 'wallet', 'emoji', 'last_moment_at',
         'jealousy_level', 'jealousy_target', 'city_reply_pending', 'city_ignore_streak', 'city_last_outreach_at', 'city_post_ignore_reaction',
+        'city_status_started_at', 'city_status_until_at', 'city_medical_last_recovery_at',
         'stat_int', 'stat_sta', 'stat_cha', 'energy', 'sleep_debt', 'sleep_pressure', 'mood', 'stress', 'social_need', 'health', 'satiety', 'stomach_load', 'work_distraction', 'sleep_disruption', 'llm_debug_capture',
         'sweep_limit', 'sweep_last_error', 'sweep_last_run_at', 'sweep_last_success_at', 'sweep_last_saved_count',
         // City DLC fields

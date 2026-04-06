@@ -39,6 +39,7 @@ const JWT_SECRET = getJwtSecret();
 const { getEngine } = require('./engine');
 const { getMemory, extractMemoryFromContext, setWsClientsResolver, getEmbeddingDebugStatus } = require('./memory');
 const { getTokenCount } = require('./utils/tokenizer');
+const { getBackgroundQueueStats } = require('./backgroundQueue');
 const qdrant = require('./qdrant');
 
 function getDigestTailWindowSize(contextLimit, availableCount) {
@@ -115,20 +116,26 @@ app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Parses incoming JSON requests
 app.use(express.urlencoded({ limit: '50mb', extended: true })); // Parses URL-encoded data
 
+function isLocalRequest(req) {
+    const ip = req.ip || req.socket?.remoteAddress || '';
+    return ip === '127.0.0.1'
+        || ip === '::1'
+        || ip === '::ffff:127.0.0.1'
+        || ip === 'localhost';
+}
+
 // Define rate limiters
 const authLimiter = rateLimit({
     windowMs: 5 * 60 * 1000, // 5 minutes
     max: 20, // limit each IP to 20 requests per windowMs for auth routes
+    skip: (req) => isLocalRequest(req),
     message: { error: 'Too many authentication attempts. Please try again later.' }
 });
 
 const apiLimiter = rateLimit({
     windowMs: 1 * 60 * 1000, // 1 minute
     max: 120, // limit each IP to 120 api requests per minute
-    skip: (req) => {
-        const ip = req.ip || req.socket?.remoteAddress || '';
-        return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-    },
+    skip: (req) => isLocalRequest(req),
     message: { error: 'API rate limit exceeded.' }
 });
 
@@ -205,27 +212,10 @@ wss.on('connection', (ws) => {
                 ws.userId = decoded.id;
                 const clients = getWsClients(decoded.id);
                 clients.add(ws);
-
-                // Spin up user-specific engine on first connect
                 const engine = getEngine(decoded.id);
-                // DLC hook: if Group Chat DLC registered a chain callback, wire it
-                if (pluginContext.hooks?.groupChainCallback) {
-                    engine.setGroupChainCallback(pluginContext.hooks.groupChainCallback);
-                }
-                if (pluginContext.hooks?.cityReplyStateSyncCallback) {
-                    engine.setCityReplyStateSyncCallback(pluginContext.hooks.cityReplyStateSyncCallback);
-                }
-                if (pluginContext.hooks?.cityReplyIntentCallback) {
-                    engine.setCityReplyIntentCallback(pluginContext.hooks.cityReplyIntentCallback);
-                }
-                if (pluginContext.hooks?.cityReplyActionCallback) {
-                    engine.setCityReplyActionCallback(pluginContext.hooks.cityReplyActionCallback);
-                }
                 engine.startEngine(clients);
-                if (typeof engine.startGroupProactiveTimers === 'function') {
-                    engine.startGroupProactiveTimers(clients);
-                }
-                console.log(`[WS] Authenticated & Engine Started for user: ${decoded.username}`);
+                engine.startGroupProactiveTimers(clients);
+                console.log(`[WS] Authenticated frontend socket for user: ${decoded.username}`);
             }
         } catch (e) {
             console.error('[WS] Auth or Engine Start Error:', e.message);
@@ -272,8 +262,34 @@ const authMiddleware = (req, res, next) => {
         };
         authDb.updateLastActive(req.user.id);
         req.db = getUserDb(req.user.id);
-        req.engine = getEngine(req.user.id);
-        req.memory = getMemory(req.user.id);
+        Object.defineProperty(req, 'engine', {
+            configurable: true,
+            enumerable: true,
+            get() {
+                const engine = getEngine(req.user.id);
+                Object.defineProperty(req, 'engine', {
+                    value: engine,
+                    writable: false,
+                    configurable: true,
+                    enumerable: true
+                });
+                return engine;
+            }
+        });
+        Object.defineProperty(req, 'memory', {
+            configurable: true,
+            enumerable: true,
+            get() {
+                const memory = getMemory(req.user.id);
+                Object.defineProperty(req, 'memory', {
+                    value: memory,
+                    writable: false,
+                    configurable: true,
+                    enumerable: true
+                });
+                return memory;
+            }
+        });
         next();
     } catch (e) {
         return res.status(401).json({ error: 'Invalid token' });
@@ -653,11 +669,20 @@ app.get('/api/system/embedding-status', authMiddleware, async (req, res) => {
     }
 });
 
+app.get('/api/system/background-queue', authMiddleware, (req, res) => {
+    try {
+        res.json({
+            success: true,
+            stats: getBackgroundQueueStats(),
+            now: Date.now()
+        });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.get('/api/characters', authMiddleware, (req, res) => {
     const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
     try {
         const characters = db.getCharacters();
 
@@ -812,9 +837,6 @@ app.get('/api/models', async (req, res) => {
 // 3. Get messages for a character (supports ?limit=N and ?before=msgId for pagination)
 app.get('/api/messages/:characterId', authMiddleware, (req, res) => {
     const db = req.db;
-    const engine = req.engine;
-    const memory = req.memory;
-    const wsClients = getWsClients(req.user.id);
     try {
         const charId = req.params.characterId;
         const limit = parseInt(req.query.limit) || 100;
@@ -825,8 +847,12 @@ app.get('/api/messages/:characterId', authMiddleware, (req, res) => {
             messages = db.getMessagesBefore(charId, before, limit);
         } else {
             messages = db.getMessages(charId, limit);
-            // Mark messages as read when user opens this chat (not when paging back)
-            db.markMessagesRead(charId);
+            // Do not let unread-badge bookkeeping block the main history response.
+            try {
+                db.markMessagesRead(charId);
+            } catch (markErr) {
+                console.warn(`[Messages] Failed to mark messages read for ${charId}: ${markErr.message}`);
+            }
         }
         res.json(messages);
     } catch (e) {
@@ -1253,9 +1279,27 @@ app.post('/api/memories/:characterId/sweep', authMiddleware, async (req, res) =>
             return res.status(400).json({ error: 'Memory AI (Small Model) is not fully configured for this character.' });
         }
 
-        const savedCount = await memory.sweepOverflowMemories(charObj);
+        const sweepResult = await memory.sweepOverflowMemories(charObj);
         const refreshed = db.getCharacter(req.params.characterId);
         const lastError = refreshed?.sweep_last_error || '';
+        const savedCount = Number(sweepResult?.savedCount || 0);
+
+        if (sweepResult?.status === 'running') {
+            return res.status(409).json({
+                success: false,
+                error: sweepResult.error || lastError || 'Another long-term memory sweep is already running.',
+                savedCount
+            });
+        }
+
+        if (sweepResult?.status === 'cooldown') {
+            return res.status(429).json({
+                success: false,
+                error: sweepResult.error || lastError || 'Memory sweep cooldown active.',
+                savedCount,
+                remainingSeconds: Number(sweepResult.remainingSeconds || 0)
+            });
+        }
 
         if (savedCount > 0) {
             return res.json({
@@ -1975,6 +2019,14 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         const totalSavedIncludingRagRatePercent = snapshotWithoutCacheTokens > 0
             ? Math.round((totalSavedIncludingRagTokens / snapshotWithoutCacheTokens) * 100)
             : 0;
+        const lastConversationModuleRoutes = latestConversationSnapshot?.module_routes || {};
+        const lastConversationRoutedToCity = !!(
+            lastConversationModuleRoutes.city_detail
+            || lastConversationModuleRoutes.city
+            || lastConversationModuleRoutes.city_x_y
+            || lastConversationModuleRoutes.city_social
+        );
+        const lastConversationUsedRag = snapshotRagInjectedTokens > 0;
 
         res.json({
             success: true,
@@ -2054,6 +2106,8 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 last_conversation_plain_message_tokens: lastConversationPlainMessageTokens,
                 last_conversation_json_wrapper_tokens: lastConversationJsonWrapperTokens,
                 last_conversation_other_tokens: lastConversationOtherTokens,
+                last_conversation_routed_to_city: lastConversationRoutedToCity,
+                last_conversation_used_rag: lastConversationUsedRag,
                 cache_only_without_rag_baseline_tokens: cacheOnlyWithoutRagBaselineTokens,
                 cache_only_actual_input_tokens: cacheOnlyActualInputTokens,
                 cache_only_saved_tokens: cacheOnlySavedTokens,

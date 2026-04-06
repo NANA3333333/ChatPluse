@@ -2,6 +2,17 @@
 # ChatPulse
 
 > [!IMPORTANT]
+> **2026-04-06 Update Notes**
+> - Stabilized the app by moving heavy autonomous background work onto a shared background queue with concurrency limits.
+> - Restored city ticking, city actions, social collisions, private proactive chat, and group proactive chat step by step after isolating the server starvation issue.
+> - Added a background task queue panel in Settings with real queue stats, 24-hour task history, and grouped/collapsible display by character, group, or city system.
+> - Improved city log truncation handling: suspiciously cut-off street logs are hidden from characters and shown to users with a muted collapsible UI.
+> - Updated hospital recovery to settle every 5 minutes during a medical stay instead of only applying an instant one-shot heal.
+> - Expanded private-chat-to-city routing guidance so location, food, gifts, and real-life state questions are more likely to load city context.
+> - Fixed the context stats panel so `last_conversation_routed_to_city` correctly reads `city_detail` from the latest snapshot.
+> - Cleaned up several frontend issues: contact list layout, login/reset-local-state stability, queue panel readability, and host/API consistency between `127.0.0.1:5173` and `127.0.0.1:8000`.
+
+> [!IMPORTANT]
 > **2026-04-05 最新修复说明**
 > - 修掉了私聊里 RAG `retrieve` 阶段会卡死的问题，根因是聊天链里不该现场自愈重建索引。
 > - 实时聊天链默认不再让本地 `vectra` 参与自动回退，当前主路径是 `Qdrant + SQLite 正文 + lexical/semantic fallback`。
@@ -16,6 +27,17 @@
   <a href="#简体中文">简体中文</a> |
   <a href="#english">English</a>
 </p>
+
+## 2026-04-06 中文版更新说明
+
+- 后端重后台任务改成统一走后台队列，并加了全局并发上限，解决了之前多计时器叠在一起把前台请求拖成“空壳”的问题。
+- 商业街分钟巡逻、角色自主行动、社交碰撞、私聊主动消息、群聊主动消息都已经按层恢复，并在恢复过程中做了稳定性回归。
+- 大设置里新增了“后台任务队列”面板，现在可以看到真实队列状态、最近 24 小时任务历史，并按角色、群聊或商业街系统折叠显示。
+- 商业街截断日志处理已经补上：疑似被截断的商业街活动会对角色隐藏，对用户显示为低存在感的折叠提示。
+- 医院恢复逻辑改成住院期间每 5 分钟结算一次，不再是原来一次性瞬间恢复。
+- 私聊到商业街的路由提示词进一步收紧：地点、去向、吃什么、送礼/收礼、现实状态来源这类问题会更偏向查询商业街。
+- “上一轮是否路由到商业街内容”这行统计已经修正，现在会正确识别 `city_detail`，不再出现实际走了商业街但面板还显示“否”的情况。
+- 修了一批前端问题，包括登录和重置本地界面状态卡住、`127.0.0.1:5173` 与 `127.0.0.1:8000` 地址不一致、联系人列表排版和后台任务面板可读性问题。
 
 ## 简体中文
 

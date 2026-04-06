@@ -106,6 +106,7 @@ export default function CityLog({ apiUrl, userProfile }) {
     const [loading, setLoading] = useState(true);
     const [expandedBag, setExpandedBag] = useState(null);
     const [collapsedDates, setCollapsedDates] = useState({});
+    const [expandedHiddenLogs, setExpandedHiddenLogs] = useState({});
     const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
     const refreshTimerRef = React.useRef(null);
     const token = localStorage.getItem('token');
@@ -262,6 +263,8 @@ export default function CityLog({ apiUrl, userProfile }) {
                                                     {!collapsed &&
                                                         dateLogs.map((log) => {
                                                             const isSocial = log.action_type === 'SOCIAL';
+                                                            const isTruncated = Boolean(log.is_truncated);
+                                                            const hiddenExpanded = Boolean(expandedHiddenLogs[log.id]);
                                                             return (
                                                                 <div
                                                                     key={log.id}
@@ -294,7 +297,54 @@ export default function CityLog({ apiUrl, userProfile }) {
                                                                             </span>
                                                                             <span style={{ fontSize: '11px', color: '#bbb', flexShrink: 0 }}>{new Date(log.timestamp).toLocaleTimeString()}</span>
                                                                         </div>
-                                                                        <div style={{ fontSize: isMobile ? '12px' : '13px', color: isSocial ? '#4a148c' : '#555', lineHeight: 1.7, wordBreak: 'break-word' }}>{log.content}</div>
+                                                                        {isTruncated ? (
+                                                                            <div
+                                                                                style={{
+                                                                                    borderLeft: '2px solid rgba(140, 140, 140, 0.16)',
+                                                                                    background: 'rgba(120, 120, 120, 0.028)',
+                                                                                    color: 'rgba(102, 102, 102, 0.5)',
+                                                                                    borderRadius: '0 6px 6px 0',
+                                                                                    padding: isMobile ? '4px 8px' : '5px 9px',
+                                                                                    lineHeight: 1.35,
+                                                                                    opacity: 0.52,
+                                                                                }}
+                                                                            >
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => setExpandedHiddenLogs((prev) => ({ ...prev, [log.id]: !hiddenExpanded }))}
+                                                                                    style={{
+                                                                                        width: '100%',
+                                                                                        border: 'none',
+                                                                                        background: 'transparent',
+                                                                                        padding: 0,
+                                                                                        cursor: 'pointer',
+                                                                                        display: 'flex',
+                                                                                        alignItems: 'center',
+                                                                                        justifyContent: 'space-between',
+                                                                                        gap: '6px',
+                                                                                        color: 'inherit',
+                                                                                        textAlign: 'left',
+                                                                                        opacity: 0.95,
+                                                                                    }}
+                                                                                >
+                                                                                    <div style={{ fontSize: isMobile ? '10px' : '11px', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '4px', letterSpacing: '0.01em' }}>
+                                                                                        <AlertCircle size={11} />
+                                                                                        隐藏内容
+                                                                                    </div>
+                                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '2px', fontSize: '9px', color: 'rgba(108, 108, 108, 0.42)' }}>
+                                                                                        <span>{hiddenExpanded ? '收起' : '查看'}</span>
+                                                                                        {hiddenExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                                                                                    </div>
+                                                                                </button>
+                                                                                {hiddenExpanded && (
+                                                                                    <div style={{ marginTop: '4px', fontSize: '10px', color: 'rgba(92, 92, 92, 0.64)', wordBreak: 'break-word' }}>
+                                                                                        原文：{log.truncated_original_content || log.content}
+                                                                                    </div>
+                                                                                )}
+                                                                            </div>
+                                                                        ) : (
+                                                                            <div style={{ fontSize: isMobile ? '12px' : '13px', color: isSocial ? '#4a148c' : '#555', lineHeight: 1.7, wordBreak: 'break-word' }}>{log.content}</div>
+                                                                        )}
                                                                         {(log.delta_calories !== 0 || log.delta_money !== 0) && (
                                                                             <div style={{ marginTop: '4px', display: 'flex', gap: '8px', flexWrap: 'wrap', fontSize: '11px', fontWeight: '600' }}>
                                                                                 {log.delta_calories !== 0 && (
