@@ -1072,6 +1072,80 @@ function getUserDb(userId) {
             .all(characterId, sinceTimestamp);
     }
 
+    function getRecentUserConversationIntel(spyCharacterId, options = {}) {
+        const sinceHours = Math.max(1, Number(options.sinceHours || 5));
+        const maxMessages = Math.max(1, Number(options.maxMessages || 20));
+        const maxCharacters = Math.max(1, Number(options.maxCharacters || 20));
+        const sinceTimestamp = Date.now() - sinceHours * 60 * 60 * 1000;
+
+        const recentCharacters = db.prepare(`
+            SELECT
+                character_id,
+                MAX(timestamp) AS last_user_timestamp
+            FROM messages
+            WHERE hidden = 0
+              AND role = 'user'
+              AND timestamp >= ?
+              AND character_id != ?
+            GROUP BY character_id
+            ORDER BY last_user_timestamp DESC
+            LIMIT ?
+        `).all(sinceTimestamp, spyCharacterId, maxCharacters);
+
+        if (!Array.isArray(recentCharacters) || recentCharacters.length === 0) {
+            return {
+                since_timestamp: sinceTimestamp,
+                since_hours: sinceHours,
+                max_messages: maxMessages,
+                max_characters: maxCharacters,
+                per_character_limit: 0,
+                characters: [],
+                total_messages: 0
+            };
+        }
+
+        const selectedCharacters = recentCharacters.slice(0, Math.min(maxCharacters, maxMessages));
+        const perCharacterLimit = Math.max(1, Math.floor(maxMessages / selectedCharacters.length));
+        const characters = [];
+        let totalMessages = 0;
+
+        for (const row of selectedCharacters) {
+            const character = getCharacter(row.character_id);
+            if (!character) continue;
+            const messages = db.prepare(`
+                SELECT *
+                FROM messages
+                WHERE character_id = ?
+                  AND hidden = 0
+                  AND timestamp >= ?
+                  AND role IN ('user', 'character')
+                ORDER BY timestamp DESC
+                LIMIT ?
+            `)
+                .all(row.character_id, sinceTimestamp, perCharacterLimit)
+                .reverse()
+                .map(normalizeMessageRow);
+
+            characters.push({
+                character_id: row.character_id,
+                character_name: character.name,
+                last_user_timestamp: Number(row.last_user_timestamp || 0),
+                messages
+            });
+            totalMessages += messages.length;
+        }
+
+        return {
+            since_timestamp: sinceTimestamp,
+            since_hours: sinceHours,
+            max_messages: maxMessages,
+            max_characters: maxCharacters,
+            per_character_limit: perCharacterLimit,
+            characters,
+            total_messages: totalMessages
+        };
+    }
+
     function getLastUserMessageTimestamp(characterId) {
         const row = db.prepare('SELECT timestamp FROM messages WHERE character_id = ? AND role = ? ORDER BY id DESC LIMIT 1')
             .get(characterId, 'user');
@@ -2702,6 +2776,7 @@ function getUserDb(userId) {
         getMessagesBefore,
         getVisibleMessages,
         getVisibleMessagesSince,
+        getRecentUserConversationIntel,
         getLastUserMessageTimestamp,
         getUnsummarizedMessages,
         countUnsummarizedMessages,

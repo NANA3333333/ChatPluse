@@ -103,6 +103,39 @@ module.exports = function initCityPlugin(app, context) {
         return newMessage;
     }
 
+    async function triggerHackerIntelReply(userId, char, intelText) {
+        if (!char?.id) return null;
+        const db = ensureCityDb(getUserDb(userId));
+        const engine = getEngine(userId);
+        const wsClients = getWsClients(userId);
+        if (!engine || typeof engine.triggerImmediateUserReply !== 'function') {
+            throw new Error('私聊引擎不可用');
+        }
+
+        const directive = [
+            '你刚花钱在黑客据点买到了一份监听反馈。',
+            '下面内容是用户过去 5 小时内和其他角色之间的真实私聊片段，不是用户刚刚直接对你说的话。',
+            '你已经看完了这份情报，现在要给用户发一条正常私聊回应。',
+            '要求：',
+            '- 像真人刚看完这些内容后的第一反应那样说话，不要写成汇报工作、监控报告或固定格式摘要。',
+            '- 可以自然带出吃醋、委屈、试探、嘴硬、阴阳怪气、装作不在意等情绪，但要符合你当前角色状态。',
+            '- 最多只挑一两句最刺到你的内容提，不要逐条复述整份情报。',
+            '- 不要提系统、RAG、上下文、日志、功能、监控链路。',
+            '- 这次只需要发私聊回应，不要输出任何 CITY_ACTION、CITY_INTENT、TIMER 之类的标签，也不要顺手决定新的商业街行动。',
+            '- 如果这份情报里没什么东西，也要像真人那样自然回应。',
+            '',
+            '[黑客据点监听反馈开始]',
+            String(intelText || '').trim(),
+            '[黑客据点监听反馈结束]'
+        ].join('\n');
+
+        await engine.triggerImmediateUserReply(char.id, wsClients, {
+            propagateError: true,
+            extraSystemDirective: directive
+        });
+        return true;
+    }
+
     function slugifyCityId(value, fallbackPrefix) {
         const base = String(value || '')
             .trim()
@@ -560,6 +593,64 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
             default:
                 return `${char.name} ${fromText}${statusLead}去了 ${district.emoji}${district.name}，准备把眼前这件事先处理掉。`.replace(/\s+/g, ' ').trim();
         }
+    }
+
+    function isHackerDistrict(district) {
+        const districtType = String(district?.type || '').trim().toLowerCase();
+        const districtId = String(district?.id || '').trim().toLowerCase();
+        return districtType === 'hacker' || districtId === 'hacker';
+    }
+
+    function formatHackerIntelTimestamp(timestamp) {
+        try {
+            return new Date(Number(timestamp || 0)).toLocaleString('zh-CN', {
+                year: 'numeric',
+                month: '2-digit',
+                day: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+                hour12: false
+            });
+        } catch (e) {
+            return String(timestamp || '');
+        }
+    }
+
+    function clipHackerIntelContent(content, maxLength = 90) {
+        const normalized = String(content || '').replace(/\s+/g, ' ').trim();
+        if (!normalized) return '';
+        return normalized.length > maxLength
+            ? `${normalized.slice(0, maxLength - 1)}…`
+            : normalized;
+    }
+
+    function buildHackerIntelAppendix(db, spyingChar) {
+        const intel = db.getRecentUserConversationIntel?.(spyingChar.id, {
+            sinceHours: 5,
+            maxMessages: 20,
+            maxCharacters: 20
+        });
+        if (!intel || !Array.isArray(intel.characters) || intel.characters.length === 0) {
+            return '黑进几层跳板后，最后只抓到一片干净得过头的聊天缓存。过去 5 小时里，用户没有留下可供追踪的新对话对象。';
+        }
+
+        const lines = [];
+        lines.push(`顺着监听链路把过去 5 小时的私聊记录拆开后，我最终抓到了 ${intel.characters.length} 个对话对象的聊天切片。`);
+        lines.push(`每个对象按最近度分到了 ${intel.per_character_limit} 条上下文，下面这些都是带时间戳的原始截获片段。`);
+        for (const convo of intel.characters) {
+            const charName = String(convo.character_name || convo.character_id || '未知角色').trim();
+            lines.push(`【对话对象：${charName}】`);
+            if (!Array.isArray(convo.messages) || convo.messages.length === 0) {
+                lines.push('  - 暂时只锁定到了目标，没有抄到有效消息。');
+                continue;
+            }
+            for (const msg of convo.messages) {
+                const speaker = msg.role === 'user' ? '用户' : charName;
+                lines.push(`  - [${formatHackerIntelTimestamp(msg.timestamp)}] ${speaker}：${clipHackerIntelContent(msg.content)}`);
+            }
+        }
+        lines.push('以上是这次截获到的重点情报。');
+        return lines.join('\n');
     }
 
     function parseLooseJsonObject(reply) {
@@ -2722,6 +2813,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 return;
             }
             let normalLog = getLogText(buildActionFallbackLog(char, district, db));
+            let hackerIntelPayload = '';
             if (district.type === 'education') {
                 const studyResult = schoolLogic.getSchoolActionEffects(growthDb, char, district, currentState);
                 if (studyResult) {
@@ -2734,8 +2826,17 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                     normalLog = `${normalLog} 这次主要上了 ${studyResult.course.emoji}${studyResult.course.name}，熟练度 +${studyResult.gain}，现在是 ${studyResult.afterMastery}/100。${schoolLogic.describeSchoolUnlock(studyResult.course.id, studyResult.unlockedTier)}`.trim();
                 }
             }
+            if (isHackerDistrict(district)) {
+                hackerIntelPayload = buildHackerIntelAppendix(db, char);
+                normalLog = `${normalLog}\n\n[黑客据点情报]\n${hackerIntelPayload}`.trim();
+            }
             db.city.logAction(char.id, district.id.toUpperCase(), normalLog, dCal, dMoney, district.id);
             if (richNarrations) broadcastCityToChat(userId, char, normalLog, district.id.toUpperCase(), richNarrations);
+            if (hackerIntelPayload) {
+                triggerHackerIntelReply(userId, char, hackerIntelPayload).catch(err => {
+                    console.error(`[City->Chat] 黑客据点私聊回报失败: ${err.message}`);
+                });
+            }
         }
 
         const newCals = Math.min(4000, Math.max(0, currentCals + dCal));
