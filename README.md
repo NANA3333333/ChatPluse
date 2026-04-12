@@ -41,13 +41,24 @@
 
 ChatPulse 是一个本地优先的 AI 社交模拟应用，前端使用 React，后端使用 Express，主存储为 SQLite，并支持接入 Qdrant 做向量记忆检索。
 
+### 缓存、RAG 与向量记忆科普
+
+如果你是第一次接触这些词，可以先把它们理解成四个分工不同的层：
+
+- 缓存：把已经整理好的上下文、摘要或模型结果先存起来，避免每一轮都从零重算。
+- SQLite：负责保存完整消息、记忆正文和业务元数据，像项目里的“资料库”。
+- Qdrant：负责按语义相近去找相关记忆，像项目里的“智能检索柜”。
+- RAG：不是让模型硬猜，而是先把相关历史资料找回来，再基于这些资料回答。
+
+一句话概括就是：缓存让它更快，SQLite 负责存原文，Qdrant 负责按语义把过去找回来，RAG 负责先查再答。
+
 ### 技术栈
 
 - 前端：React 19 + Vite
 - 后端：Node.js + Express + ws
 - 主存储：SQLite（`better-sqlite3`）
 - 向量检索：Qdrant
-- 本地兜底索引：vectra + `@xenova/transformers`
+- 实时记忆主路径：Qdrant + SQLite 正文/元数据
 
 ### 本地部署
 
@@ -131,16 +142,15 @@ chmod +x install-and-start.sh
 - `data/master.db`：认证库
 - `data/chatpulse_user_<id>.db`：每个用户自己的业务数据库
 - `server/public/uploads/`：上传目录
-- `data/vectors/...`：本地 vectra 索引目录
 - JWT secret 文件（如果环境变量未提供）
 
 Qdrant 行为：
 
-- Qdrant 可用时，优先使用 Qdrant
-- Qdrant 不可用时，自动回退到本地 vectra
+- Qdrant 可用时，实时记忆检索优先使用 Qdrant
 - Qdrant collection 会在首次写入记忆时自动创建
+- SQLite 持续保存完整消息、记忆正文和元数据
 
-所以即使没有启动 Qdrant，项目也能在本地正常跑起来。
+当前 README 描述的现行实时链路以 `Qdrant + SQLite 正文/元数据` 为主。
 
 可选启动 Qdrant：
 
