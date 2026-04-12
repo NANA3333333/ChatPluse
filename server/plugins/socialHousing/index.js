@@ -7,6 +7,10 @@ function compactText(value, fallback = '') {
     return String(value || '').replace(/\s+/g, ' ').trim() || fallback;
 }
 
+function buildAgencyAdKey(title, content) {
+    return `${compactText(title)}\n${compactText(content)}`;
+}
+
 function unwrapAgencyJsonText(text) {
     const raw = String(text || '').trim();
     if (!raw) return '';
@@ -103,6 +107,46 @@ function cleanupOrphanAgencyArtifacts(socialHousingDb, cityDb) {
     }
 }
 
+function getPublicAgencyAnnouncements(cityDb, limit = 50) {
+    if (typeof cityDb?.getCityAnnouncements !== 'function') return [];
+    return (cityDb.getCityAnnouncements(limit) || []).filter((item) => String(item.source_type || '') === 'agency');
+}
+
+function getVisibleAgencyAds(socialHousingDb, cityDb, limit = 12) {
+    const publicKeys = new Set(
+        getPublicAgencyAnnouncements(cityDb, 50)
+            .map((item) => buildAgencyAdKey(item.title, item.content))
+            .filter(Boolean)
+    );
+    return (socialHousingDb.getAgencyAds(limit) || []).filter((ad) => !publicKeys.has(buildAgencyAdKey(ad.title, ad.content)));
+}
+
+function doesAgencyAdReferenceHome(ad, home) {
+    const title = compactText(ad?.title);
+    const content = compactText(ad?.content);
+    const haystack = `${title}\n${content}`;
+    const signals = [
+        home?.id,
+        home?.name
+    ]
+        .map((value) => compactText(value))
+        .filter(Boolean);
+    return signals.some((signal) => haystack.includes(signal));
+}
+
+function removeAgencyArtifactsForHome(socialHousingDb, cityDb, home) {
+    if (!socialHousingDb || !cityDb || !home) return 0;
+    const ads = socialHousingDb.getAgencyAds(500) || [];
+    let removedCount = 0;
+    for (const ad of ads) {
+        if (!doesAgencyAdReferenceHome(ad, home)) continue;
+        removeAgencyArtifacts(cityDb, ad.title, ad.content);
+        socialHousingDb.deleteAgencyAd(ad.id);
+        removedCount += 1;
+    }
+    return removedCount;
+}
+
 function recordAgencyDebug(db, aiChar, direction, payload, meta = {}) {
     if (!db || typeof db.addLlmDebugLog !== 'function' || !aiChar || aiChar.llm_debug_capture !== 1) return;
     try {
@@ -194,9 +238,22 @@ async function generateAgencyAd({ callLLM, db, config, snapshot, aiChar }) {
         JSON.stringify(snapshot, null, 2)
     ].join('\n');
 
+    const richerAdInstructions = [
+        '',
+        '[补充增强要求]',
+        '- 这次广告要比普通短句更像真实中介传单，信息更丰富一些。',
+        '- 标题不要太短，尽量带上小区名、门牌、户型或卖点。',
+        '- 正文尽量写成 2 到 4 句，而不是只有一句话。',
+        '- 除了价格，还尽量自然写出：户型、押金、适合什么人、安静/采光/独卫/离哪里近/适合独居或情侣等信息。',
+        '- 文风要像真人中介门店张贴的传单，具体、热情、接地气，不要像系统总结。',
+        '- 不要只说“快来看”，而是让租房者看完就知道这套房大概什么样、为什么值得来看。'
+    ].join('\n');
+    const homeIdInstruction = '\n[home_id requirement]\nIf possible, include an extra JSON field named "home_id". Its value must be exactly one housing id from the provided list.\n';
+    const finalUserPrompt = `${userPrompt}${richerAdInstructions}${homeIdInstruction}`;
+
     recordAgencyDebug(db, aiChar, 'input', {
         system_prompt: systemPrompt,
-        user_prompt: userPrompt
+        user_prompt: finalUserPrompt
     }, {
         context_type: 'social_housing_agency_ad',
         model,
@@ -209,7 +266,7 @@ async function generateAgencyAd({ callLLM, db, config, snapshot, aiChar }) {
         model,
         messages: [
             { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt }
+            { role: 'user', content: finalUserPrompt }
         ],
         maxTokens: 3000,
         temperature: 0.9,
@@ -241,6 +298,7 @@ async function generateAgencyAd({ callLLM, db, config, snapshot, aiChar }) {
 
     const title = compactText(parsed?.title, `${config.agency_name || '安家置业'}新房讯息`);
     const content = compactText(parsed?.content);
+    const selectedHomeId = compactText(parsed?.home_id || parsed?.homeId);
     if (!title || !content) {
         throw new Error('Agency AI output was malformed. Please retry.');
     }
@@ -248,17 +306,25 @@ async function generateAgencyAd({ callLLM, db, config, snapshot, aiChar }) {
         throw new Error('Agency AI output was missing price information. Please retry.');
     }
 
+    const normalizedAdText = `${title} ${content}`;
     const availableHomeSignals = snapshot.available_homes
-        .map((item) => [item.name, item.id].filter(Boolean))
-        .flat()
-        .map((item) => String(item || '').trim())
-        .filter(Boolean);
-    const mentionsSpecificHome = availableHomeSignals.some((signal) => signal && `${title} ${content}`.includes(signal));
-    if (!mentionsSpecificHome) {
+        .map((item) => ({
+            id: compactText(item.id),
+            signals: [item.name, item.id]
+                .filter(Boolean)
+                .map((value) => String(value || '').trim())
+                .filter(Boolean)
+        }))
+        .filter((item) => item.id || item.signals.length > 0);
+    const mentionsSpecificHome = availableHomeSignals.some((item) =>
+        item.signals.some((signal) => signal && normalizedAdText.includes(signal))
+    );
+    const selectedHomeExists = !!selectedHomeId && availableHomeSignals.some((item) => item.id === selectedHomeId);
+    if (!mentionsSpecificHome && !selectedHomeExists) {
         throw new Error('Agency AI output did not mention a specific home. Please retry.');
     }
 
-    return { title, content };
+    return { title, content, home_id: selectedHomeExists ? selectedHomeId : '' };
 }
 
 module.exports = function initSocialHousingPlugin(app, context) {
@@ -325,6 +391,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
             const socialHousingDb = ensureSocialHousingDb(req.db);
             const cityDb = ensureCityDb(req.db);
             cleanupOrphanAgencyArtifacts(socialHousingDb, cityDb);
+            const publicAgencyAnnouncements = getPublicAgencyAnnouncements(cityDb, 50);
             res.json({
                 success: true,
                 classes: socialHousingDb.getClasses(),
@@ -333,7 +400,8 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 districts: cityDb.getDistricts ? cityDb.getDistricts() : [],
                 agency_model_options: getAgencyModelOptions(req.db),
                 agency: socialHousingDb.getAgencyConfig(),
-                agency_ads: socialHousingDb.getAgencyAds(12)
+                agency_ads: getVisibleAgencyAds(socialHousingDb, cityDb, 12),
+                public_agency_announcements: publicAgencyAnnouncements
             });
         } catch (e) {
             try {
@@ -390,8 +458,17 @@ module.exports = function initSocialHousingPlugin(app, context) {
     app.delete('/api/social-housing/housing/:id', authMiddleware, (req, res) => {
         try {
             const socialHousingDb = ensureSocialHousingDb(req.db);
+            const cityDb = ensureCityDb(req.db);
+            const housingList = socialHousingDb.getHousingTiers() || [];
+            const removedHome = housingList.find((item) => String(item.id) === String(req.params.id)) || null;
             socialHousingDb.deleteHousing(req.params.id);
-            res.json({ success: true, housing_tiers: socialHousingDb.getHousingTiers() });
+            const removedAgencyAds = removedHome ? removeAgencyArtifactsForHome(socialHousingDb, cityDb, removedHome) : 0;
+            res.json({
+                success: true,
+                removed_agency_ads: removedAgencyAds,
+                housing_tiers: socialHousingDb.getHousingTiers(),
+                agency_ads: getVisibleAgencyAds(socialHousingDb, cityDb, 12)
+            });
         } catch (e) {
             res.status(500).json({ success: false, error: e.message });
         }
@@ -448,7 +525,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 success: true,
                 ad,
                 agency: socialHousingDb.getAgencyConfig(),
-                agency_ads: socialHousingDb.getAgencyAds(12)
+                agency_ads: getVisibleAgencyAds(socialHousingDb, ensureCityDb(req.db), 12)
             });
         } catch (e) {
             try {
@@ -477,7 +554,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
             socialHousingDb.deleteAgencyAd(req.params.id);
             res.json({
                 success: true,
-                agency_ads: socialHousingDb.getAgencyAds(12)
+                agency_ads: getVisibleAgencyAds(socialHousingDb, cityDb, 12)
             });
         } catch (e) {
             res.status(500).json({ success: false, error: e.message });

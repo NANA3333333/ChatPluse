@@ -395,9 +395,13 @@ module.exports = function initCityDb(db) {
         return /[。？！!?…][\s"'”’」』）)\]}\.~]*$/u.test(normalized) || endsWithEmojiLike(normalized);
     }
 
+    function getCityLogText(log) {
+        return String(log?.content ?? log?.message ?? '').trim();
+    }
+
     function shouldDetectTruncation(log) {
         const actionType = String(log?.action_type || '').trim().toUpperCase();
-        const content = String(log?.content || '').trim();
+        const content = getCityLogText(log);
         if (!content) return false;
         if (/\[系统提示\]|系统提示|系统广播|城市广播/u.test(content)) return false;
         if (STRUCTURED_CITY_LOG_ACTIONS.has(actionType)) return false;
@@ -405,7 +409,7 @@ module.exports = function initCityDb(db) {
     }
 
     function decorateCityLogForUser(log) {
-        const originalContent = String(log?.content || '').trim();
+        const originalContent = getCityLogText(log);
         const isTruncated = shouldDetectTruncation(log) && !hasNaturalSentenceEnding(originalContent);
         return {
             ...log,
@@ -415,7 +419,7 @@ module.exports = function initCityDb(db) {
     }
 
     function isVisibleCityLogForCharacter(log) {
-        const content = String(log?.content || '').trim();
+        const content = getCityLogText(log);
         if (!content) return false;
         if (!shouldDetectTruncation(log)) return true;
         return hasNaturalSentenceEnding(content);
@@ -508,6 +512,10 @@ module.exports = function initCityDb(db) {
 
     function getCityAnnouncements(limit = 20) {
         const safeLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 20;
+        const normalizeAnnouncementText = (value = '') => String(value || '')
+            .replace(/^\s*\[(?:中介所广告|市长广播)\]\s*/u, '')
+            .replace(/\s+/g, ' ')
+            .trim();
         const rows = db.prepare(`
             SELECT id, source_type, title, content, location, timestamp
             FROM city_announcements
@@ -542,11 +550,26 @@ module.exports = function initCityDb(db) {
             LIMIT ?
         `).all(safeLimit * 2);
 
+        const normalizedPrimaryKeys = new Set(
+            rows.map((item) => {
+                const normalizedTitle = normalizeAnnouncementText(item.title || '');
+                const normalizedContent = normalizeAnnouncementText(item.content || '');
+                return `${String(item.source_type || '').trim()}|${normalizedTitle}|${normalizedContent}`;
+            })
+        );
+
         const merged = [...rows, ...fallbackRows]
+            .filter((item) => {
+                const normalizedTitle = normalizeAnnouncementText(item.title || '');
+                const normalizedContent = normalizeAnnouncementText(item.content || '');
+                const normalizedKey = `${String(item.source_type || '').trim()}|${normalizedTitle}|${normalizedContent}`;
+                if (rows.includes(item)) return true;
+                return !normalizedPrimaryKeys.has(normalizedKey);
+            })
             .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0))
             .filter((item, index, list) => {
-                const key = `${String(item.source_type || '')}|${String(item.title || '')}|${String(item.content || '')}`;
-                return list.findIndex((other) => `${String(other.source_type || '')}|${String(other.title || '')}|${String(other.content || '')}` === key) === index;
+                const key = `${String(item.source_type || '').trim()}|${normalizeAnnouncementText(item.title || '')}|${normalizeAnnouncementText(item.content || '')}`;
+                return list.findIndex((other) => `${String(other.source_type || '').trim()}|${normalizeAnnouncementText(other.title || '')}|${normalizeAnnouncementText(other.content || '')}` === key) === index;
             })
             .slice(0, safeLimit);
 

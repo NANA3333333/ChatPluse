@@ -129,10 +129,50 @@ module.exports = function initCityPlugin(app, context) {
             '[黑客据点监听反馈结束]'
         ].join('\n');
 
-        await engine.triggerImmediateUserReply(char.id, wsClients, {
-            propagateError: true,
-            extraSystemDirective: directive
+        const startNotice = '[系统提示] 黑客据点监听反馈已获取，角色正在根据这份情报组织一条私聊回应。';
+        const { id: startMsgId, timestamp: startMsgTs } = db.addMessage(char.id, 'system', startNotice);
+        engine?.broadcastNewMessage?.(wsClients, {
+            id: startMsgId,
+            character_id: char.id,
+            role: 'system',
+            content: startNotice,
+            timestamp: startMsgTs,
+            read: 0
         });
+        engine?.broadcastEvent?.(wsClients, { type: 'refresh_contacts' });
+        recordCityLlmDebug(db, char, 'event', 'hacker_intel_reply', 'Hacker intel reply dispatch started.', {
+            has_intel: true,
+            intel_length: String(intelText || '').length
+        });
+
+        try {
+            await engine.triggerImmediateUserReply(char.id, wsClients, {
+                propagateError: true,
+                extraSystemDirective: directive
+            });
+            recordCityLlmDebug(db, char, 'event', 'hacker_intel_reply', 'Hacker intel reply dispatch succeeded.', {
+                has_intel: true,
+                intel_length: String(intelText || '').length
+            });
+        } catch (err) {
+            const failText = `[System] 黑客据点监听回报失败：${String(err?.message || err || '未知错误')}`;
+            const { id: failMsgId, timestamp: failMsgTs } = db.addMessage(char.id, 'system', failText);
+            engine?.broadcastNewMessage?.(wsClients, {
+                id: failMsgId,
+                character_id: char.id,
+                role: 'system',
+                content: failText,
+                timestamp: failMsgTs,
+                read: 0
+            });
+            engine?.broadcastEvent?.(wsClients, { type: 'refresh_contacts' });
+            recordCityLlmDebug(db, char, 'event', 'hacker_intel_reply', failText, {
+                error: true,
+                has_intel: true,
+                intel_length: String(intelText || '').length
+            });
+            throw err;
+        }
         return true;
     }
 

@@ -166,6 +166,7 @@ export default function HousingSocialPanel() {
   const [districts, setDistricts] = useState([]);
   const [agencyModelOptions, setAgencyModelOptions] = useState([]);
   const [agencyAds, setAgencyAds] = useState([]);
+  const [publicAgencyAnnouncements, setPublicAgencyAnnouncements] = useState([]);
   const [agencyForm, setAgencyForm] = useState(emptyAgency);
   const [homeForm, setHomeForm] = useState(emptyHome);
   const [classForm, setClassForm] = useState(emptyClass);
@@ -221,6 +222,7 @@ export default function HousingSocialPanel() {
       setDistricts(data.districts || []);
       setAgencyModelOptions(data.agency_model_options || []);
       setAgencyAds(data.agency_ads || []);
+      setPublicAgencyAnnouncements(data.public_agency_announcements || []);
       setAgencyForm({ ...emptyAgency, ...(data.agency || {}) });
       setAgencyError(data.agency?.last_error || '');
     } finally {
@@ -241,13 +243,10 @@ export default function HousingSocialPanel() {
   };
   const deleteHome = async (id) => { await requestJson(`/api/social-housing/housing/${id}`, { method: 'DELETE', headers }); await loadAll(); };
   const deleteClass = async (id) => { await requestJson(`/api/social-housing/classes/${id}`, { method: 'DELETE', headers }); await loadAll(); };
-  const deleteAgencyAd = async (id) => {
-    const data = await requestJson(`/api/social-housing/agency/ads/${id}`, { method: 'DELETE', headers });
-    setAgencyAds(data.agency_ads || []);
-  };
+  const deleteAgencyAd = async (id) => { await requestJson(`/api/social-housing/agency/ads/${id}`, { method: 'DELETE', headers }); await loadAll(); };
   const updateBinding = async (id, binding) => { setSavingBindingId(id); try { const data = await requestJson(`/api/social-housing/characters/${id}/binding`, { method: 'POST', headers, body: JSON.stringify(binding) }); setCharacters(data.characters || []); } finally { setSavingBindingId(''); } };
   const saveAgency = async (payload = agencyForm) => { setSavingAgency(true); setAgencyError(''); try { const data = await requestJson('/api/social-housing/agency', { method: 'POST', headers, body: JSON.stringify(payload) }); setAgencyForm({ ...emptyAgency, ...(data.agency || {}) }); } catch (e) { setAgencyError(e.message || 'agency failed'); throw e; } finally { setSavingAgency(false); } };
-  const publishAgency = async () => { setPublishingAgency(true); setAgencyError(''); try { const data = await requestJson('/api/social-housing/agency/publish-ad', { method: 'POST', headers }); setAgencyAds(data.agency_ads || []); setAgencyForm((prev) => ({ ...prev, ...(data.agency || {}) })); } catch (e) { setAgencyError(e.message || 'ad failed'); throw e; } finally { setPublishingAgency(false); } };
+  const publishAgency = async () => { setPublishingAgency(true); setAgencyError(''); try { await requestJson('/api/social-housing/agency/publish-ad', { method: 'POST', headers }); await loadAll(); } catch (e) { setAgencyError(e.message || 'ad failed'); throw e; } finally { setPublishingAgency(false); } };
   const clearAgencyError = async () => {
     const payload = { ...agencyForm, last_error: '', last_error_at: 0 };
     const data = await requestJson('/api/social-housing/agency', { method: 'POST', headers, body: JSON.stringify(payload) });
@@ -273,6 +272,16 @@ export default function HousingSocialPanel() {
   };
   const beginEditHome = (item) => { setEditingHomeId(String(item.id)); setHomeForm({ ...emptyHome, ...item }); setShowCustomHomeEditor(true); };
   const applyAgencyTemplate = (key) => { setAgencyTemplateKey(key); const preset = promptStyles.find((item) => item.key === key); if (preset) setAgencyForm((prev) => ({ ...prev, persona_prompt: preset.prompt })); };
+
+  const visibleAgencyAds = useMemo(() => {
+    const publicKeys = new Set(
+      (publicAgencyAnnouncements || []).map((item) => `${String(item.title || '').trim()}\n${String(item.content || '').trim()}`).filter(Boolean)
+    );
+    return (agencyAds || []).filter((ad) => {
+      const key = `${String(ad.title || '').trim()}\n${String(ad.content || '').trim()}`;
+      return !publicKeys.has(key);
+    });
+  }, [agencyAds, publicAgencyAnnouncements]);
 
   if (loading) return <div style={{ padding: 24, color: '#64748b' }}>{text.loading}</div>;
 
@@ -312,7 +321,7 @@ export default function HousingSocialPanel() {
               ) : null}
             </div>
             <div style={{ display: 'grid', gap: 12 }}>
-              {agencyAds.length ? agencyAds.map((ad) => (
+              {visibleAgencyAds.length ? visibleAgencyAds.map((ad) => (
                 <div key={ad.id} style={{ border: '1px solid #e7edf5', borderRadius: 16, padding: 14, background: '#fff', boxShadow: '0 10px 30px rgba(15,23,42,0.04)' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'flex-start' }}>
                     <div style={{ fontWeight: 800, color: '#2563eb', fontSize: 15 }}>{ad.title || text.noAds}</div>

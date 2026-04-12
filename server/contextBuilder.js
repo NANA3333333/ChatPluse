@@ -265,7 +265,7 @@ function buildRecentCityRouteContext(db, character, maxItems = 5) {
     }
 }
 
-async function routeContextModules(db, character, recentInput = '') {
+async function routeContextModules(db, character, recentInput = '', topicSwitchState = null) {
     const text = String(recentInput || '').trim();
     const defaultRoutes = {
         city_detail: 0,
@@ -295,6 +295,15 @@ async function routeContextModules(db, character, recentInput = '') {
         return defaultRoutes;
     }
 
+    const recentPrivateContext = buildRecentPrivateRouteContext(db, character, 6);
+    const recentCityContext = buildRecentCityRouteContext(db, character, 5);
+    const normalizedTopicSwitch = topicSwitchState && typeof topicSwitchState === 'object'
+        ? {
+            decision: String(topicSwitchState.decision || '').trim() || 'UNKNOWN',
+            reason: String(topicSwitchState.reason || '').trim() || 'unspecified'
+        }
+        : null;
+
     const judgePrompt = [
         '你是私聊上下文模块路由器。',
         '任务：判断这一轮主模型是否需要加载某些“详细模块内容”。',
@@ -304,6 +313,11 @@ async function routeContextModules(db, character, recentInput = '') {
         '- 纯对话理解、情绪回应、关系互动、记忆检索、时间回忆、总结回顾，都留在私聊对话层，不属于商业街。',
         '- 像“昨天发生了什么”“三天前发生了什么”“上周聊了什么”“你记得我说过什么吗”这类问题，本质是检索回忆，不是商业街，city_detail=0。',
         '- 只有当用户明确追问现实生活轨迹或现实来源，比如“你刚才去哪了”“你路过哪儿了”“你吃了什么”“你为什么这么累”“你花钱花哪了”，才设 city_detail=1。',
+        '- 允许参考最近私聊和最近商业街记录，判断这句是否是在继续追问上一轮已经出现的现实事件。',
+        '- 切题层结果是重要参考：如果 Topic Switch Gate 已经判定 CONTINUE_CURRENT_TOPIC，你要认真判断这句是否仍在继续上一轮现实事件，而不是草率降回普通闲聊。',
+        '- 如果 Topic Switch Gate 判定 FOLLOW_UP_ON_RETRIEVED_HISTORY，也要优先考虑这句是不是在追问上一轮刚被提到的现实/回忆事件细节。',
+        '- 如果上一轮已经是现实事件（例如已经承认“去了黑客据点”“让他们帮我查了点东西”），而这轮用户只说很短的追问，如“查到什么了”“然后呢”“看到什么了”“具体呢”，那么追问对象很可能仍然指向上一轮那次现实事件；这类情况通常继续保持 city_detail=1。',
+        '- 例子：上一轮角色承认“我去了黑客据点，让他们帮我查了点东西”，下一轮用户问“查到什么了”，这是在追问那次黑客据点现实事件的具体内容，应倾向 city_detail=1，而不是降回普通闲聊。',
         '- 只有纯情绪回应、纯调情、纯安抚、纯观点讨论，不需要现实记录支撑时，city_detail=0。',
         '- school_detail 只有在明确问学校/课程/考试/老师/同学近况时才设 1，否则 0。',
         '- society_detail 只有在明确问工作/公司/部门/老板/社会身份近况时才设 1，否则 0。',
@@ -313,7 +327,8 @@ async function routeContextModules(db, character, recentInput = '') {
 
     recordContextRouteDebug(db, character, 'input', {
         recent_input: text,
-        judge_prompt: judgePrompt
+        judge_prompt: judgePrompt,
+        topic_switch: normalizedTopicSwitch
     }, {
         context_type: 'context_module_router',
         model,
@@ -332,7 +347,12 @@ async function routeContextModules(db, character, recentInput = '') {
                     role: 'user',
                     content: [
                         `[本轮用户输入]\n${text}`,
-                        '[判断要求]\n只根据这一条用户输入判断。不要扩展，不要参考旧对话主线。'
+                        normalizedTopicSwitch
+                            ? `[Topic Switch Gate]\nDecision=${normalizedTopicSwitch.decision}\nReason=${normalizedTopicSwitch.reason}`
+                            : '',
+                        recentPrivateContext,
+                        recentCityContext,
+                        '[判断要求]\n优先结合 Topic Switch Gate 判断这轮是否仍在继续上一轮现实事件。可以参考上面的最近私聊和最近商业街记录，但不要脱离当前用户这句去凭空扩展新剧情。'
                     ].filter(Boolean).join('\n\n')
                 }
             ],
@@ -344,7 +364,7 @@ async function routeContextModules(db, character, recentInput = '') {
             cacheTtlMs: 12 * 60 * 60 * 1000,
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
-            cacheKeyExtra: 'v7',
+            cacheKeyExtra: 'v9',
             cacheKeyMode: 'exact',
             validateCachedContent: (cachedText) => isValidModuleRoutePayload(cachedText),
             shouldCacheResult: (resultText) => isValidModuleRoutePayload(resultText),
@@ -682,7 +702,7 @@ function buildAvailableCityDistrictSignalGuide(db) {
 }
 
 async function buildUniversalContext(context, character, recentInput = '', isGroupContext = false, activeTargets = []) {
-    const { getUserDb, getMemory, userId } = context;
+    const { getUserDb, getMemory, userId, topicSwitchState = null } = context;
     const resolvedUserId = userId || character.user_id || 'default';
     const db = getUserDb(resolvedUserId);
     const memory = getMemory(resolvedUserId);
@@ -691,7 +711,7 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     const userProfile = db.getUserProfile ? db.getUserProfile() : { name: 'User' };
     const userName = userProfile?.name || 'User';
     const normalizedRecentInput = String(recentInput || '').trim();
-    const moduleRoutes = await routeContextModules(db, character, normalizedRecentInput);
+    const moduleRoutes = await routeContextModules(db, character, normalizedRecentInput, topicSwitchState);
 
     // Token metric accumulator
     const breakdown = { base: 0, z_memory: 0, cross_group: 0, cross_private: 0, city_x_y: 0, q_impression: 0, moments: 0 };

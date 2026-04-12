@@ -1506,6 +1506,7 @@ function getEngine(userId) {
                 mentionedTargets.push(jealousyTarget);
             }
         }
+        engineContextWrapper.topicSwitchState = topicSwitchState || null;
         const universalResult = await buildUniversalContext(engineContextWrapper, character, recentInputString, false, mentionedTargets);
 
         const stableCharacterBlock = getCachedPromptBlock(

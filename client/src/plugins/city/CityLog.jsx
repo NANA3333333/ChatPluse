@@ -216,6 +216,16 @@ function splitAnnouncementParagraphs(item) {
         .filter(Boolean);
 }
 
+function splitHackerIntelContent(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return { visible: '', hasIntel: false };
+    const marker = '[黑客据点情报]';
+    const markerIndex = raw.indexOf(marker);
+    if (markerIndex < 0) return { visible: raw, hasIntel: false };
+    const visible = raw.slice(0, markerIndex).trim();
+    return { visible, hasIntel: true };
+}
+
 export default function CityLog({ apiUrl, userProfile }) {
     const announcementActionTypes = new Set(['ANNOUNCE', 'MAYOR', 'EVENT', 'QUEST']);
     const [tab, setTab] = useState('feed');
@@ -540,6 +550,9 @@ export default function CityLog({ apiUrl, userProfile }) {
                                                             const isSocial = log.action_type === 'SOCIAL';
                                                             const isTruncated = Boolean(log.is_truncated);
                                                             const hiddenExpanded = Boolean(expandedHiddenLogs[log.id]);
+                                                            const hackerIntelView = splitHackerIntelContent(log.content);
+                                                            const hasHiddenHackerIntel = hackerIntelView.hasIntel;
+                                                            const displayContent = hasHiddenHackerIntel ? hackerIntelView.visible : log.content;
                                                             return (
                                                                 <div
                                                                     key={log.id}
@@ -618,7 +631,56 @@ export default function CityLog({ apiUrl, userProfile }) {
                                                                                 )}
                                                                             </div>
                                                                         ) : (
-                                                                            <div style={{ fontSize: isMobile ? '12px' : '13px', color: isSocial ? '#4a148c' : '#555', lineHeight: 1.7, wordBreak: 'break-word' }}>{log.content}</div>
+                                                                            <>
+                                                                                {!!displayContent && (
+                                                                                    <div style={{ fontSize: isMobile ? '12px' : '13px', color: isSocial ? '#4a148c' : '#555', lineHeight: 1.7, wordBreak: 'break-word' }}>{displayContent}</div>
+                                                                                )}
+                                                                                {hasHiddenHackerIntel && (
+                                                                                    <div
+                                                                                        style={{
+                                                                                            marginTop: '6px',
+                                                                                            borderLeft: '2px solid rgba(140, 140, 140, 0.16)',
+                                                                                            background: 'rgba(120, 120, 120, 0.028)',
+                                                                                            color: 'rgba(102, 102, 102, 0.68)',
+                                                                                            borderRadius: '0 6px 6px 0',
+                                                                                            padding: isMobile ? '4px 8px' : '5px 9px',
+                                                                                            lineHeight: 1.4,
+                                                                                        }}
+                                                                                    >
+                                                                                        <button
+                                                                                            type="button"
+                                                                                            onClick={() => setExpandedHiddenLogs((prev) => ({ ...prev, [log.id]: !hiddenExpanded }))}
+                                                                                            style={{
+                                                                                                width: '100%',
+                                                                                                border: 'none',
+                                                                                                background: 'transparent',
+                                                                                                padding: 0,
+                                                                                                cursor: 'pointer',
+                                                                                                display: 'flex',
+                                                                                                alignItems: 'center',
+                                                                                                justifyContent: 'space-between',
+                                                                                                gap: '6px',
+                                                                                                color: 'inherit',
+                                                                                                textAlign: 'left',
+                                                                                            }}
+                                                                                        >
+                                                                                            <div style={{ fontSize: isMobile ? '10px' : '11px', fontWeight: '500', display: 'flex', alignItems: 'center', gap: '4px', letterSpacing: '0.01em' }}>
+                                                                                                <AlertCircle size={11} />
+                                                                                                黑客据点监听记录已折叠
+                                                                                            </div>
+                                                                                            <div style={{ display: 'flex', alignItems: 'center', gap: '2px', fontSize: '9px', color: 'rgba(108, 108, 108, 0.5)' }}>
+                                                                                                <span>{hiddenExpanded ? '收起' : '查看'}</span>
+                                                                                                {hiddenExpanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+                                                                                            </div>
+                                                                                        </button>
+                                                                                        {hiddenExpanded && (
+                                                                                            <div style={{ marginTop: '4px', fontSize: '10px', color: 'rgba(92, 92, 92, 0.7)', wordBreak: 'break-word' }}>
+                                                                                                具体监听对话仅角色可见，前端不会向用户展示原始私聊内容。
+                                                                                            </div>
+                                                                                        )}
+                                                                                    </div>
+                                                                                )}
+                                                                            </>
                                                                         )}
                                                                         {(log.delta_calories !== 0 || log.delta_money !== 0) && (
                                                                             <div style={{ marginTop: '4px', display: 'flex', gap: '8px', flexWrap: 'wrap', fontSize: '11px', fontWeight: '600' }}>
