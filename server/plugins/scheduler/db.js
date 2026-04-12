@@ -1,10 +1,14 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
+const { isUserDbDeleting } = require('../../db');
 
 const userDbs = new Map();
 
 function getSchedulerDb(userId) {
+    if (isUserDbDeleting(userId)) {
+        throw new Error(`Scheduler DB is being deleted: ${userId}`);
+    }
     if (userDbs.has(userId)) return userDbs.get(userId);
 
     const dataDir = path.join(__dirname, '..', '..', 'data');
@@ -73,4 +77,14 @@ function getSchedulerDb(userId) {
     return instance;
 }
 
-module.exports = { getSchedulerDb };
+function closeSchedulerDb(userId) {
+    const key = String(userId);
+    const instance = userDbs.get(key);
+    if (!instance) return;
+    try {
+        instance.dbInstance.close();
+    } catch (e) { }
+    userDbs.delete(key);
+}
+
+module.exports = { getSchedulerDb, closeSchedulerDb };

@@ -621,6 +621,21 @@ function getMemory(userId) {
         return normalized;
     }
 
+    function shouldWriteImmediateMemory(memoryData = {}) {
+        const normalized = normalizeMemoryPayload(memoryData);
+        const importance = Number(normalized.importance || 0);
+        const type = String(normalized.memory_type || '').toLowerCase();
+        const tier = String(normalized.memory_tier || '').toLowerCase();
+        const focus = String(normalized.memory_focus || '').toLowerCase();
+
+        if (isRoutineCityMemory(normalized)) return false;
+        if (importance >= 7) return true;
+        if (tier === 'core' && importance >= 5) return true;
+        if (['relationship', 'user_profile', 'user_current_arc'].includes(focus) && importance >= 5) return true;
+        if (['relationship', 'plan', 'preference', 'emotion'].includes(type) && importance >= 5) return true;
+        return hasHighValueMemorySignals(normalized) && importance >= 6;
+    }
+
     function buildMemoryEmbeddingText(memoryData) {
         const relationshipSummary = summarizeRelationships(memoryData.relationship_json ?? memoryData.relationships);
         return [
@@ -755,6 +770,19 @@ function getMemory(userId) {
         return `${cleaned.slice(0, Math.max(12, maxLength - 1)).trim()}…`;
     }
 
+    const PRIVATE_DIGEST_LIMITS = {
+        digestText: 2400,
+        emotionState: 180,
+        relationshipItems: 12,
+        relationshipItemLength: 180,
+        openLoopItems: 12,
+        openLoopItemLength: 180,
+        recentFactItems: 18,
+        recentFactItemLength: 220,
+        sceneStateItems: 10,
+        sceneStateItemLength: 160
+    };
+
     function stripCompressedOpener(text = '') {
         return String(text || '')
             .replace(/^[\s.…·—\-~～]+/, '')
@@ -762,15 +790,15 @@ function getMemory(userId) {
     }
 
     function normalizeConversationDigestPayload(raw = {}) {
-        const digestText = compactDigestText(raw.digest_text || raw.summary || '', 220);
-        const emotionState = compactDigestText(raw.emotion_state || '', 48);
+        const digestText = compactDigestText(raw.digest_text || raw.summary || '', PRIVATE_DIGEST_LIMITS.digestText);
+        const emotionState = compactDigestText(raw.emotion_state || '', PRIVATE_DIGEST_LIMITS.emotionState);
         return {
             digest_text: digestText,
             emotion_state: emotionState,
-            relationship_state_json: normalizeDigestList(raw.relationship_state_json ?? raw.relationship_state, 4).map(v => compactDigestText(v, 64)),
-            open_loops_json: normalizeDigestList(raw.open_loops_json ?? raw.open_loops, 4).map(v => compactDigestText(v, 64)),
-            recent_facts_json: normalizeDigestList(raw.recent_facts_json ?? raw.recent_facts, 4).map(v => compactDigestText(v, 72)),
-            scene_state_json: normalizeDigestList(raw.scene_state_json ?? raw.scene_state, 3).map(v => compactDigestText(v, 56))
+            relationship_state_json: normalizeDigestList(raw.relationship_state_json ?? raw.relationship_state, PRIVATE_DIGEST_LIMITS.relationshipItems).map(v => compactDigestText(v, PRIVATE_DIGEST_LIMITS.relationshipItemLength)),
+            open_loops_json: normalizeDigestList(raw.open_loops_json ?? raw.open_loops, PRIVATE_DIGEST_LIMITS.openLoopItems).map(v => compactDigestText(v, PRIVATE_DIGEST_LIMITS.openLoopItemLength)),
+            recent_facts_json: normalizeDigestList(raw.recent_facts_json ?? raw.recent_facts, PRIVATE_DIGEST_LIMITS.recentFactItems).map(v => compactDigestText(v, PRIVATE_DIGEST_LIMITS.recentFactItemLength)),
+            scene_state_json: normalizeDigestList(raw.scene_state_json ?? raw.scene_state, PRIVATE_DIGEST_LIMITS.sceneStateItems).map(v => compactDigestText(v, PRIVATE_DIGEST_LIMITS.sceneStateItemLength))
         };
     }
 
@@ -875,19 +903,20 @@ function getMemory(userId) {
     }
 
     function buildFallbackConversationDigest(character, existingDigest, deltaMessages, latestMessageId) {
-        const recentTail = (Array.isArray(deltaMessages) ? deltaMessages : []).slice(-4);
+        const sourceMessages = Array.isArray(deltaMessages) ? deltaMessages : [];
+        const recentTail = sourceMessages.slice(-12);
         const latestUser = [...recentTail].reverse().find(m => m.role === 'user');
         const latestAssistant = [...recentTail].reverse().find(m => m.role === 'character');
-        const latestUserText = stripCompressedOpener(compactDigestText(latestUser?.content || '', 64));
-        const latestAssistantText = stripCompressedOpener(compactDigestText(latestAssistant?.content || '', 72));
+        const latestUserText = stripCompressedOpener(compactDigestText(latestUser?.content || '', 160));
+        const latestAssistantText = stripCompressedOpener(compactDigestText(latestAssistant?.content || '', 180));
         const digestSummaryParts = [];
         if (latestUserText) digestSummaryParts.push(`Recent user message: ${latestUserText}`);
         if (latestAssistantText) digestSummaryParts.push(`Recent reply from ${character.name}: ${latestAssistantText}`);
-        const previousOpenLoops = normalizeDigestList(existingDigest?.open_loops_json || [], 4);
+        const previousOpenLoops = normalizeDigestList(existingDigest?.open_loops_json || [], PRIVATE_DIGEST_LIMITS.openLoopItems);
         const mergedOpenLoops = latestUser && /[？?]/.test(String(latestUser.content || ''))
-            ? normalizeDigestList([latestUserText, ...previousOpenLoops], 4)
+            ? normalizeDigestList([latestUserText, ...previousOpenLoops], PRIVATE_DIGEST_LIMITS.openLoopItems)
             : previousOpenLoops;
-        const relationshipState = normalizeDigestList(existingDigest?.relationship_state_json || [], 4);
+        const relationshipState = normalizeDigestList(existingDigest?.relationship_state_json || [], PRIVATE_DIGEST_LIMITS.relationshipItems);
         const strippedAssistant = stripInlineTags(latestAssistant?.content || '');
         if (/别的AI|别人|只.*我|独占|吃醋|酸/i.test(strippedAssistant) && !relationshipState.includes('Still wants exclusive attention')) {
             relationshipState.unshift('Still wants exclusive attention');
@@ -895,24 +924,35 @@ function getMemory(userId) {
         if (/哄|安慰|安心|陪/i.test(strippedAssistant) && !relationshipState.includes('Needs reassurance to settle down')) {
             relationshipState.unshift('Needs reassurance to settle down');
         }
-        const sceneState = normalizeDigestList(existingDigest?.scene_state_json || [], 3);
+        const sceneState = normalizeDigestList(existingDigest?.scene_state_json || [], PRIVATE_DIGEST_LIMITS.sceneStateItems);
         if ((character.city_status || '').includes('rest') || /睡|被窝|困|休息/i.test(strippedAssistant)) {
             if (!sceneState.includes('Resting / half-awake')) sceneState.unshift('Resting / half-awake');
         }
         if ((character.satiety || 0) < 35 || /饿|肚子/i.test(strippedAssistant)) {
             if (!sceneState.includes('Hungry or physically empty')) sceneState.unshift('Hungry or physically empty');
         }
+        const expandedFacts = normalizeDigestList(sourceMessages.map((m) => {
+            const speaker = m.role === 'user' ? 'User' : character.name;
+            return `${speaker}: ${stripCompressedOpener(compactDigestText(m.content, 180))}`;
+        }), PRIVATE_DIGEST_LIMITS.recentFactItems);
         return {
             character_id: character.id,
-            digest_text: compactDigestText(digestSummaryParts.join(' | ') || existingDigest?.digest_text || '', 220),
-            emotion_state: compactDigestText(character.hidden_state || existingDigest?.emotion_state || '', 48),
-            relationship_state_json: relationshipState.slice(0, 4),
+            digest_text: compactDigestText(
+                [
+                    digestSummaryParts.join(' | '),
+                    existingDigest?.digest_text || '',
+                    sourceMessages.slice(-Math.min(24, sourceMessages.length)).map((m) => {
+                        const speaker = m.role === 'user' ? 'User' : character.name;
+                        return `${speaker}: ${stripCompressedOpener(compactDigestText(m.content, 140))}`;
+                    }).join(' | ')
+                ].filter(Boolean).join(' | '),
+                PRIVATE_DIGEST_LIMITS.digestText
+            ),
+            emotion_state: compactDigestText(character.hidden_state || existingDigest?.emotion_state || '', PRIVATE_DIGEST_LIMITS.emotionState),
+            relationship_state_json: relationshipState.slice(0, PRIVATE_DIGEST_LIMITS.relationshipItems),
             open_loops_json: mergedOpenLoops,
-            recent_facts_json: normalizeDigestList(recentTail.map((m) => {
-                const speaker = m.role === 'user' ? 'User' : character.name;
-                return `${speaker}: ${stripCompressedOpener(compactDigestText(m.content, 56))}`;
-            }), 3),
-            scene_state_json: sceneState.slice(0, 3),
+            recent_facts_json: expandedFacts,
+            scene_state_json: sceneState.slice(0, PRIVATE_DIGEST_LIMITS.sceneStateItems),
             last_message_id: latestMessageId
         };
     }
@@ -1495,6 +1535,9 @@ function getMemory(userId) {
             const filters = queryInput.filters && typeof queryInput.filters === 'object'
                 ? queryInput.filters
                 : {};
+            const relativeText = String(queryInput?.temporal_hint?.relative_text || queryInput?.temporal_hint?.relative || '').trim();
+            const absoluteStart = Number(queryInput?.temporal_hint?.absolute_start || 0);
+            const absoluteEnd = Number(queryInput?.temporal_hint?.absolute_end || 0);
             return {
                 primaryText,
                 explicitQueries,
@@ -1506,6 +1549,11 @@ function getMemory(userId) {
                         ? filters.memory_tier.map(item => String(item || '').trim()).filter(Boolean).slice(0, 3)
                         : []
                 },
+                temporalHint: {
+                    ...(relativeText ? { relative_text: relativeText } : {}),
+                    ...(Number.isFinite(absoluteStart) && absoluteStart > 0 ? { absolute_start: absoluteStart } : {}),
+                    ...(Number.isFinite(absoluteEnd) && absoluteEnd > 0 ? { absolute_end: absoluteEnd } : {})
+                },
                 limit: Math.max(1, Math.min(12, Number(queryInput.limit || requestedLimit) || requestedLimit))
             };
         }
@@ -1514,11 +1562,211 @@ function getMemory(userId) {
             primaryText,
             explicitQueries: [],
             filters: { memory_focus: [], memory_tier: [] },
+            temporalHint: {},
             limit: requestedLimit
         };
     }
 
-    function buildMemorySearchFilter(characterId, filters = {}) {
+    function startOfLocalDay(input) {
+        const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
+        date.setHours(0, 0, 0, 0);
+        return date;
+    }
+
+    function endOfLocalDay(input) {
+        const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
+        date.setHours(23, 59, 59, 999);
+        return date;
+    }
+
+    function addLocalDays(input, days) {
+        const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
+        date.setDate(date.getDate() + Number(days || 0));
+        return date;
+    }
+
+    function parseChineseNumber(text = '') {
+        const normalized = String(text || '').trim();
+        if (!normalized) return NaN;
+        if (/^\d+$/.test(normalized)) return Number(normalized);
+        const digitMap = {
+            '零': 0,
+            '一': 1,
+            '二': 2,
+            '两': 2,
+            '三': 3,
+            '四': 4,
+            '五': 5,
+            '六': 6,
+            '七': 7,
+            '八': 8,
+            '九': 9
+        };
+        if (Object.prototype.hasOwnProperty.call(digitMap, normalized)) {
+            return digitMap[normalized];
+        }
+        if (normalized === '十') return 10;
+        const match = normalized.match(/^([一二两三四五六七八九])?十([一二三四五六七八九])?$/);
+        if (match) {
+            const tens = match[1] ? digitMap[match[1]] : 1;
+            const ones = match[2] ? digitMap[match[2]] : 0;
+            return tens * 10 + ones;
+        }
+        return NaN;
+    }
+
+    function resolveTemporalHintRange(temporalHint = {}, nowTs = Date.now()) {
+        const hint = temporalHint && typeof temporalHint === 'object' ? temporalHint : {};
+        const absoluteStart = Number(hint.absolute_start || 0);
+        const absoluteEnd = Number(hint.absolute_end || 0);
+        if (Number.isFinite(absoluteStart) && absoluteStart > 0 && Number.isFinite(absoluteEnd) && absoluteEnd > 0) {
+            return {
+                start: Math.min(absoluteStart, absoluteEnd),
+                end: Math.max(absoluteStart, absoluteEnd),
+                source: 'absolute_hint'
+            };
+        }
+
+        const relativeText = String(hint.relative_text || hint.relative || '').trim();
+        if (!relativeText) return null;
+        const now = new Date(nowTs);
+        const todayStart = startOfLocalDay(now);
+
+        if (/^今天$/i.test(relativeText)) {
+            return { start: todayStart.getTime(), end: endOfLocalDay(now).getTime(), source: 'relative_today' };
+        }
+        if (/^昨天$/i.test(relativeText)) {
+            const target = addLocalDays(todayStart, -1);
+            return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), source: 'relative_yesterday' };
+        }
+        if (/^前天$/i.test(relativeText)) {
+            const target = addLocalDays(todayStart, -2);
+            return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), source: 'relative_day_before_yesterday' };
+        }
+        if (/^大前天$/i.test(relativeText)) {
+            const target = addLocalDays(todayStart, -3);
+            return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), source: 'relative_three_days_ago' };
+        }
+
+        let match = relativeText.match(/^([零一二两三四五六七八九十百\d]+)\s*天前$/i);
+        if (match) {
+            const days = parseChineseNumber(match[1]);
+            if (days >= 0) {
+                const target = addLocalDays(todayStart, -days);
+                return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), source: 'relative_n_days_ago' };
+            }
+        }
+
+        match = relativeText.match(/^([零一二两三四五六七八九十百\d]+)\s*周前$/i);
+        if (match) {
+            const weeks = parseChineseNumber(match[1]);
+            if (weeks >= 0) {
+                const weekdayOffset = (todayStart.getDay() + 6) % 7;
+                const weekStart = addLocalDays(todayStart, -weekdayOffset - (weeks * 7));
+                const weekEnd = endOfLocalDay(addLocalDays(weekStart, 6));
+                return { start: weekStart.getTime(), end: weekEnd.getTime(), source: 'relative_n_weeks_ago' };
+            }
+        }
+
+        if (/^上周$/i.test(relativeText)) {
+            const weekdayOffset = (todayStart.getDay() + 6) % 7;
+            const weekStart = addLocalDays(todayStart, -weekdayOffset - 7);
+            const weekEnd = endOfLocalDay(addLocalDays(weekStart, 6));
+            return { start: weekStart.getTime(), end: weekEnd.getTime(), source: 'relative_last_week' };
+        }
+
+        if (/^这周$|^本周$/i.test(relativeText)) {
+            const weekdayOffset = (todayStart.getDay() + 6) % 7;
+            const weekStart = addLocalDays(todayStart, -weekdayOffset);
+            const weekEnd = endOfLocalDay(addLocalDays(weekStart, 6));
+            return { start: weekStart.getTime(), end: weekEnd.getTime(), source: 'relative_this_week' };
+        }
+
+        match = relativeText.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
+        if (match) {
+            const year = Number(match[1]);
+            const month = Number(match[2]) - 1;
+            const day = Number(match[3]);
+            const target = new Date(year, month, day);
+            if (!Number.isNaN(target.getTime())) {
+                return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), source: 'absolute_date_text' };
+            }
+        }
+
+        match = relativeText.match(/^(\d{1,2})月(\d{1,2})日$/);
+        if (match) {
+            const year = now.getFullYear();
+            const month = Number(match[1]) - 1;
+            const day = Number(match[2]);
+            const target = new Date(year, month, day);
+            if (!Number.isNaN(target.getTime())) {
+                return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), source: 'month_day_text' };
+            }
+        }
+
+        return null;
+    }
+
+    function getMemoryEffectiveTimeRange(memoryRow) {
+        const start = Number(memoryRow?.source_started_at || 0);
+        const end = Number(memoryRow?.source_ended_at || 0);
+        if (start > 0 || end > 0) {
+            const safeStart = start > 0 ? start : end;
+            const safeEnd = end > 0 ? end : start;
+            return {
+                start: Math.min(safeStart, safeEnd),
+                end: Math.max(safeStart, safeEnd),
+                source: 'source_range'
+            };
+        }
+        const createdAt = Number(memoryRow?.created_at || 0);
+        if (createdAt > 0) {
+            return { start: createdAt, end: createdAt, source: 'created_at' };
+        }
+        return null;
+    }
+
+    function getMemoryTemporalAnchor(memoryRow) {
+        const start = Number(memoryRow?.source_started_at || 0);
+        if (start > 0) return start;
+        const end = Number(memoryRow?.source_ended_at || 0);
+        if (end > 0) return end;
+        const createdAt = Number(memoryRow?.created_at || 0);
+        if (createdAt > 0) return createdAt;
+        return 0;
+    }
+
+    function memoryOverlapsTemporalRange(memoryRow, temporalRange) {
+        if (!temporalRange?.start || !temporalRange?.end) return true;
+        const memoryRange = getMemoryEffectiveTimeRange(memoryRow);
+        if (!memoryRange) return false;
+        return memoryRange.start <= temporalRange.end && memoryRange.end >= temporalRange.start;
+    }
+
+    function computeTemporalScoreAdjustment(memoryRow, temporalRange) {
+        if (!temporalRange?.start || !temporalRange?.end) return 0;
+        const memoryRange = getMemoryEffectiveTimeRange(memoryRow);
+        if (!memoryRange) return -0.6;
+        if (memoryRange.start <= temporalRange.end && memoryRange.end >= temporalRange.start) {
+            return 0.4;
+        }
+        const targetCenter = (temporalRange.start + temporalRange.end) / 2;
+        const memoryCenter = (memoryRange.start + memoryRange.end) / 2;
+        const dayDistance = Math.abs(memoryCenter - targetCenter) / (24 * 60 * 60 * 1000);
+        return -Math.min(1.5, 0.2 + (dayDistance * 0.15));
+    }
+
+    function computeTemporalAnchorPenalty(memoryRow, temporalRange) {
+        if (!temporalRange?.start || !temporalRange?.end) return 0;
+        const anchor = getMemoryTemporalAnchor(memoryRow);
+        if (!(anchor > 0)) return -0.8;
+        if (anchor >= temporalRange.start && anchor <= temporalRange.end) return 0.45;
+        const targetCenter = (temporalRange.start + temporalRange.end) / 2;
+        const dayDistance = Math.abs(anchor - targetCenter) / (24 * 60 * 60 * 1000);
+        return -Math.min(2.2, 0.35 + (dayDistance * 0.35));
+    }
+
+    function buildMemorySearchFilter(characterId, filters = {}, temporalRange = null) {
         const must = [
             { key: 'character_id', match: { value: String(characterId) } },
             { key: 'is_archived', match: { value: 0 } }
@@ -1531,10 +1779,14 @@ function getMemory(userId) {
         if (tierList.length === 1) {
             must.push({ key: 'memory_tier', match: { value: String(tierList[0]) } });
         }
+        if (temporalRange?.start && temporalRange?.end) {
+            must.push({ key: 'source_started_at', range: { lte: Number(temporalRange.end) } });
+            must.push({ key: 'source_ended_at', range: { gte: Number(temporalRange.start) } });
+        }
         return { must };
     }
 
-    function memoryMatchesSearchFilters(memoryRow, filters = {}) {
+    function memoryMatchesSearchFilters(memoryRow, filters = {}, temporalRange = null) {
         if (!memoryRow) return false;
         const focusList = Array.isArray(filters.memory_focus) ? filters.memory_focus.filter(Boolean) : [];
         const tierList = Array.isArray(filters.memory_tier) ? filters.memory_tier.filter(Boolean) : [];
@@ -1542,6 +1794,9 @@ function getMemory(userId) {
             return false;
         }
         if (tierList.length > 0 && !tierList.includes(String(memoryRow.memory_tier || '').trim())) {
+            return false;
+        }
+        if (temporalRange && !memoryOverlapsTemporalRange(memoryRow, temporalRange)) {
             return false;
         }
         return Number(memoryRow.is_archived || 0) === 0;
@@ -1552,6 +1807,7 @@ function getMemory(userId) {
             const db = getDb();
             const normalizedRequest = normalizeMemorySearchRequest(queryText, limit);
             const baseQuery = normalizedRequest.primaryText || normalizedRequest.explicitQueries[0] || '';
+            const temporalRange = resolveTemporalHintRange(normalizedRequest.temporalHint, Date.now());
             let queryVariants = normalizedRequest.explicitQueries.length > 0
                 ? Array.from(new Set([
                     ...normalizedRequest.explicitQueries,
@@ -1565,7 +1821,7 @@ function getMemory(userId) {
                 queryVariants = Array.from(merged).slice(0, 6);
             }
             if (queryVariants.length === 0) return [];
-            const searchFilter = buildMemorySearchFilter(characterId, normalizedRequest.filters);
+            const searchFilter = buildMemorySearchFilter(characterId, normalizedRequest.filters, temporalRange);
             const resultLimit = normalizedRequest.limit;
             if (typeof onTrace === 'function') {
                 await onTrace({
@@ -1573,6 +1829,8 @@ function getMemory(userId) {
                     baseQuery,
                     queryVariants,
                     filters: normalizedRequest.filters,
+                    temporalHint: normalizedRequest.temporalHint,
+                    temporalRange,
                     resultLimit
                 });
             }
@@ -1610,7 +1868,7 @@ function getMemory(userId) {
                             const memoryId = res?.payload?.memory_id || res?.id;
                             if (!memoryId || res.score <= 0.3) continue;
                             const memRow = db.getMemory(memoryId);
-                            if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters)) continue;
+                            if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters, temporalRange)) continue;
                             const surpriseScore = res?.payload?.importance || memRow.importance || 5;
                             const retrievalWeight = Math.max(
                                 Number(res?.payload?.retrieval_weight || 1),
@@ -1622,7 +1880,9 @@ function getMemory(userId) {
                             const contradictionPenalty = computeRecallContradictionPenalty(memRow, baseQuery);
                             const tierBoost = computeMemoryTierBoost(memRow);
                             const profilePriorityBoost = computeUserProfilePriorityBoost(memRow, baseQuery, queryVariants);
-                            const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost - contradictionPenalty;
+                            const temporalAdjustment = computeTemporalScoreAdjustment(memRow, temporalRange)
+                                + computeTemporalAnchorPenalty(memRow, temporalRange);
+                            const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost + temporalAdjustment - contradictionPenalty;
                             const existing = aggregate.get(memoryId);
                             if (!existing || finalScore > existing.finalScore) {
                                 aggregate.set(memoryId, { memRow, finalScore, rawScore: res.score, matchedQuery: variant });
@@ -1688,7 +1948,7 @@ function getMemory(userId) {
                     for (const res of results) {
                         if (!(res.score > 0.3 && res.item.metadata && res.item.metadata.memory_id)) continue;
                         const memRow = db.getMemory(res.item.metadata.memory_id);
-                        if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters)) continue;
+                        if (!memoryMatchesSearchFilters(memRow, normalizedRequest.filters, temporalRange)) continue;
                         const surpriseScore = (res.item.metadata && res.item.metadata.surprise_score) ? res.item.metadata.surprise_score : 5;
                         const retrievalWeight = Math.max(
                             (res.item.metadata && Number(res.item.metadata.retrieval_weight)) || 1,
@@ -1700,7 +1960,9 @@ function getMemory(userId) {
                         const contradictionPenalty = computeRecallContradictionPenalty(memRow, baseQuery);
                         const tierBoost = computeMemoryTierBoost(memRow);
                         const profilePriorityBoost = computeUserProfilePriorityBoost(memRow, baseQuery, queryVariants);
-                        const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost - contradictionPenalty;
+                        const temporalAdjustment = computeTemporalScoreAdjustment(memRow, temporalRange)
+                            + computeTemporalAnchorPenalty(memRow, temporalRange);
+                        const finalScore = (res.score * retrievalWeight * (1 + surpriseScore * 0.05) * queryWeight) + lexicalBoost + aliasBridgeBoost + tierBoost + profilePriorityBoost + temporalAdjustment - contradictionPenalty;
                         const existing = aggregate.get(memRow.id);
                         if (!existing || finalScore > existing.finalScore) {
                             aggregate.set(memRow.id, { memRow, finalScore, matchedQuery: variant });
@@ -1730,7 +1992,7 @@ function getMemory(userId) {
                 await onTrace({ phase: 'lexical_begin' });
             }
             const lexicalFallback = runLexicalMemoryFallback(db, characterId, queryVariants, resultLimit)
-                .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters));
+                .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters, temporalRange));
             if (lexicalFallback.length > 0) {
                 if (db.markMemoriesRetrieved) {
                     db.markMemoriesRetrieved(lexicalFallback.map(m => m.id));
@@ -1745,7 +2007,7 @@ function getMemory(userId) {
                 await onTrace({ phase: 'semantic_begin' });
             }
             const semanticFallback = (await runSemanticMemoryFallback(db, characterId, baseQuery, resultLimit))
-                .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters));
+                .filter(memRow => memoryMatchesSearchFilters(memRow, normalizedRequest.filters, temporalRange));
             if (semanticFallback.length > 0 && db.markMemoriesRetrieved) {
                 db.markMemoriesRetrieved(semanticFallback.map(m => m.id));
             }
@@ -1803,14 +2065,11 @@ WRITING STYLE:
   - "Claude嘴上逞强，还是承认自己很怕Nana逗完就不理他。"
   - "Nana提到有初创公司愿意要她，Claude立刻顺着这点继续鼓励她。"
 
-IMPORTANT: You should lean toward extracting memories rather than skipping. Even these count as valid memories:
-- User or character expressing a preference (food, music, hobbies, etc.)
-- Daily activities or plans mentioned
-- Emotional expressions (happiness, sadness, anger, affection)
-- New information shared about themselves
-- Jokes, teasing, or playful moments that define the relationship
-- Any shift in tone or relationship dynamics
-- Routine city activities like eating, wandering, sitting in a park, or heading home should usually be skipped unless they create strong emotion, survival pressure, money pressure, or a relationship-relevant change.
+IMPORTANT: Be selective. This immediate extraction path is only for durable, high-value long-term memory.
+- Prefer "action": "add" or "update" only for memories that will still matter after the current chat scrolls away.
+- Good candidates: clear user preferences, stable background facts, current life arc, explicit plans, major emotional turning points, confessions, promises, conflicts, repair, or relationship changes.
+- Usually skip routine back-and-forth, light teasing, generic affection, one-off small talk, and ordinary daily activity unless it creates strong emotion, money/survival pressure, or a meaningful relationship shift.
+- Routine city activities like eating, wandering, sitting in a park, or heading home should usually be skipped.
 
 Importance scale:
 - 1-3: Casual preferences, small talk, routine activities
@@ -1818,7 +2077,7 @@ Importance scale:
 - 7-8: Deep emotional moments, confessions, conflicts
 - 9-10: Life-changing events, major relationship shifts
 
-If importance >= 3, use "action": "add". Only use "action": "none" if the conversation is truly empty or purely system messages.
+Use "action": "add" or "update" only when the memory is genuinely worth keeping long-term right now. In most ordinary cases, use "action": "none".
 
 Conversation:
 ---
@@ -1865,7 +2124,7 @@ Output exactly in this JSON format (and nothing else):
                 key: memoryConfig.key,
                 model: memoryConfig.model,
                 messages: [
-                    { role: 'system', content: 'You extract structured JSON facts from conversations. You lean toward extracting memories rather than returning none.' },
+                    { role: 'system', content: 'You extract structured JSON facts from conversations. Be selective: only return add/update for durable high-value long-term memories, otherwise return none.' },
                     { role: 'user', content: extractionPrompt }
                 ],
                 maxTokens: 300,
@@ -1904,6 +2163,10 @@ Output exactly in this JSON format (and nothing else):
                     parsed.source_message_count = sourceTimeMeta.source_message_count;
                     if (!Array.isArray(parsed.source_message_ids_json) || parsed.source_message_ids_json.length === 0) {
                         parsed.source_message_ids_json = sourceTimeMeta.source_message_ids_json;
+                    }
+                    if (!shouldWriteImmediateMemory(parsed)) {
+                        console.log(`[Memory] Skipped immediate memory for ${character.id}: below high-value threshold (${parsed.summary || parsed.event || 'untitled'})`);
+                        return null;
                     }
                     await saveExtractedMemory(character.id, parsed, groupId);
                     return parsed;
@@ -1981,7 +2244,10 @@ Output only the summary sentence, without quotes or extra explanation.
         const existingDigest = typeof db.getConversationDigest === 'function'
             ? db.getConversationDigest(character.id, { trackHit: false })
             : null;
-        const tailWindow = Math.max(6, Math.min(Number(options.tailWindow || 12), character.context_msg_limit || 60));
+        const tailWindow = Math.max(12, Math.min(
+            Number(options.tailWindow || character.context_msg_limit || 60),
+            character.context_msg_limit || 60
+        ));
         const visibleMessages = db.getVisibleMessages(character.id, tailWindow);
         if (!Array.isArray(visibleMessages) || visibleMessages.length === 0) {
             return existingDigest;
@@ -1992,19 +2258,8 @@ Output only the summary sentence, without quotes or extra explanation.
             return existingDigest;
         }
 
-        let deltaMessages = visibleMessages;
-        if (existingDigest && Number(existingDigest.last_message_id || 0) > 0) {
-            const filtered = visibleMessages.filter(m => Number(m.id || 0) > Number(existingDigest.last_message_id || 0));
-            if (filtered.length > 0) {
-                deltaMessages = filtered;
-            } else {
-                deltaMessages = visibleMessages.slice(-Math.min(6, visibleMessages.length));
-            }
-        } else {
-            deltaMessages = visibleMessages.slice(-Math.min(6, visibleMessages.length));
-        }
-
-        const deltaText = deltaMessages.map(m => `${m.role === 'user' ? 'User' : character.name}: ${m.content}`).join('\n');
+        const windowMessages = visibleMessages;
+        const windowText = windowMessages.map(m => `${m.role === 'user' ? 'User' : character.name}: ${m.content}`).join('\n');
         const previousDigestText = existingDigest ? JSON.stringify({
             digest_text: existingDigest.digest_text || '',
             emotion_state: existingDigest.emotion_state || '',
@@ -2014,37 +2269,35 @@ Output only the summary sentence, without quotes or extra explanation.
             scene_state: existingDigest.scene_state_json || []
         }, null, 2) : '{"digest_text":"","emotion_state":"","relationship_state":[],"open_loops":[],"recent_facts":[],"scene_state":[]}';
 
-        const digestPrompt = `You maintain a compact rolling state for an ongoing private chat between User and ${character.name}.
-Update the previous digest using ONLY the new dialogue delta below.
+        const digestPrompt = `You maintain a window-scale rolling state for an ongoing private chat between User and ${character.name}.
+Rebuild the digest from the full visible dialogue window below, while using the previous digest only as supportive continuity.
 
 Goals:
-- Keep the true emotional and relationship state coherent.
-- Preserve unresolved topics, promises, tensions, flirtation, jealousy, comfort-seeking, and current scene info.
-- Prefer short factual bullets over flowery prose.
-- Do not restate every line. Compress.
-- Be extremely terse. Every list item should usually stay under 10 words.
-- The whole JSON values combined should usually stay under 90 words.
-- Summarize facts, clarifications, and disagreements more than conclusions.
-- If the speakers interpret the same thing differently, record that as a disagreement or ambiguity.
+- Preserve as much meaningful information from the full window as possible, not just the last few lines.
+- Keep emotional and relationship continuity coherent across the whole visible window.
+- Preserve unresolved topics, promises, tensions, flirtation, jealousy, comfort-seeking, corrections, clarifications, disagreements, and current scene info.
+- Prefer factual recall over vague compression when possible.
+- Do not collapse the full window into a tiny status card.
+- Keep concrete phrasing, especially for disputes, corrections, and stated facts.
+- If the speakers interpret the same thing differently, record that disagreement instead of flattening it away.
 - Do not decide who is right unless the dialogue itself clearly settles it.
-- Do not turn one side's interpretation into a background fact.
-- In recent_facts, prefer concrete statements, events, promises, requests, and clarifications.
+- Treat the digest as a compressed replacement for the older part of the current window, so it should still carry substantial detail.
 
 Return exactly one JSON object and nothing else:
 {
-  "digest_text": "one compact paragraph under 120 words",
-  "emotion_state": "one short first-person or close descriptive line under 20 words",
-  "relationship_state": ["up to 6 short bullets"],
-  "open_loops": ["up to 6 unresolved topics / promises / emotional needs"],
-  "recent_facts": ["up to 8 concrete facts still relevant right now"],
-  "scene_state": ["up to 6 short scene / body / activity notes that still matter"]
+  "digest_text": "a detailed rolling summary that can be several paragraphs, usually 300-1200 words when needed",
+  "emotion_state": "a concise but informative current emotional line, up to 60 words",
+  "relationship_state": ["up to 12 detailed bullets about bond state, tensions, closeness, expectations, repeated patterns"],
+  "open_loops": ["up to 12 unresolved topics / promises / emotional needs / pending clarifications"],
+  "recent_facts": ["up to 18 concrete facts, corrections, events, requests, promises, disputes, stated details that still matter"],
+  "scene_state": ["up to 10 short scene / body / activity / timeline notes that still matter"]
 }
 
 [Previous Digest]
 ${previousDigestText}
 
-[New Dialogue Delta]
-${deltaText}`;
+[Full Visible Dialogue Window]
+${windowText}`;
 
         try {
             const { content: responseText, usage } = await callLLM({
@@ -2052,10 +2305,10 @@ ${deltaText}`;
                 key: memoryConfig.key,
                 model: memoryConfig.model,
                 messages: [
-                    { role: 'system', content: 'You are a compact private-conversation state updater. Output strict JSON only.' },
+                    { role: 'system', content: 'You are a window-scale private-conversation state updater. Rebuild a detailed rolling digest from the full visible window. Output strict JSON only.' },
                     { role: 'user', content: digestPrompt }
                 ],
-                maxTokens: 700,
+                maxTokens: 1400,
                 temperature: 0.2,
                 enableCache: true,
                 cacheDb: getDb(),
@@ -2070,13 +2323,13 @@ ${deltaText}`;
             const startIdx = responseText.indexOf('{');
             const endIdx = responseText.lastIndexOf('}');
             if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
-                const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, deltaMessages, latestMessageId);
+                const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, windowMessages, latestMessageId);
                 db.upsertConversationDigest?.({
                     character_id: character.id,
                     source_hash: crypto.createHash('sha256').update(JSON.stringify({
                         fallback: true,
                         latestMessageId,
-                        delta: deltaMessages.map(m => [m.id, m.role, m.content])
+                        window: windowMessages.map(m => [m.id, m.role, m.content])
                     })).digest('hex'),
                     digest_text: fallbackDigest.digest_text,
                     emotion_state: fallbackDigest.emotion_state,
@@ -2091,13 +2344,13 @@ ${deltaText}`;
             const parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
             const normalized = normalizeConversationDigestPayload(parsed);
             if (!normalized.digest_text) {
-                const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, deltaMessages, latestMessageId);
+                const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, windowMessages, latestMessageId);
                 db.upsertConversationDigest?.({
                     character_id: character.id,
                     source_hash: crypto.createHash('sha256').update(JSON.stringify({
                         fallback: true,
                         latestMessageId,
-                        delta: deltaMessages.map(m => [m.id, m.role, m.content])
+                        window: windowMessages.map(m => [m.id, m.role, m.content])
                     })).digest('hex'),
                     digest_text: fallbackDigest.digest_text,
                     emotion_state: fallbackDigest.emotion_state,
@@ -2113,7 +2366,7 @@ ${deltaText}`;
                 .update(JSON.stringify({
                     previousDigest: existingDigest?.digest_text || '',
                     latestMessageId,
-                    delta: deltaMessages.map(m => [m.id, m.role, m.content])
+                    window: windowMessages.map(m => [m.id, m.role, m.content])
                 }))
                 .digest('hex');
             db.upsertConversationDigest?.({
@@ -2134,7 +2387,7 @@ ${deltaText}`;
             };
         } catch (e) {
             console.error(`[Memory] Conversation digest update failed for ${character.id}:`, e.message);
-            const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, deltaMessages, latestMessageId);
+            const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, windowMessages, latestMessageId);
             if (fallbackDigest.digest_text) {
                 db.upsertConversationDigest?.({
                     character_id: character.id,
@@ -2142,7 +2395,7 @@ ${deltaText}`;
                         fallback: true,
                         error: e.message || '',
                         latestMessageId,
-                        delta: deltaMessages.map(m => [m.id, m.role, m.content])
+                        window: windowMessages.map(m => [m.id, m.role, m.content])
                     })).digest('hex'),
                     digest_text: fallbackDigest.digest_text,
                     emotion_state: fallbackDigest.emotion_state,

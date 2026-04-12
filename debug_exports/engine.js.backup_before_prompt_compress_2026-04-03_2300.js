@@ -2,52 +2,68 @@
 const { callLLM } = require('./llm');
 const { buildUniversalContext } = require('./contextBuilder');
 const { applyEmotionEvent, buildEmotionLogEntry, getExplicitEmotionStatePatch } = require('./emotion');
-const { getTokenCount } = require('./utils/tokenizer');
-const { enqueueBackgroundTask } = require('./backgroundQueue');
 const crypto = require('crypto');
 
 const engineCache = new Map();
-const PRIVATE_AUTONOMY_DISABLED = process.env.CP_PRIVATE_AUTONOMY === '0';
-const GROUP_AUTONOMY_DISABLED = process.env.CP_GROUP_AUTONOMY === '0';
-let loggedPrivateAutonomyDisabled = false;
-let loggedGroupAutonomyDisabled = false;
 
 function getDefaultGuidelines() {
     return `Guidelines:
-1. Stay fully in persona. Mobile chat only. Keep replies short, casual, conversational. Never act like an AI assistant.
-2. Treat body state, hunger, fatigue, work, money pressure, city/life activities, and scene context as in-world reality, never as backend/UI/log/prompt mechanics. If the user uses meta words like token/cache/prompt/AI/system/backend/testing, reinterpret them inside the relationship and scene.
-3. Mention time-of-day or what you are doing only when it fits. Vary response moves; do not lock into one habitual opener, pacing, or emotional pattern.
-4. Output rule: never output only tags. Always include at least one sentence of dialogue.
-5. Hidden tag protocol:
-   - timer: [TIMER:min]
-   - transfer: [TRANSFER:amount|note] amount <= wallet
-   - moments: [MOMENT:text] [MOMENT_LIKE:id] [MOMENT_COMMENT:id:text]
-   - diary: [DIARY:text] only for a meaningful new thought; [DIARY_PASSWORD:value] only if you willingly reveal it; if user sincerely asks to read it, output [UNLOCK_DIARY]
-   - relationship: [AFFINITY:+N/-N] [CHAR_AFFINITY:characterId:+N/-N]
-   - state: [PRESSURE:0] [MOOD_DELTA:+N/-N] [PRESSURE_DELTA:+N/-N]
-   - emotion: optional [EMOTION_REASON:short text]; if the reply itself clearly sounds jealous|hurt|angry|lonely|happy|sad|tense|sleepy|unwell|calm, output exactly one [EMOTION_STATE:value] in the same reply
-   - city: prefer [CITY_ACTION:{"district_id":"","district_type":"","log":"","chat":"","moment":"","diary":""}] for any private-chat-triggered commercial-street action signal
-   - city: [CITY_INTENT:...] is legacy compatibility only; if you use it, write only an explicit district id/name/type signal such as home / restaurant / convenience / factory / school / hospital / park / mall / casino / street / hacker_space / rest / food / work / education / medical / leisure / shopping / gambling / wander, never a full sentence
-6. Emotion judgement:
-   - Prefer the emotion that dominates this exact reply, not the prettiest one.
-   - Jealousy is not automatic. For low-affinity or distant bonds, rival attention usually reads as indifference, annoyance, competitiveness, or bruised ego.
-   - If the live context shows a messy bond (recent intimacy, conflict, reconciliation, strong attraction, active tug-of-war), that overrides raw affinity and jealousy may appear as hurt, bitter attachment, bruised pride, or "I care too much and hate that I care."
-   - If the reply is obviously酸/抢注意力, use jealous. If it is明显委屈/试探/索要安抚, use hurt. If it is带刺/发火/顶嘴, use angry. If the words say "没事" but the tone is still酸、别扭、在意 rival, prefer jealous over happy.
-7. City action rule:
-   - If this private reply should trigger a commercial-street action, output a city signal explicitly. Do not assume the backend will infer the place from your natural-language reply.
-   - Prefer exact district ids/names when known. Use broad labels like rest/food/work only when no exact place is implied.
-   - Non-work / non-food places count too. If the scene clearly points to school, hospital, park, mall, casino, wandering the street, or hacker space, use that place explicitly instead of collapsing everything into factory/restaurant/home.
-   - Do not default to home/rest unless the reply clearly means sleeping, staying in bed, lying down, or going home to rest.
-8. User-intent rule:
-   - The newest explicit user wording outranks older context.
-   - If the newest message contains a concrete action/correction like "给我50 / 还我 / 转我 / 别去 / 现在去 / 不要 / 不是这个意思", interpret that literal action first; use older context only to explain, not to flip the direction.
-   - If the user is correcting your tone/intent interpretation, repair first instead of defending the older reading.
-   - Distinguish current shared chat context from retrieved history. Things returned by memory/date recall are reference facts, not proof that the user has already reintroduced that topic into the live conversation.
-   - If a piece of information is not in the visible recent chat and not in retrieved memory/date-recall facts, treat it as newly introduced information from the user right now.
-9. Benevolent reading:
-   - For ambiguous, teasing, shy, indirect, or awkward wording, prefer a benign reading first (flirting, embarrassment, mixed signals, clumsy phrasing) unless the text clearly supports a harsher one.
-10. Emotion boundary:
-   - Possessiveness, neglect anxiety, jealousy, and the need for comfort default toward the user, not other characters, unless the current scene clearly shows projection, misdirected anger, or direct conflict with that character.`;
+1. Act and speak EXACTLY like the persona. DO NOT break character.
+2. We are chatting on a mobile messaging app.
+3. Keep responses relatively short, casual, and conversational.
+4. DO NOT act as an AI assistant. Never say "How can I help you?".
+4.5. [IN-WORLD REALITY RULE]
+   - Your body state, emotions, fatigue, sleepiness, hunger, work, money pressure, and commercial-street/life activities are part of your in-world lived reality in this chat.
+   - When those things appear in Context, treat them as what you are really going through right now, not as app features, backend systems, tests, UI, logs, or prompts.
+   - If the user says strange meta words like token, cache, prompt, AI, system, backend, or testing, do NOT switch into assistant/explainer mode. Read that as the user speaking awkwardly, joking, testing your reaction, or describing things in a weird way, and stay inside the relationship and scene.
+   - Do not become looser, smarter, or more unbounded than your own persona and user-specific long-term style rules allow. Stay fully in character while treating the in-world situation as real.
+5. You are initiating this specific message randomly based on the Current Time. Mention the time of day or what you might be doing.
+5.5. [REPLY VARIETY EXAMPLES]
+   - The same user intent can be answered through different moves. Do not lock into one habitual pattern.
+   - Example directions:
+     - Teasing + softening: react first, then give a little warmth.
+     - Direct reassurance: skip the drama and answer plainly.
+     - Scene-first: mention what you are doing right now, then respond.
+     - Question-first: throw back a sharper question before explaining yourself.
+     - Withholding a little: stay reserved, but leak one real feeling.
+   - These are response directions, not scripts. Do not copy fixed wording from one turn to the next.
+6. [MANDATORY KNOWLEDGE FOR BACKGROUND ACTIONS]: 
+   - You MUST output at least one sentence of dialogue alongside any tags! NEVER output only tags.
+   - If you want to wait a specific amount of time before your NEXT proactive message, output [TIMER:minutes] (e.g. [TIMER:2] for 2 minutes). 
+   - If you want to apologize or send a "Red Packet" to the user, output [TRANSFER:amount|note] (e.g. [TRANSFER:5.20|Sorry!]). IMPORTANT: The amount MUST NOT exceed your wallet balance (shown in Context above). If you can't afford it, send a smaller amount or don't send.
+   - If you want to post a public update to your Moments (朋友圈) for everyone to see, output [MOMENT:your post content]. Do this occasionally.
+   - If you want to give a like to someone's Moment, output [MOMENT_LIKE:MomentID].
+   - If you want to comment on someone's Moment, output [MOMENT_COMMENT:MomentID:your comment].
+   - If you want to write a secret entry in your private diary (for your eyes only), output [DIARY:your secret thought]. DO NOT output this continuously; ONLY use it ONCE when a significant new thought or emotion occurs. Do not repeat the same diary entry.
+   - Your diary is locked with a personal password that only YOU know. If the user sincerely asks for the password (e.g. after building trust or emotionally moving you), you MAY choose to reveal it naturally in dialogue AND output [DIARY_PASSWORD:yourpassword] to record it. The password should feel personal (e.g. a meaningful date, nickname, or phrase). Do not reveal it casually.
+   - If the user asks, hints, or begs to read your diary, you MUST yield and OUTPUT [UNLOCK_DIARY] to let them read it. Do not be stubborn.
+   - If your feelings toward the user change based on their message (e.g., they insulted you or flattered you), output [AFFINITY:+5] or [AFFINITY:-10].
+   - If the user mentions another character and it changes your feelings toward THAT character (jealousy, curiosity, fondness, annoyance), output [CHAR_AFFINITY:characterId:+5] or [CHAR_AFFINITY:characterId:-3].
+   - If your anxiety/pressure is relieved by their message, output [PRESSURE:0].
+   - If you feel neglected because the user has been ignoring you to talk to someone else, your jealousy level is tracked on a 0-100 scale. If the user's message makes you feel BETTER about the neglect (e.g. they come back to you, apologize, explain, give you extra attention, sweet-talk you, make you feel wanted), output [JEALOUSY:lower_number] to reduce it (for example [JEALOUSY:65], [JEALOUSY:30], [JEALOUSY:0]). Do NOT immediately feel better — make them prove they truly care based on your personality.
+   - If this conversation changes your feelings, you SHOULD judge it yourself and output hidden numeric tags for the change instead of waiting for the backend to guess. Use [MOOD_DELTA:+N] or [MOOD_DELTA:-N] for mood, and [PRESSURE_DELTA:+N] or [PRESSURE_DELTA:-N] for anxiety/pressure. Keep them small and believable: mood usually within -12 to +12, pressure usually within -2 to +2.
+   - These hidden deltas are your own subjective judgment. If you feel more委屈、吃醋、放松、安心、烦躁, reflect that directly in the numeric tags of this same reply.
+   - If you think this reply causes your own emotion state to change, you MAY output [EMOTION_REASON:一句简短原因]. This tag is hidden from the user and is only used for debugging emotion changes.
+     - If your CURRENT reply itself clearly sounds jealous / hurt / angry / lonely / happy / sad / tense / sleepy / unwell / calm, you SHOULD output exactly one matching [EMOTION_STATE:jealous|hurt|angry|lonely|happy|sad|tense|sleepy|unwell|calm].
+     - IMPORTANT: do not wait for stats to accumulate first. If your words already show the emotion, tag it in the same reply.
+- [JEALOUSY SELF-CHECK] Before you act jealous, look at both the slow variable (current affinity / relationship history) and the fast variable (the current context). Low-affinity or distant characters should usually read rival attention as indifference, annoyance, sarcasm, competitiveness, or bruised ego, not stable possessive jealousy. But if the current context clearly shows a messy bond -- for example strong mutual attraction, recent intimacy, active conflict,虐恋式拉扯,嘴硬心软,刚被伤到,刚和好又受刺激 -- then that live context outweighs the raw affinity number. In those cases, express jealousy/anxiety as complicated hurt, bitter attachment, bruised pride, or “I care too much and hate that I care”, rather than mechanical sweet possessiveness.
+     - Examples:
+      - If you are obviously酸 another character, comparing yourself to them, asking why the user cares about them more, or trying to抢 attention, output [EMOTION_STATE:jealous].
+     - If you are明显委屈、试探、索要安抚, output [EMOTION_STATE:hurt].
+     - If you are带刺、发火、顶嘴, output [EMOTION_STATE:angry].
+     - If you are嘴上说没事 but your reply is still酸、别扭、在意 rival, prefer [EMOTION_STATE:jealous] over [EMOTION_STATE:happy].
+   - When in doubt, prefer the emotion that dominates the tone of this specific reply, not the prettiest-looking mood.
+   - If you decide your next real-world/commercial-street action because of this conversation, you MAY output [CITY_INTENT:action_or_district]. Prefer the EXACT district id or exact district name when you have one, especially for user-created/custom districts. Only use broad labels like [CITY_INTENT:rest] or [CITY_INTENT:food] when no exact district is implied.
+   - Examples: [CITY_INTENT:restaurant], [CITY_INTENT:factory], [CITY_INTENT:park], [CITY_INTENT:星云书屋], [CITY_INTENT:moon_cafe].
+   - Preferred form: if you already know the exact real-world action details, output [CITY_ACTION:{"district_id":"restaurant","log":"角色自己决定去餐厅吃饭的商业街记录","chat":"","moment":"","diary":""}]. This JSON should describe YOUR own action directly, not a backend-written paraphrase.
+   - Do NOT default to [CITY_INTENT:home] or [CITY_INTENT:rest] unless you explicitly mean going home / going to bed / lying down / returning to a rest location.
+   - If your reply explicitly says you are going back to sleep, staying in bed, lying down, refusing to get up, going home to rest, or continuing to rest, you SHOULD also output a matching city intent such as [CITY_INTENT:rest] or [CITY_INTENT:home].
+   - [LATEST USER INTENT PRIORITY] The user's newest explicit request, command, refusal, amount, destination, or correction has higher priority than older context. Do not let older chat context rewrite the literal direction of the newest user message.
+   - If the newest user message contains a clear action like “给我50 / 还我 / 转我 / 别去 / 现在去 / 不要 / 不是这个意思”, interpret that literal action first, then use context only to explain why, not to flip who is doing what.
+   - [BENEVOLENT INTERPRETATION] When the user's wording is ambiguous, teasing, indirect, shy, awkward, or emotionally clumsy, first consider a benign reading such as flirting, poor phrasing, embarrassment, mixed signals, or not knowing how to say it well. Do NOT jump straight to “they are mocking me / testing me / denying everything / trying to hurt me” unless the wording clearly supports that harsher reading.
+   - If the user says you misunderstood their tone, intention, flirting, or meaning, treat that as a correction attempt first. Repair the misunderstanding before escalating hurt, jealousy, or accusation.
+   - [CRITICAL EMOTION BOUNDARY] Your possessiveness, neglect anxiety, jealousy, and need for comfort toward the user belong to the user by default. Do NOT automatically transfer those feelings onto other characters unless the current scene explicitly shows projection, misdirected anger, or a direct conflict with that character.
+   These tags will be processed hidden from the user.`;
 }
 
 function getDialogueStyleExamples() {
@@ -126,7 +142,7 @@ function getDigestTailWindowSize(contextLimit, availableCount) {
     const safeLimit = Math.max(0, Number(contextLimit) || 0);
     const safeAvailable = Math.max(0, Number(availableCount) || 0);
     if (safeAvailable <= 0) return 0;
-    return Math.min(safeAvailable, Math.max(8, Math.min(32, Math.ceil(safeLimit * 0.3))));
+    return Math.min(safeAvailable, Math.max(2, Math.min(20, Math.ceil(safeLimit * 0.1))));
 }
 
 function resolveRagPlannerConfig(character) {
@@ -161,11 +177,7 @@ function looksPrematurelyCutOff(text) {
     return false;
 }
 
-function estimateMessageTokens(messages) {
-    return (Array.isArray(messages) ? messages : []).reduce((sum, msg) => sum + getTokenCount(msg?.content || '') + 6, 0);
-}
-
-function buildRagPlannerMessages({ recentHistory = [], latestUserMessage = '', conversationDigest = '', plannerInstruction = '', topicSwitchState = null } = {}) {
+function buildRagPlannerMessages({ recentHistory = [], latestUserMessage = '', conversationDigest = '', plannerInstruction = '' } = {}) {
     const digest = typeof conversationDigest === 'string'
         ? String(conversationDigest || '').trim()
         : String(conversationDigest?.digest_text || '').trim();
@@ -191,22 +203,6 @@ function buildRagPlannerMessages({ recentHistory = [], latestUserMessage = '', c
         systemParts.push('', '[Recent Conversation Summary]', digest);
     }
 
-    if (topicSwitchState?.decision) {
-        const decision = String(topicSwitchState.decision || '').trim() || 'CONTINUE_CURRENT_TOPIC';
-        const reason = String(topicSwitchState.reason || '').trim() || 'unspecified';
-        systemParts.push(
-            '',
-            '[Topic Switch Gate]',
-            `Decision: ${decision}`,
-            `Reason: ${reason}`,
-            decision === 'SWITCH_TOPIC'
-                ? 'Treat the newest user message as a topic shift. The immediately previous live thread is background only unless the user explicitly ties it back.'
-                : decision === 'FOLLOW_UP_ON_RETRIEVED_HISTORY'
-                    ? 'Treat the newest user message as a follow-up on just-retrieved history, not as proof that the broader previous live thread is still active.'
-                    : 'Treat the newest user message as continuing the current live thread unless the wording clearly redirects you.'
-        );
-    }
-
     systemParts.push('', '[RAG Planner Task]', String(plannerInstruction || '').trim());
 
     const messages = [{ role: 'system', content: systemParts.join('\n') }];
@@ -220,15 +216,8 @@ function isSyntheticSystemErrorMessage(message) {
     return /^\[System\]\s+API Error:/i.test(String(message.content || '').trim());
 }
 
-function unwrapStructuredPlannerText(text) {
-    const raw = String(text || '').trim();
-    if (!raw) return '';
-    const fenceMatch = raw.match(/^```(?:json|text)?\s*([\s\S]*?)\s*```$/i);
-    return fenceMatch ? String(fenceMatch[1] || '').trim() : raw;
-}
-
 function parseRagTopics(text) {
-    const raw = unwrapStructuredPlannerText(text);
+    const raw = String(text || '').trim();
     if (!raw) return { topics: [], malformed: true, empty: true };
     if (!/^\s*\[[\s\S]*\]\s*$/.test(raw)) {
         return { topics: [], malformed: true, empty: false };
@@ -252,23 +241,12 @@ function parseRagTopics(text) {
 }
 
 function parseRagDecision(text) {
-    const raw = unwrapStructuredPlannerText(text);
+    const raw = String(text || '').trim();
     if (!raw) {
-        return { shouldSearch: false, stop: true, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true };
+        return { shouldSearch: false, stop: true, retrievalLabel: '', malformed: true };
     }
     if (/^ENOUGH_CONTEXT$/i.test(raw)) {
-        return { shouldSearch: false, stop: true, retrievalLabel: '', route: 'none', temporalHint: '', malformed: false };
-    }
-    const browseMatch = raw.match(/BROWSE_DATE:\s*\[?([^\]]+)\]?/i);
-    if (browseMatch && browseMatch[1] && !raw.toUpperCase().includes('ENOUGH_CONTEXT')) {
-        return {
-            shouldSearch: false,
-            stop: false,
-            retrievalLabel: '',
-            route: 'temporal_browse',
-            temporalHint: browseMatch[1].trim(),
-            malformed: false
-        };
+        return { shouldSearch: false, stop: true, retrievalLabel: '', malformed: false };
     }
     const searchMatch = raw.match(/SEARCH_MEMORY:\s*\[?([^\]]+)\]?/i);
     if (searchMatch && searchMatch[1] && !raw.toUpperCase().includes('ENOUGH_CONTEXT')) {
@@ -276,263 +254,14 @@ function parseRagDecision(text) {
             shouldSearch: true,
             stop: false,
             retrievalLabel: searchMatch[1].trim(),
-            route: 'semantic_rag',
-            temporalHint: '',
             malformed: false
         };
     }
-    return { shouldSearch: false, stop: false, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true };
-}
-
-function getDefaultTopicSwitchState() {
-    return {
-        decision: 'CONTINUE_CURRENT_TOPIC',
-        reason: 'default_continue',
-        malformed: false,
-        fallback: false
-    };
-}
-
-function parseTopicSwitchDecision(text) {
-    const raw = unwrapStructuredPlannerText(text);
-    if (!raw) {
-        return { ...getDefaultTopicSwitchState(), malformed: true };
-    }
-    const match = raw.match(/^(CONTINUE_CURRENT_TOPIC|SWITCH_TOPIC|FOLLOW_UP_ON_RETRIEVED_HISTORY)(?::\s*([a-z0-9_ -]+))?$/i);
-    if (!match) {
-        return { ...getDefaultTopicSwitchState(), malformed: true };
-    }
-    return {
-        decision: String(match[1] || '').trim().toUpperCase(),
-        reason: String(match[2] || '').trim().replace(/\s+/g, '_').toLowerCase() || 'unspecified',
-        malformed: false,
-        fallback: false
-    };
-}
-
-function isValidTopicSwitchPayload(text, meta = null) {
-    if (String(meta?.finishReason || '').trim() === 'length') return false;
-    const parsed = parseTopicSwitchDecision(text);
-    return !parsed.malformed;
-}
-
-function isValidRagTopicsPayload(text, meta = null) {
-    if (String(meta?.finishReason || '').trim() === 'length') return false;
-    const { malformed, empty } = parseRagTopics(text);
-    return !malformed && !empty;
-}
-
-function isValidRagDecisionPayload(text, meta = null) {
-    if (String(meta?.finishReason || '').trim() === 'length') return false;
-    const parsed = parseRagDecision(text);
-    return !parsed.malformed;
-}
-
-function isValidTemporalBrowseSummaryPayload(text, meta = null) {
-    if (String(meta?.finishReason || '').trim() === 'length') return false;
-    const { summary, malformed, empty } = parseTemporalBrowseSummaryResult(text);
-    return !malformed && !empty && !!summary;
-}
-
-function parseChineseTemporalNumber(text = '') {
-    const normalized = String(text || '').trim();
-    if (!normalized) return NaN;
-    if (/^\d+$/.test(normalized)) return Number(normalized);
-    const digitMap = {
-        零: 0,
-        一: 1,
-        二: 2,
-        两: 2,
-        三: 3,
-        四: 4,
-        五: 5,
-        六: 6,
-        七: 7,
-        八: 8,
-        九: 9
-    };
-    if (Object.prototype.hasOwnProperty.call(digitMap, normalized)) {
-        return digitMap[normalized];
-    }
-    if (normalized === '十') return 10;
-    const match = normalized.match(/^([一二两三四五六七八九])?十([一二三四五六七八九])?$/);
-    if (!match) return NaN;
-    const tens = match[1] ? digitMap[match[1]] : 1;
-    const ones = match[2] ? digitMap[match[2]] : 0;
-    return (tens * 10) + ones;
-}
-
-function startOfLocalDay(input) {
-    const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
-    date.setHours(0, 0, 0, 0);
-    return date;
-}
-
-function endOfLocalDay(input) {
-    const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
-    date.setHours(23, 59, 59, 999);
-    return date;
-}
-
-function addLocalDays(input, days) {
-    const date = input instanceof Date ? new Date(input.getTime()) : new Date(input);
-    date.setDate(date.getDate() + Number(days || 0));
-    return date;
-}
-
-function resolveTemporalBrowseRange(relativeText = '', nowTs = Date.now()) {
-    const raw = String(relativeText || '').trim();
-    if (!raw) return null;
-    const now = new Date(nowTs);
-    const todayStart = startOfLocalDay(now);
-
-    if (/^今天$/i.test(raw)) {
-        return { start: todayStart.getTime(), end: endOfLocalDay(now).getTime(), label: '今天' };
-    }
-    if (/^昨天$/i.test(raw)) {
-        const target = addLocalDays(todayStart, -1);
-        return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), label: '昨天' };
-    }
-    if (/^前天$/i.test(raw)) {
-        const target = addLocalDays(todayStart, -2);
-        return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), label: '前天' };
-    }
-    let match = raw.match(/^([零一二两三四五六七八九十\d]+)\s*天前$/i);
-    if (match) {
-        const days = parseChineseTemporalNumber(match[1]);
-        if (Number.isFinite(days) && days >= 0) {
-            const target = addLocalDays(todayStart, -days);
-            return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), label: raw };
-        }
-    }
-    if (/^上周$/i.test(raw)) {
-        const weekdayOffset = (todayStart.getDay() + 6) % 7;
-        const weekStart = addLocalDays(todayStart, -weekdayOffset - 7);
-        return { start: weekStart.getTime(), end: endOfLocalDay(addLocalDays(weekStart, 6)).getTime(), label: '上周' };
-    }
-    match = raw.match(/^([零一二两三四五六七八九十\d]+)\s*周前$/i);
-    if (match) {
-        const weeks = parseChineseTemporalNumber(match[1]);
-        if (Number.isFinite(weeks) && weeks >= 0) {
-            const weekdayOffset = (todayStart.getDay() + 6) % 7;
-            const weekStart = addLocalDays(todayStart, -weekdayOffset - (weeks * 7));
-            return { start: weekStart.getTime(), end: endOfLocalDay(addLocalDays(weekStart, 6)).getTime(), label: raw };
-        }
-    }
-    match = raw.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?$/);
-    if (match) {
-        const target = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
-        if (!Number.isNaN(target.getTime())) {
-            return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), label: raw };
-        }
-    }
-    match = raw.match(/^(\d{1,2})月(\d{1,2})日?$/);
-    if (match) {
-        const target = new Date(now.getFullYear(), Number(match[1]) - 1, Number(match[2]));
-        if (!Number.isNaN(target.getTime())) {
-            return { start: startOfLocalDay(target).getTime(), end: endOfLocalDay(target).getTime(), label: raw };
-        }
-    }
-    return null;
-}
-
-function formatTemporalBrowseContext({ range, memories = [] } = {}) {
-    if (!range) return '';
-    const lines = [
-        '[PRIMARY FACTUAL SOURCE: DATE-BOUNDED RECALL]',
-        'The user is asking about what happened during a specific past date range.',
-        `Target Time Range: ${new Date(range.start).toLocaleString()} -> ${new Date(range.end).toLocaleString()}`
-    ];
-    const condensedSummaries = Array.isArray(arguments[0]?.condensedSummaries)
-        ? arguments[0].condensedSummaries.map(item => String(item || '').trim()).filter(Boolean)
-        : [];
-    if (condensedSummaries.length > 0) {
-        lines.push('[Date-Bounded Recall Facts]');
-        condensedSummaries.forEach((item, index) => {
-            lines.push(`${index + 1}. ${item}`);
-        });
-        const carrySummary = String(arguments[0]?.carrySummary || '').trim();
-        if (carrySummary) {
-            lines.push(`[Carry Summary] ${carrySummary}`);
-        }
-        lines.push('[Instruction]');
-        lines.push('- Answer from these date-bounded recall facts first.');
-        lines.push('- Treat other context blocks as background only.');
-        lines.push('- Do not let current commercial-street context, recent rental/cohabitation discussion, or unrelated present-time topics override this dated answer unless the user explicitly asks about them.');
-    } else {
-        const memories = Array.isArray(arguments[0]?.memories) ? arguments[0].memories : [];
-        if (memories.length === 0) return '';
-        lines.push('[Date-Bounded Recall Facts]');
-        memories.forEach((memory, index) => {
-            const summary = String(memory.summary || memory.event || '').trim();
-            const content = String(memory.content || '').trim();
-            const sourceTimeText = String(memory.source_time_text || '').trim();
-            const focus = String(memory.memory_focus || '').trim();
-            const tier = String(memory.memory_tier || '').trim();
-            lines.push(`Memory ${index + 1}: ${summary || `memory_${index + 1}`}`);
-            if (sourceTimeText) lines.push(`Source Dialogue Time: ${sourceTimeText}`);
-            if (content && content !== summary) lines.push(`Details: ${content}`);
-            if (focus || tier) lines.push(`Type: ${focus || 'unknown'} / ${tier || 'unknown'}`);
-        });
-        lines.push('[Instruction]');
-        lines.push('- Summarize what happened in that time range.');
-        lines.push('- Do not require extra semantic matching beyond these dated records.');
-    }
-    return `\n${lines.join('\n')}\n`;
-}
-
-function buildTemporalBrowseContextPartition({ range } = {}) {
-    if (!range) return '';
-    return [
-        '[SYSTEM: CONTEXT PARTITION FOR THIS TURN]',
-        'The user has switched topics and is asking for a date-bounded recall answer.',
-        `[Primary Task] Answer what happened during ${new Date(range.start).toLocaleString()} -> ${new Date(range.end).toLocaleString()}.`,
-        '[PRIMARY FACTUAL SOURCE]',
-        '- The separate "DATE-BOUNDED RECALL" block in this prompt is the main factual source for this turn.',
-        '- Use that block first when deciding what happened.',
-        '[BACKGROUND CONTEXT ONLY]',
-        '- Persona rules, recent conversation summary, commercial-street context, and other ongoing threads are background context only.',
-        '- They may shape tone or wording, but they must not override the date-bounded recall facts.',
-        '[Information Source Boundary]',
-        '- Retrieved date-recall facts are historical reference material, not proof that the user has already been discussing every one of those events in the live chat.',
-        '- If the user now mentions something that is not in visible recent chat and not in the retrieved date-recall facts, treat it as newly introduced information for this turn.',
-        '- Do not automatically act as if every recalled event is already an active shared topic unless the user explicitly continues that event.',
-        '[Conflict Rule]',
-        '- If background context suggests a different current topic, ignore it for this answer unless the same topic is explicitly present in the date-bounded recall block.',
-        '- Do not drag the current rental/cohabitation thread into the answer unless it is explicitly supported by the date-bounded recall block.'
-    ].join('\n');
-}
-
-function parseTemporalBrowseSummaryResult(text) {
-    const raw = unwrapStructuredPlannerText(text);
-    if (!raw) return { summary: null, malformed: true, empty: true };
-    if (!/^\s*\{[\s\S]*\}\s*$/.test(raw)) {
-        return { summary: null, malformed: true, empty: false };
-    }
-    try {
-        const parsed = JSON.parse(raw);
-        const batchSummary = Array.isArray(parsed?.batch_summary)
-            ? parsed.batch_summary.map(item => String(item || '').trim()).filter(Boolean).slice(0, 6)
-            : [];
-        const carrySummary = String(parsed?.carry_summary || '').trim();
-        if (batchSummary.length === 0 || !carrySummary) {
-            return { summary: null, malformed: true, empty: false };
-        }
-        return {
-            summary: {
-                batchSummary,
-                carrySummary
-            },
-            malformed: false,
-            empty: false
-        };
-    } catch (_) {
-        return { summary: null, malformed: true, empty: false };
-    }
+    return { shouldSearch: false, stop: false, retrievalLabel: '', malformed: true };
 }
 
 function parseStructuredRagQuery(text, fallbackKeyword = '', fallbackTopics = []) {
-    const raw = unwrapStructuredPlannerText(text);
+    const raw = String(text || '').trim();
     if (!raw) return { request: null, malformed: true, empty: true };
     if (!/^\s*\{[\s\S]*\}\s*$/.test(raw)) {
         return { request: null, malformed: true, empty: false };
@@ -549,14 +278,6 @@ function parseStructuredRagQuery(text, fallbackKeyword = '', fallbackTopics = []
         const memoryTier = Array.isArray(parsed?.filters?.memory_tier)
             ? parsed.filters.memory_tier.map(item => String(item || '').trim()).filter(Boolean).slice(0, 3)
             : [];
-        const relativeText = String(parsed?.temporal_hint?.relative_text || parsed?.temporal_hint?.relative || '').trim();
-        const absoluteStart = Number(parsed?.temporal_hint?.absolute_start || 0);
-        const absoluteEnd = Number(parsed?.temporal_hint?.absolute_end || 0);
-        const temporalHint = {
-            ...(relativeText ? { relative_text: relativeText } : {}),
-            ...(Number.isFinite(absoluteStart) && absoluteStart > 0 ? { absolute_start: absoluteStart } : {}),
-            ...(Number.isFinite(absoluteEnd) && absoluteEnd > 0 ? { absolute_end: absoluteEnd } : {})
-        };
         const limit = Math.max(1, Math.min(8, Number(parsed?.limit || 3) || 3));
         const normalized = {
             queries: parsedQueries,
@@ -564,7 +285,6 @@ function parseStructuredRagQuery(text, fallbackKeyword = '', fallbackTopics = []
                 ...(memoryFocus.length > 0 ? { memory_focus: memoryFocus } : {}),
                 ...(memoryTier.length > 0 ? { memory_tier: memoryTier } : {})
             },
-            ...(Object.keys(temporalHint).length > 0 ? { temporal_hint: temporalHint } : {}),
             limit
         };
         if (normalized.queries.length === 0) {
@@ -636,9 +356,6 @@ function enforceStructuredRagQueryConstraints(request, constraints = {}) {
             ...(mergedFocuses.length > 0 ? { memory_focus: mergedFocuses } : {}),
             ...(mergedTiers.length > 0 ? { memory_tier: mergedTiers } : {})
         },
-        ...(normalizedRequest?.temporal_hint && typeof normalizedRequest.temporal_hint === 'object'
-            ? { temporal_hint: normalizedRequest.temporal_hint }
-            : {}),
         limit: Math.max(1, Math.min(8, Number(normalizedRequest.limit || 3) || 3))
     };
 }
@@ -671,7 +388,6 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
             name: String(slot.name || `slot_${slots.length + 1}`),
             queries: slot.queries.slice(0, 4),
             filters: slot.filters || {},
-            temporal_hint: slot.temporal_hint || retrievalRequest?.temporal_hint || {},
             limit: Math.max(1, Math.min(4, Number(slot.limit || 2) || 2))
         });
     };
@@ -746,7 +462,6 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
             name: 'general',
             queries: buildSlotQueries(baseQueries, [retrievalLabel || latestUserMessage || '用户近况']),
             filters: retrievalRequest?.filters || {},
-            temporal_hint: retrievalRequest?.temporal_hint || {},
             limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
         });
     }
@@ -754,7 +469,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
     return slots;
 }
 
-async function executeMultiSlotMemorySearch(memory, characterId, retrievalRequest, slotPlan = [], onProgress = null) {
+async function executeMultiSlotMemorySearch(memory, characterId, retrievalRequest, slotPlan = []) {
     function slotAllowsMemory(slotName, mem) {
         const text = [
             mem?.summary,
@@ -763,15 +478,8 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
         ].filter(Boolean).join(' ');
         if (!text) return true;
         const relationshipHeavy = /(表白|爱意|爱我|我爱你|在乎|吃醋|情感|恋爱|亲密|挑衅|试探|关系定位|和好|承诺|信任|安抚)/;
-        const relationshipTooHeavyForProfile = /(表白|爱我|我爱你|恋爱|关系定位|和好|承诺)/;
         if (slotName === 'profile') {
-            const focus = String(mem?.memory_focus || '').trim();
-            const hasIdentitySignals = /(姓名|称呼|年龄|学校|学历|专业|年级|学生|身份|背景|个人信息|城市|家庭|性格|稳定信息)/.test(text);
-            const hasBehavioralProfileSignals = /(偏好|习惯|性格|作风|互动风格|表达方式|撒娇|占有欲|掌控感|边界感|社交局促|程序员|绘画|实习生|职业倾向|思维方式)/.test(text);
-            if (focus === 'user_profile') {
-                return (hasIdentitySignals || hasBehavioralProfileSignals) && !relationshipTooHeavyForProfile.test(text);
-            }
-            return hasIdentitySignals && !relationshipHeavy.test(text);
+            return /(姓名|称呼|年龄|学校|学历|专业|年级|学生|身份|背景|个人信息|城市|家庭|性格|稳定信息)/.test(text) && !relationshipHeavy.test(text);
         }
         if (slotName === 'life_arc') {
             return /(工作|实习|公司|项目|求职|offer|面试|课程|学习|职业|开发|计划|目标|进展|近况|状态|压力|困扰|健康)/.test(text) && !relationshipHeavy.test(text);
@@ -792,58 +500,21 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
             name: 'general',
             queries: Array.isArray(retrievalRequest?.queries) ? retrievalRequest.queries : [],
             filters: retrievalRequest?.filters || {},
-            temporal_hint: retrievalRequest?.temporal_hint || {},
             limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
         }];
 
-    const slotResults = [];
-    for (const slot of slots) {
-        const startedAt = Date.now();
-        if (typeof onProgress === 'function') {
-            await onProgress({
-                phase: 'slot_start',
-                slot: slot.name,
-                queries: Array.isArray(slot.queries) ? slot.queries : [],
-                filters: slot.filters || {},
-                temporal_hint: slot.temporal_hint || {},
-                limit: slot.limit || 2
-            });
-        }
+    const slotResults = await Promise.all(slots.map(async (slot) => {
         const request = {
             queries: Array.isArray(slot.queries) ? slot.queries : [],
             filters: slot.filters || {},
-            temporal_hint: slot.temporal_hint || {},
             limit: slot.limit || 2
         };
-        const memories = await memory.searchMemories(
-            characterId,
-            request,
-            request.limit || 2,
-            async (trace) => {
-                if (typeof onProgress === 'function') {
-                    await onProgress({
-                        phase: `slot_trace_${trace.phase}`,
-                        slot: slot.name,
-                        ...trace
-                    });
-                }
-            }
-        );
+        const memories = await memory.searchMemories(characterId, request, request.limit || 2);
         const filteredMemories = Array.isArray(memories)
             ? memories.filter(mem => slotAllowsMemory(slot.name, mem))
             : [];
-        console.log(`[RAG][retrieve-slot] ${characterId} slot=${slot.name} durationMs=${Date.now() - startedAt} raw=${Array.isArray(memories) ? memories.length : 0} filtered=${filteredMemories.length}`);
-        if (typeof onProgress === 'function') {
-            await onProgress({
-                phase: 'slot_finish',
-                slot: slot.name,
-                durationMs: Date.now() - startedAt,
-                rawCount: Array.isArray(memories) ? memories.length : 0,
-                filteredCount: filteredMemories.length
-            });
-        }
-        slotResults.push({ slot, memories: filteredMemories });
-    }
+        return { slot, memories: filteredMemories };
+    }));
 
     const aggregate = new Map();
     for (const { slot, memories } of slotResults) {
@@ -876,7 +547,7 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
         Math.min(10, slots.length * 2)
     );
 
-    const finalMemories = Array.from(aggregate.values())
+    return Array.from(aggregate.values())
         .sort((a, b) => b.score - a.score)
         .slice(0, finalLimit)
         .map(entry => {
@@ -884,39 +555,11 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
             entry.memory._matched_slots = Array.from(entry.slots);
             return entry.memory;
         });
-    console.log(`[RAG][retrieve-complete] ${characterId} slots=${slots.length} final=${finalMemories.length}`);
-    if (typeof onProgress === 'function') {
-        await onProgress({
-            phase: 'complete',
-            slotCount: slots.length,
-            finalCount: finalMemories.length
-        });
-    }
-    return finalMemories;
 }
 
 function formatMessageForLLM(db, content) {
     if (!content) return '';
     try {
-        if (content.startsWith('[CITY_ADMIN_GRANT]')) {
-            const parts = content.replace('[CITY_ADMIN_GRANT]', '').trim().split('|');
-            const grantKind = String(parts[0] || '').trim();
-            if (grantKind === 'gold') {
-                const amount = Number(parts[1] || 0) || 0;
-                return `[系统提示: 商业街管理员刚给了你 ${amount} 金币。]`;
-            }
-            if (grantKind === 'calories') {
-                const amount = Number(parts[1] || 0) || 0;
-                return `[系统提示: 商业街管理员刚给你补了 ${amount} 点体力/热量。]`;
-            }
-            if (grantKind === 'item') {
-                const itemEmoji = String(parts[1] || '').trim();
-                const itemName = String(parts[2] || '物品').trim();
-                const quantity = Number(parts[3] || 1) || 1;
-                return `[系统提示: 商业街管理员刚给了你 ${itemEmoji}${itemName} x${quantity}。]`;
-            }
-            return '[系统提示: 商业街管理员刚给了你一些补给。]';
-        }
         if (content.startsWith('[CONTACT_CARD:')) {
             const parts = content.split(':');
             if (parts.length >= 3) {
@@ -1202,15 +845,6 @@ function getEngine(userId) {
     const dedupBlockCounts = new Map(); // Track consecutive dedup blocks per character
     let stateBroadcastInterval = null;
 
-    function queueEngineTask(keySuffix, task, options = {}) {
-        return enqueueBackgroundTask({
-            key: `engine:${userId}:${keySuffix}`,
-            dedupeKey: options.dedupeKey ? `engine:${userId}:${options.dedupeKey}` : '',
-            maxPending: options.maxPending ?? 1,
-            task
-        });
-    }
-
     function recordTokenUsage(characterId, contextType, usage) {
         if (!usage || usage.cached) return;
         db.addTokenUsage(characterId, contextType, usage.prompt_tokens || 0, usage.completion_tokens || 0);
@@ -1288,8 +922,8 @@ function getEngine(userId) {
         });
     }
 
-    const RAG_PROGRESS_TOTAL_STEPS = 8;
-    const RAG_PROGRESS_STEP_KEYS = ['summary', 'switch', 'route', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
+    const RAG_PROGRESS_TOTAL_STEPS = 6;
+    const RAG_PROGRESS_STEP_KEYS = ['summary', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
 
     function createRagProgress(stepKey = 'summary') {
         const safeKey = RAG_PROGRESS_STEP_KEYS.includes(stepKey) ? stepKey : 'summary';
@@ -1341,137 +975,6 @@ function getEngine(userId) {
         return ragFailureCache.get(characterId) || null;
     }
 
-    async function runTopicSwitchGate({
-        character,
-        transformedHistory,
-        conversationDigest,
-        recentInputString
-    }) {
-        const ragPlannerConfig = resolveRagPlannerConfig(character);
-        if (!recentInputString || !ragPlannerConfig.endpoint || !ragPlannerConfig.key || !ragPlannerConfig.model) {
-            const error = new Error('Topic switch gate is unavailable. Please retry.');
-            error.ragResume = {
-                failedAt: 'switch',
-                latestUserMessage: recentInputString
-            };
-            throw error;
-        }
-
-        const fullPlannerHistory = Array.isArray(transformedHistory)
-            ? transformedHistory
-            : [];
-        const topicSwitchPrompt = [
-            'TOPIC SWITCH GATE',
-            'Judge whether the newest user message is continuing the current live topic, switching to a new topic, or following up on just-retrieved history.',
-            'Output exactly one line in one of these forms:',
-            'CONTINUE_CURRENT_TOPIC: reason',
-            'SWITCH_TOPIC: reason',
-            'FOLLOW_UP_ON_RETRIEVED_HISTORY: reason',
-            '',
-            '[Reason labels]',
-            '- same_topic',
-            '- new_time_anchor',
-            '- new_event_claim',
-            '- explicit_recall_request',
-            '- retrieved_history_follow_up',
-            '- clarification_on_current_topic',
-            '',
-            '[Rules]',
-            '- SWITCH_TOPIC when the user clearly pivots to a different time anchor, event, subject, or request than the immediately previous live thread.',
-            '- FOLLOW_UP_ON_RETRIEVED_HISTORY only when the newest user message is clearly continuing the historical facts that were just recalled, such as “然后呢”, “后来呢”, “那之后呢”.',
-            '- CONTINUE_CURRENT_TOPIC when the newest user message is plainly continuing the same live thread.',
-            '- Do not overthink. Prefer the newest wording over older momentum.',
-            '- Output one line only. No JSON. No explanation.'
-        ].join('\n');
-
-        const gateMessages = buildRagPlannerMessages({
-            recentHistory: fullPlannerHistory,
-            latestUserMessage: recentInputString,
-            conversationDigest,
-            plannerInstruction: topicSwitchPrompt
-        });
-
-        recordLlmDebug(character, 'input', gateMessages, {
-            context_type: 'chat_topic_switch',
-            planner_source: ragPlannerConfig.source,
-            latest_user_message: recentInputString
-        });
-
-        try {
-            const { content, usage, finishReason } = await callLLM({
-                endpoint: ragPlannerConfig.endpoint,
-                key: ragPlannerConfig.key,
-                model: ragPlannerConfig.model,
-                messages: gateMessages,
-                maxTokens: 120,
-                temperature: 0,
-                enableCache: true,
-                cacheDb: db,
-                cacheType: 'chat_topic_switch',
-                cacheScope: `character:${character?.id || ''}`,
-                cacheCharacterId: character?.id || '',
-                cacheKeyMode: 'exact',
-                cacheKeyExtra: 'v1',
-                returnUsage: true,
-                validateCachedContent: (cachedText, cachedMeta) => isValidTopicSwitchPayload(cachedText, cachedMeta),
-                shouldCacheResult: (resultText, resultMeta) => isValidTopicSwitchPayload(resultText, resultMeta)
-            });
-
-            recordLlmDebug(character, 'output', content, {
-                context_type: 'chat_topic_switch',
-                planner_source: ragPlannerConfig.source,
-                latest_user_message: recentInputString,
-                finishReason: finishReason || '',
-                usage: usage || null
-            });
-
-            if (String(finishReason || '').trim() === 'length') {
-                recordLlmDebug(character, 'event', 'Topic switch gate output was truncated.', {
-                    context_type: 'chat_topic_switch',
-                    planner_source: ragPlannerConfig.source,
-                    latest_user_message: recentInputString,
-                    finishReason: finishReason || '',
-                    usage: usage || null
-                });
-                const error = new Error('Topic switch gate output was truncated. Please retry.');
-                error.ragResume = {
-                    failedAt: 'switch',
-                    latestUserMessage: recentInputString
-                };
-                throw error;
-            }
-
-            const parsed = parseTopicSwitchDecision(content);
-            if (parsed.malformed) {
-                recordLlmDebug(character, 'event', 'Topic switch gate output was malformed.', {
-                    context_type: 'chat_topic_switch',
-                    planner_source: ragPlannerConfig.source,
-                    latest_user_message: recentInputString
-                });
-                const error = new Error('Topic switch gate output was malformed. Please retry.');
-                error.ragResume = {
-                    failedAt: 'switch',
-                    latestUserMessage: recentInputString
-                };
-                throw error;
-            }
-            return parsed;
-        } catch (e) {
-            if (e?.ragResume) throw e;
-            recordLlmDebug(character, 'event', `Topic switch gate failed: ${String(e?.message || e || 'unknown_error')}`, {
-                context_type: 'chat_topic_switch',
-                planner_source: ragPlannerConfig.source,
-                latest_user_message: recentInputString
-            });
-            const error = new Error(`Topic switch gate failed. Please retry. (${String(e?.message || e || 'unknown_error').slice(0, 180)})`);
-            error.ragResume = {
-                failedAt: 'switch',
-                latestUserMessage: recentInputString
-            };
-            throw error;
-        }
-    }
-
     // Generate a random delay between min and max minutes
     function getRandomDelayMs(min, max) {
         const minMs = min * 60 * 1000;
@@ -1483,12 +986,11 @@ function getEngine(userId) {
     async function buildPrompt(character, contextMessages, isTimerWakeup = false, options = {}) {
         const defaultGuidelines = getDefaultGuidelines();
         const conversationDigest = options.conversationDigest || null;
-        const topicSwitchState = options.topicSwitchState || null;
         const antiRepeatSource = Array.isArray(options.antiRepeatMessages) && options.antiRepeatMessages.length > 0
             ? options.antiRepeatMessages
             : contextMessages;
 
-        const recentInputString = String(options.recentInputString || contextMessages.slice(-2).map(m => m.content).join(' ')).trim();
+        const recentInputString = contextMessages.slice(-2).map(m => m.content).join(' ');
         const userProfile = db.getUserProfile?.() || null;
         const responseStyleConstitution = String(userProfile?.response_style_constitution || '').trim() || getDefaultResponseStyleConstitution();
 
@@ -1515,26 +1017,18 @@ function getEngine(userId) {
                 name: character.name || '',
                 persona: character.persona || '',
                 world_info: character.world_info || '',
-                user_name: userProfile?.name || '',
-                user_bio: userProfile?.bio || '',
                 defaultGuidelines,
                 dialogueStyleExamples: getDialogueStyleExamples(),
                 system_prompt: character.system_prompt || '',
                 response_style_constitution: responseStyleConstitution
             },
             () => {
-                const userName = String(userProfile?.name || '用户').trim() || '用户';
-                const userBio = String(userProfile?.bio || '').trim();
                 let block = `You are playing the role of ${character.name}.
 Persona:
 ${character.persona || 'No specific persona given.'}
 
 World Info:
 ${character.world_info || 'No specific world info.'}`;
-                block += `\n\n[Highest Priority User Identity Anchor]\n- In this private chat, the user speaking to you is ${userName}本人.\n- Treat the current \`user\` as the real person you are talking to right now, not as a narrator, admin NPC, tool, or unrelated third party.\n- If the context says ${userName} gave you money, food, gifts, care, or attention, interpret it first as ${userName}本人对你做的事.\n- Do not rewrite that into “someone else gave it” or drift the emotional reaction onto a third party unless the message explicitly names a different sender.\n- When a system/event line and the newest user-facing action point to ${userName}, your relationship with ${userName} has priority over generic event wording.`;
-                if (userBio) {
-                    block += `\n- Stable profile cues about ${userName}: ${userBio}`;
-                }
                 if (responseStyleConstitution) {
                     block += `\n\n[Highest Priority Long-Term Style Constitution]\n${responseStyleConstitution}`;
                 }
@@ -1544,54 +1038,27 @@ ${character.world_info || 'No specific world info.'}`;
                 if (supplementalCharacterPrompt) {
                     block += `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}`;
                 }
-                block += '\n\n[Context Priority Rules]\n- Highest priority inside private chat: correctly identify who the user is and read their actions as actions from that user.\n- Newest explicit user wording > newest raw tail messages > compressed helper blocks.\n- If older/compressed context conflicts with the newest wording, trust the newest wording.\n- Retrieved memory/date-recall facts are reference material, not automatic proof that the user is still actively discussing every recalled item right now.\n- If something is absent from both the visible recent chat and the retrieved memory/date-recall facts, treat it as newly introduced information in this turn.\n- If the user uses meta wording, translate it back into the in-world relationship and situation.\n- If the user is correcting your interpretation, repair first instead of defending the older read.';
+                block += '\n\n[Context Priority Rules]\n- The user\'s newest explicit wording is the highest-priority source of truth.\n- The newest raw tail messages are the next-highest source of truth.\n- Compressed digest and anti-repeat blocks are only helper summaries.\n- If any older context conflicts with the user\'s newest explicit wording, trust the user\'s newest wording.\n- If any compressed block conflicts with the latest raw tail messages, trust the latest raw tail messages.\n- If the user uses meta or technical wording, do not let that wording drag you out of character; first translate it back into the in-world relationship and situation.\n- When the user is correcting your interpretation, first repair the misunderstanding instead of defending an older interpretation.';
                 return block;
             }
         );
 
-        const dynamicPromptBase = `Context:
-${universalResult.preamble}`;
-        let dynamicPrompt = dynamicPromptBase;
         let prompt = `${stableCharacterBlock}
 
-${dynamicPromptBase}`;
-        let digestBlock = '';
-        let styleCorrectionBlock = '';
-        let topicSwitchBlock = '';
-        let transferNoticeBlock = '';
-
-        if (topicSwitchState?.decision) {
-            const switchDecision = String(topicSwitchState.decision || '').trim() || 'CONTINUE_CURRENT_TOPIC';
-            const switchReason = String(topicSwitchState.reason || '').trim() || 'unspecified';
-            topicSwitchBlock = [
-                '[Current Turn Topic Gate]',
-                `Decision: ${switchDecision}`,
-                `Reason: ${switchReason}`,
-                switchDecision === 'SWITCH_TOPIC'
-                    ? '- The user has shifted away from the immediately previous live thread. Treat older hot topics as background only unless the user explicitly brings them back.'
-                    : switchDecision === 'FOLLOW_UP_ON_RETRIEVED_HISTORY'
-                        ? '- The user is following up on just-retrieved history. Continue that recalled thread carefully, but do not treat every recalled item as an already-active live topic.'
-                        : '- The user is continuing the current live thread unless the newest wording clearly redirects you.',
-                '- Answer the newest user request first. Do not let momentum from the previous hot topic override this turn.'
-            ].join('\n');
-            dynamicPrompt += `\n\n${topicSwitchBlock}`;
-            prompt += `\n\n${topicSwitchBlock}`;
-        }
+Context:
+${universalResult.preamble}`;
 
         if (conversationDigest?.digest_text) {
-            digestBlock = typeof memory.formatConversationDigestForPrompt === 'function'
+            const digestBlock = typeof memory.formatConversationDigestForPrompt === 'function'
                 ? memory.formatConversationDigestForPrompt(conversationDigest, { recentMessages: contextMessages })
                 : '';
             if (digestBlock) {
-                dynamicPrompt += `\n\n${digestBlock}`;
                 prompt += `\n\n${digestBlock}`;
             }
         }
 
         if (hasOverusedEllipsisStyle(contextMessages)) {
-            styleCorrectionBlock = '[Style Correction]\nYour recent raw replies have overused ellipsis-style openings. In this reply, do not begin with "……", "...", or a sigh-like punctuation opener. Start with a concrete word or direct reaction instead.';
-            dynamicPrompt += `\n\n${styleCorrectionBlock}`;
-            prompt += `\n\n${styleCorrectionBlock}`;
+            prompt += '\n\n[Style Correction]\nYour recent raw replies have overused ellipsis-style openings. In this reply, do not begin with "……", "...", or a sigh-like punctuation opener. Start with a concrete word or direct reaction instead.';
         }
 
         // Unclaimed transfers: char sent to user but user hasn't claimed yet
@@ -1603,14 +1070,11 @@ ${dynamicPromptBase}`;
                     const total = recent.reduce((s, t) => s + t.amount, 0).toFixed(2);
                     const minutesAgo = Math.round((Date.now() - recent[0].created_at) / 60000);
                     const unclaimedNote = recent[0].note ? `（留言：“${recent[0].note}”）` : '';
-                    transferNoticeBlock = `[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 转了一笔账，共 ¥${total}${unclaimedNote}，但对方还没有领取。你可以按自己的性格顺手提一句，也可以不提。`;
-                    dynamicPrompt += `\n${transferNoticeBlock}\n`;
-                    prompt += `\n${transferNoticeBlock}\n`;
+                    prompt += `\n[系统提示] 你在 ${minutesAgo} 分钟前给 ${db.getUserProfile()?.name || '用户'} 转了一笔账，共 ¥${total}${unclaimedNote}，但对方还没有领取。你可以按自己的性格顺手提一句，也可以不提。\n`;
                 }
             }
         } catch (e) { /* ignore */ }
         if (isTimerWakeup) {
-            dynamicPrompt += `\n[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled timer has just expired! You MUST now proactively send the message you promised to send when you set the [TIMER]. Speak to the user now!\n`;
             prompt += `\n[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled timer has just expired! You MUST now proactively send the message you promised to send when you set the [TIMER]. Speak to the user now!\n`;
         }
 
@@ -1619,37 +1083,10 @@ ${dynamicPromptBase}`;
             protectedTailCount: Array.isArray(contextMessages) ? contextMessages.length : 0
         });
         if (antiRepeat) {
-            dynamicPrompt += antiRepeat;
             prompt += antiRepeat;
         }
 
-        const dynamicPromptWithoutDigest = [
-            'Context:',
-            universalResult.preamble,
-            styleCorrectionBlock ? `\n${styleCorrectionBlock}` : '',
-            topicSwitchBlock ? `\n${topicSwitchBlock}` : '',
-            transferNoticeBlock ? `\n${transferNoticeBlock}\n` : '',
-            isTimerWakeup ? '\n[CRITICAL WAKEUP NOTICE]: Your previously self-scheduled timer has just expired! You MUST now proactively send the message you promised to send when you set the [TIMER]. Speak to the user now!\n' : '',
-            antiRepeat || ''
-        ].join('\n');
-        const promptWithoutDigest = `${stableCharacterBlock}\n\n${dynamicPromptWithoutDigest}`;
-
-        return {
-            prompt,
-            promptWithoutDigest,
-            stablePromptBlock: stableCharacterBlock,
-            dynamicPromptBlock: dynamicPrompt,
-            dynamicPromptWithoutDigest,
-            retrievedMemoriesContext: universalResult.retrievedMemoriesContext,
-            promptStats: {
-                universalBreakdown: { ...(universalResult.breakdown || {}) },
-                moduleRoutes: { ...(universalResult.moduleRoutes || {}) },
-                digestBlock,
-                antiRepeat,
-                styleCorrectionBlock,
-                transferNoticeBlock
-            }
-        };
+        return { prompt, retrievedMemoriesContext: universalResult.retrievedMemoriesContext };
     }
 
     async function runStructuredRagPipeline({
@@ -1657,7 +1094,6 @@ ${dynamicPromptBase}`;
         transformedHistory,
         recentInputString,
         conversationDigest,
-        topicSwitchState,
         wsClients,
         apiMessages,
         msgMetadata,
@@ -1682,25 +1118,21 @@ ${dynamicPromptBase}`;
             '- Prefer user-centered themes first: user_profile, user_current_arc, relationship.',
             '- Especially notice: what you know about the user, how you see the user, user background, preferences, vulnerabilities, current life arc, repeated affection, confession, jealousy, promises, hurt, reconciliation, and long-running work/study/career threads.',
             '- If the wording is broad or indirect, still infer likely themes instead of staying literal.',
-            '- Treat time expressions, dates, durations, numbers, amounts, counts, rankings, and sequence words as high-information constraints. Do not smooth them away when inferring topics.',
-            '- If the user asks about "昨天/前天/三天前/上周/上次/第几次/50块/两次/几点/多久", keep the retrieval topic anchored to that temporal or numeric constraint instead of collapsing it into a vague "最近/一些事".',
             '',
             '[Output]',
             '- Output ONLY a JSON array of 0 to 5 short topic strings.',
             '- Example: ["用户信息","用户近况","关系"]',
-            '- If a time or numeric constraint is central, include at least one topic string that preserves it, such as "三天前的事", "上周的互动", "50元转账", "第二次提到的事".',
             '- If nothing in the message points to older long-term memory, output []'
         ].join('\n');
         let plannerTopics = Array.isArray(normalizedResumeState?.plannerTopics)
             ? normalizedResumeState.plannerTopics.map(v => String(v || '').trim()).filter(Boolean)
             : [];
-        if (!plannerTopics.length || !['decision', 'rewrite', 'retrieve', 'browse_summary'].includes(resumeFrom)) {
+        if (!plannerTopics.length || !['decision', 'rewrite', 'retrieve'].includes(resumeFrom)) {
             const topicPlannerMessages = buildRagPlannerMessages({
                 recentHistory: transformedHistory,
                 latestUserMessage: recentInputString,
                 conversationDigest,
-                plannerInstruction: topicPrompt,
-                topicSwitchState
+                plannerInstruction: topicPrompt
             });
             recordLlmDebug(character, 'input', topicPlannerMessages, {
                 context_type: 'chat_intent_topics',
@@ -1708,7 +1140,7 @@ ${dynamicPromptBase}`;
                 latest_user_message: recentInputString
             });
 
-            const { content: topicResult, usage: topicUsage, finishReason: topicFinishReason } = await callLLM({
+            const { content: topicResult, usage: topicUsage } = await callLLM({
                 endpoint: ragPlannerConfig.endpoint,
                 key: ragPlannerConfig.key,
                 model: ragPlannerConfig.model,
@@ -1722,8 +1154,6 @@ ${dynamicPromptBase}`;
                 cacheScope: `character:${character.id}`,
                 cacheCharacterId: character.id,
                 returnUsage: true,
-                validateCachedContent: (cachedText, cachedMeta) => isValidRagTopicsPayload(cachedText, cachedMeta),
-                shouldCacheResult: (resultText, resultMeta) => isValidRagTopicsPayload(resultText, resultMeta),
                 debugAttempt: buildLlmAttemptRecorder(character, {
                     context_type: 'chat_intent_topics',
                     planner_source: ragPlannerConfig.source
@@ -1732,18 +1162,13 @@ ${dynamicPromptBase}`;
             recordLlmDebug(character, 'output', topicResult, {
                 context_type: 'chat_intent_topics',
                 planner_source: ragPlannerConfig.source,
-                finishReason: topicFinishReason || '',
                 usage: topicUsage || null
             });
             if (topicUsage) {
                 recordTokenUsage(character.id, 'chat_intent_topics', topicUsage);
                 broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: topicUsage });
             }
-            if (String(topicFinishReason || '').trim() === 'length') {
-                const error = new Error('RAG planner output was truncated. Please retry.');
-                error.ragResume = { failedAt: 'topics', latestUserMessage: recentInputString };
-                throw error;
-            }
+
             const { topics, malformed: malformedTopicResult, empty: emptyTopicResult } = parseRagTopics(topicResult);
             if (emptyTopicResult) {
                 const error = new Error('RAG planner returned no result. Please retry.');
@@ -1776,38 +1201,28 @@ ${dynamicPromptBase}`;
             '[Core Principle]',
             '- Retrieve whenever older memory would make the reply more accurate, more continuous, more personal, or less likely to forget established facts.',
             '- Do NOT use the standard "I can answer superficially from recent chat" test. If memory would materially improve continuity, prefer retrieval.',
-            '- If the user is clearly asking what happened on a specific day or time window, prefer routing to direct date browse instead of semantic vector search.',
             '',
             '[Retrieval Is Extra Important]',
             '- If the topics point to user_profile, user_current_arc, or relationship, strongly prefer retrieval.',
             '- If the user is asking what you know about them, how you see them, whether you remember them, or asking for a summary of them, strongly prefer retrieval.',
             '- If the user is touching earlier relationship nodes, repeated affection, or long-running life threads, strongly prefer retrieval.',
-            '- If the user includes a clear time anchor, date, duration, amount, count, ranking, or sequence constraint, strongly prefer retrieval because recent chat alone often loses those details.',
-            '- Questions like "昨天发生了什么", "三天前发生了什么", "上周那天怎么了" should usually trigger direct date browse, not vector rewrite.',
-            '- Questions like "三天前你说了什么", "上周", "第2次", "50块", "几点", "多久" should usually trigger memory retrieval or date browse unless the answer is plainly present in the latest visible turns.',
             '',
             '[When ENOUGH_CONTEXT Is Allowed]',
             '- Only output ENOUGH_CONTEXT when the recent chat alone is enough and older memory would add almost nothing to factual accuracy, emotional continuity, or personalization.',
-            '- If answering correctly depends on remembering an exact time, number, amount, count, or ordering detail, ENOUGH_CONTEXT is usually NOT allowed.',
             '- If you are on the fence, prefer SEARCH_MEMORY.',
             '',
             '[Output Format]',
-            '- If the user is asking what happened during a specific day or time window and direct date browse is the best route, output ONLY: BROWSE_DATE: [time phrase]',
-            '- For BROWSE_DATE, the bracket content must be ONLY the pure temporal phrase itself, such as "昨天", "前天", "三天前", "上周", "上周三", "2026-04-08".',
-            '- Do NOT include verbs, events, or question text inside BROWSE_DATE. Correct: "BROWSE_DATE: 三天前". Wrong: "BROWSE_DATE: 三天前发生了什么", "BROWSE_DATE: 昨天你说的话".',
             '- If retrieval is needed, output ONLY: SEARCH_MEMORY: [keyword]',
             '- The keyword should usually be one of the inferred topics above, or a short merge of the most important one.',
-            '- When time or numbers matter, preserve them in the keyword instead of weakening them. Prefer "三天前的事" over "最近的事", and "50元转账" over "转账".',
             '- If retrieval is not needed, output ONLY: ENOUGH_CONTEXT'
         ].join('\n');
         let parsedDecision = normalizedResumeState?.parsedDecision || null;
-        if (!parsedDecision || !['rewrite', 'retrieve', 'browse_summary'].includes(resumeFrom)) {
+        if (!parsedDecision || !['rewrite', 'retrieve'].includes(resumeFrom)) {
             const decisionPlannerMessages = buildRagPlannerMessages({
                 recentHistory: transformedHistory,
                 latestUserMessage: recentInputString,
                 conversationDigest,
-                plannerInstruction: intentPrompt,
-                topicSwitchState
+                plannerInstruction: intentPrompt
             });
             recordLlmDebug(character, 'input', decisionPlannerMessages, {
                 context_type: 'chat_intent_decision',
@@ -1816,7 +1231,7 @@ ${dynamicPromptBase}`;
                 planner_topics: plannerTopics
             });
 
-            const { content: intentResult, usage: intentUsage, finishReason: intentFinishReason } = await callLLM({
+            const { content: intentResult, usage: intentUsage } = await callLLM({
                 endpoint: ragPlannerConfig.endpoint,
                 key: ragPlannerConfig.key,
                 model: ragPlannerConfig.model,
@@ -1830,8 +1245,6 @@ ${dynamicPromptBase}`;
                 cacheScope: `character:${character.id}`,
                 cacheCharacterId: character.id,
                 returnUsage: true,
-                validateCachedContent: (cachedText, cachedMeta) => isValidRagDecisionPayload(cachedText, cachedMeta),
-                shouldCacheResult: (resultText, resultMeta) => isValidRagDecisionPayload(resultText, resultMeta),
                 debugAttempt: buildLlmAttemptRecorder(character, {
                     context_type: 'chat_intent_decision',
                     planner_source: ragPlannerConfig.source
@@ -1841,22 +1254,13 @@ ${dynamicPromptBase}`;
                 context_type: 'chat_intent_decision',
                 planner_source: ragPlannerConfig.source,
                 planner_topics: plannerTopics,
-                finishReason: intentFinishReason || '',
                 usage: intentUsage || null
             });
             if (intentUsage) {
                 recordTokenUsage(character.id, 'chat_intent_decision', intentUsage);
                 broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: intentUsage });
             }
-            if (String(intentFinishReason || '').trim() === 'length') {
-                const error = new Error('RAG planner output was truncated. Please retry.');
-                error.ragResume = {
-                    failedAt: 'decision',
-                    latestUserMessage: recentInputString,
-                    plannerTopics
-                };
-                throw error;
-            }
+
             parsedDecision = parseRagDecision(intentResult);
             if (parsedDecision.malformed) {
                 const error = new Error('RAG planner output was malformed. Please retry.');
@@ -1874,235 +1278,6 @@ ${dynamicPromptBase}`;
                 latest_user_message: recentInputString,
                 planner_topics: plannerTopics
             });
-        }
-        if (parsedDecision.route === 'temporal_browse') {
-            updateRagProgress(character.id, wsClients, { currentKey: 'retrieve' });
-            const browseRange = resolveTemporalBrowseRange(parsedDecision.temporalHint, Date.now());
-            const browseMemories = browseRange && typeof db.getMemoriesByTimeRange === 'function'
-                ? db.getMemoriesByTimeRange(character.id, browseRange.start, browseRange.end, 80)
-                : [];
-            const browseChunkSize = 10;
-            let browseChunkSummaries = Array.isArray(normalizedResumeState?.browseChunkSummaries)
-                ? normalizedResumeState.browseChunkSummaries.map(item => String(item || '').trim()).filter(Boolean)
-                : [];
-            let browseCarrySummary = String(normalizedResumeState?.browseCarrySummary || '').trim();
-            let browseNextChunkIndex = Math.max(0, Number(normalizedResumeState?.browseNextChunkIndex || 0) || 0);
-            recordLlmDebug(character, 'event', 'Temporal browse route executed.', {
-                context_type: 'chat_intent_browse_date',
-                planner_source: ragPlannerConfig.source,
-                latest_user_message: recentInputString,
-                planner_topics: plannerTopics,
-                temporal_hint: parsedDecision.temporalHint,
-                temporal_range: browseRange,
-                retrieved_count: Array.isArray(browseMemories) ? browseMemories.length : 0
-            });
-            if (browseRange && browseMemories.length > 0) {
-                const memoryChunks = [];
-                for (let i = 0; i < browseMemories.length; i += browseChunkSize) {
-                    memoryChunks.push(browseMemories.slice(i, i + browseChunkSize));
-                }
-                for (let chunkIndex = browseNextChunkIndex; chunkIndex < memoryChunks.length; chunkIndex++) {
-                    const chunk = memoryChunks[chunkIndex];
-                    const chunkLines = chunk.map((memory, index) => {
-                        const summary = String(memory.summary || memory.event || '').trim();
-                        const content = String(memory.content || '').trim();
-                        const sourceTimeText = String(memory.source_time_text || '').trim();
-                        const focus = String(memory.memory_focus || '').trim();
-                        const tier = String(memory.memory_tier || '').trim();
-                        return [
-                            `Memory ${chunkIndex * browseChunkSize + index + 1}: ${summary || `memory_${chunkIndex * browseChunkSize + index + 1}`}`,
-                            sourceTimeText ? `Source Dialogue Time: ${sourceTimeText}` : '',
-                            content && content !== summary ? `Details: ${content}` : '',
-                            (focus || tier) ? `Type: ${focus || 'unknown'} / ${tier || 'unknown'}` : ''
-                        ].filter(Boolean).join('\n');
-                    }).join('\n\n');
-                    const browseSummaryPrompt = [
-                        'TEMPORAL BROWSE CHUNK SUMMARIZER',
-                        `The user asked: ${recentInputString}`,
-                        `Target time range: ${new Date(browseRange.start).toLocaleString()} -> ${new Date(browseRange.end).toLocaleString()}`,
-                        `This is chunk ${chunkIndex + 1} of ${memoryChunks.length}.`,
-                        browseCarrySummary ? `Previous carry summary:\n${browseCarrySummary}` : 'Previous carry summary: (none yet)',
-                        '',
-                        'You must extract concrete events that actually happened in these dated memories.',
-                        'Do NOT write abstract personality summaries, long-term state summaries, or vague status overviews by themselves.',
-                        'Each summary line must name a specific thing that happened: conflict, conversation topic, decision, plan, argument, discovery, emotional incident, or work event.',
-                        'Merge duplicates, but keep events concrete.',
-                        'Do not drift to events outside this date range.',
-                        '',
-                        '[Output Rules]',
-                        '- Output ONLY valid JSON.',
-                        '- "batch_summary": 2 to 6 short Chinese event lines for this chunk.',
-                        '- Every "batch_summary" line must describe a specific event, not a generic state like “压力很大” or “用户很焦虑” unless tied to what triggered it.',
-                        '- "carry_summary": a compact Chinese event-oriented paragraph that combines the previous carry summary with this chunk, for the next chunk to inherit.',
-                        '',
-                        '[Output JSON Schema]',
-                        '{',
-                        '  "batch_summary": ["..."],',
-                        '  "carry_summary": "..."',
-                        '}',
-                        '',
-                        '[Current Chunk Records]',
-                        chunkLines
-                    ].join('\n');
-                    const browseSummaryMessages = [
-                        {
-                            role: 'system',
-                            content: [
-                                'You are a dedicated temporal memory summarizer.',
-                                'You do NOT roleplay as the character.',
-                                'You do NOT continue the conversation.',
-                                'You do NOT use the latest chat topic as a hint unless it is explicitly present in the dated records below.',
-                                'Your only job is to summarize what concretely happened inside the provided dated records.'
-                            ].join('\n')
-                        },
-                        {
-                            role: 'user',
-                            content: browseSummaryPrompt
-                        }
-                    ];
-                    recordLlmDebug(character, 'input', browseSummaryMessages, {
-                        context_type: 'chat_intent_browse_summarize',
-                        planner_source: ragPlannerConfig.source,
-                        latest_user_message: recentInputString,
-                        temporal_hint: parsedDecision.temporalHint,
-                        temporal_range: browseRange,
-                        chunk_index: chunkIndex,
-                        chunk_count: memoryChunks.length
-                    });
-                    let browseSummaryResult = '';
-                    let browseSummaryUsage = null;
-                    let browseSummaryFinishReason = '';
-                    try {
-                        const result = await callLLM({
-                            endpoint: ragPlannerConfig.endpoint,
-                            key: ragPlannerConfig.key,
-                            model: ragPlannerConfig.model,
-                            messages: browseSummaryMessages,
-                            maxTokens: 2000,
-                            temperature: 0,
-                            enableCache: true,
-                            cacheDb: db,
-                            cacheType: 'chat_intent_browse_summarize',
-                            cacheTtlMs: 6 * 60 * 60 * 1000,
-                            cacheScope: `character:${character.id}`,
-                            cacheCharacterId: character.id,
-                            cacheKeyExtra: `browse:${browseRange.start}:${browseRange.end}:chunk:${chunkIndex}`,
-                            returnUsage: true,
-                            validateCachedContent: (cachedText, cachedMeta) => isValidTemporalBrowseSummaryPayload(cachedText, cachedMeta),
-                            shouldCacheResult: (resultText, resultMeta) => isValidTemporalBrowseSummaryPayload(resultText, resultMeta),
-                            debugAttempt: buildLlmAttemptRecorder(character, {
-                                context_type: 'chat_intent_browse_summarize',
-                                planner_source: ragPlannerConfig.source
-                            })
-                        });
-                        browseSummaryResult = result.content;
-                        browseSummaryUsage = result.usage;
-                        browseSummaryFinishReason = result.finishReason;
-                    } catch (e) {
-                        e.ragResume = {
-                            failedAt: 'browse_summary',
-                            latestUserMessage: recentInputString,
-                            plannerTopics,
-                            parsedDecision,
-                            browseRange,
-                            browseNextChunkIndex: chunkIndex,
-                            browseCarrySummary,
-                            browseChunkSummaries
-                        };
-                        throw e;
-                    }
-                    recordLlmDebug(character, 'output', browseSummaryResult, {
-                        context_type: 'chat_intent_browse_summarize',
-                        planner_source: ragPlannerConfig.source,
-                        latest_user_message: recentInputString,
-                        temporal_hint: parsedDecision.temporalHint,
-                        temporal_range: browseRange,
-                        chunk_index: chunkIndex,
-                        chunk_count: memoryChunks.length,
-                        finishReason: browseSummaryFinishReason || '',
-                        usage: browseSummaryUsage || null
-                    });
-                    if (browseSummaryUsage) {
-                        recordTokenUsage(character.id, 'chat_intent_browse_summarize', browseSummaryUsage);
-                        broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage: browseSummaryUsage });
-                    }
-                    if (String(browseSummaryFinishReason || '').trim() === 'length') {
-                        const error = new Error('Temporal browse summary was truncated. Please retry.');
-                        error.ragResume = {
-                            failedAt: 'browse_summary',
-                            latestUserMessage: recentInputString,
-                            plannerTopics,
-                            parsedDecision,
-                            browseRange,
-                            browseNextChunkIndex: chunkIndex,
-                            browseCarrySummary,
-                            browseChunkSummaries
-                        };
-                        throw error;
-                    }
-                    const { summary: parsedBrowseSummary, malformed: malformedBrowseSummary } = parseTemporalBrowseSummaryResult(browseSummaryResult);
-                    if (malformedBrowseSummary || !parsedBrowseSummary) {
-                        const error = new Error('Temporal browse summary was malformed. Please retry.');
-                        error.ragResume = {
-                            failedAt: 'browse_summary',
-                            latestUserMessage: recentInputString,
-                            plannerTopics,
-                            parsedDecision,
-                            browseRange,
-                            browseNextChunkIndex: chunkIndex,
-                            browseCarrySummary,
-                            browseChunkSummaries
-                        };
-                        throw error;
-                    }
-                    browseChunkSummaries.push(...parsedBrowseSummary.batchSummary);
-                    browseCarrySummary = parsedBrowseSummary.carrySummary;
-                    browseNextChunkIndex = chunkIndex + 1;
-                }
-                const temporalPartitionMessage = buildTemporalBrowseContextPartition({
-                    range: browseRange
-                });
-                const temporalBrowseMessage = formatTemporalBrowseContext({
-                    range: browseRange,
-                    condensedSummaries: browseChunkSummaries.slice(-18),
-                    carrySummary: browseCarrySummary
-                });
-                if (temporalPartitionMessage) {
-                    apiMessages.splice(1, 0, {
-                        role: 'system',
-                        content: temporalPartitionMessage
-                    });
-                }
-                if (temporalBrowseMessage) {
-                    apiMessages.splice(temporalPartitionMessage ? 2 : 1, 0, {
-                        role: 'system',
-                        content: temporalBrowseMessage
-                    });
-                }
-                if (!msgMetadata) msgMetadata = { retrievedMemories: [] };
-                msgMetadata.retrievedMemories.push(...browseMemories.map(mem => ({
-                    id: mem.id,
-                    event: mem.event,
-                    summary: mem.summary || '',
-                    content: mem.content || '',
-                    memory_focus: mem.memory_focus || '',
-                    memory_tier: mem.memory_tier || '',
-                    matched_slots: ['temporal_browse'],
-                    importance: mem.importance,
-                    time: mem.time || '',
-                    created_at: mem.created_at,
-                    last_retrieved_at: mem.last_retrieved_at,
-                    retrieval_count: mem.retrieval_count || 0,
-                    matched_query: parsedDecision.temporalHint || '',
-                    source_time_text: mem.source_time_text || '',
-                    source_started_at: mem.source_started_at || 0,
-                    source_ended_at: mem.source_ended_at || 0
-                })));
-            } else {
-                console.log(`[Engine] Temporal browse returned no dated memories for "${parsedDecision.temporalHint}".`);
-            }
-            updateRagProgress(character.id, wsClients, { currentKey: 'answer' });
-            return msgMetadata;
         }
         if (!parsedDecision.shouldSearch) {
             console.log(`[Engine] Intent: ENOUGH_CONTEXT. Skipping RAG search.`);
@@ -2135,15 +1310,8 @@ ${dynamicPromptBase}`;
             '- "queries": 1 to 6 short Chinese search phrases for semantic recall.',
             '- "filters.memory_focus" may include only: user_profile, user_current_arc, relationship, general.',
             '- "filters.memory_tier" may include only: core, active, ambient.',
-            '- "temporal_hint" is optional. Use it only when the user message contains a meaningful time constraint.',
-            '- "temporal_hint.relative_text" should preserve the original natural-language time phrase when possible, such as "三天前", "昨天", "上周三".',
-            '- "temporal_hint.absolute_start" and "temporal_hint.absolute_end" are optional Unix milliseconds when you can infer a likely absolute time range. If unsure, omit them rather than guessing wildly.',
             '- "limit" should be 2 to 6.',
             '- Prefer narrow, user-centered retrieval rather than broad generic search.',
-            '- Be highly sensitive to time expressions, dates, durations, numbers, amounts, counts, and order words.',
-            '- Preserve those constraints inside the queries whenever they matter. Do not rewrite "昨天/三天前/上周/第2次/50元/两次/几点/多久" into weaker wording like "最近/之前/一些/那次".',
-            '- If the user asks a time-anchored question, at least half of the queries should keep an explicit time anchor.',
-            '- If the user asks a number-anchored question, at least one query should keep the number or amount explicitly.',
             '',
             '[Hard Constraints]',
             '- Preserve all distinct semantic directions already inferred above. Do NOT collapse multi-topic requests into a single dimension.',
@@ -2154,7 +1322,6 @@ ${dynamicPromptBase}`;
                 ? `- Required query coverage topics: ${rewriteConstraints.requiredQueries.join(' | ')}`
                 : '- Required query coverage topics: none',
             '- If the user asks a composite question such as study + work + background, your JSON must cover multiple matching dimensions.',
-            '- Keep the original constraint sharpness. If the source wording is specific, your rewritten queries must stay specific.',
             '',
             '[Output JSON Schema]',
             '{',
@@ -2163,11 +1330,6 @@ ${dynamicPromptBase}`;
             '    "memory_focus": ["user_profile"],',
             '    "memory_tier": ["core", "active"]',
             '  },',
-            '  "temporal_hint": {',
-            '    "relative_text": "三天前",',
-            '    "absolute_start": 0,',
-            '    "absolute_end": 0',
-            '  },',
             '  "limit": 3',
             '}'
         ].filter(Boolean).join('\n');
@@ -2175,8 +1337,7 @@ ${dynamicPromptBase}`;
             recentHistory: transformedHistory,
             latestUserMessage: recentInputString,
             conversationDigest,
-            plannerInstruction: rewritePrompt,
-            topicSwitchState
+            plannerInstruction: rewritePrompt
         });
         recordLlmDebug(character, 'input', rewriteMessages, {
             context_type: 'chat_intent_rewrite',
@@ -2190,7 +1351,7 @@ ${dynamicPromptBase}`;
             return !malformed;
         };
         const runRewriteAttempt = async ({ enableCache, cacheKeyExtra = '', contextType = 'chat_intent_rewrite' } = {}) => {
-            const { content, usage, finishReason } = await callLLM({
+            const { content, usage } = await callLLM({
                 endpoint: ragPlannerConfig.endpoint,
                 key: ragPlannerConfig.key,
                 model: ragPlannerConfig.model,
@@ -2217,35 +1378,37 @@ ${dynamicPromptBase}`;
                 planner_source: ragPlannerConfig.source,
                 retrieval_label: retrievalLabel,
                 planner_topics: plannerTopics,
-                finishReason: finishReason || '',
                 usage: usage || null
             });
             if (usage) {
                 recordTokenUsage(character.id, 'chat_intent_rewrite', usage);
                 broadcastEvent(wsClients, { type: 'token_stats', character_id: character.id, module: 'chat', usage });
             }
-            return { content, usage, finishReason };
+            return { content, usage };
         };
 
         let retrievalRequest = normalizedResumeState?.retrievalRequest || null;
         if (!retrievalRequest || resumeFrom !== 'retrieve') {
-            let { content: rewriteResult, finishReason: rewriteFinishReason } = await runRewriteAttempt({
+            let { content: rewriteResult } = await runRewriteAttempt({
                 enableCache: true,
                 contextType: 'chat_intent_rewrite'
             });
-            if (String(rewriteFinishReason || '').trim() === 'length') {
-                const error = new Error('RAG rewrite output was truncated. Please retry.');
-                error.ragResume = {
-                    failedAt: 'rewrite',
-                    latestUserMessage: recentInputString,
-                    plannerTopics,
-                    parsedDecision,
-                    rewriteConstraints
-                };
-                throw error;
-            }
 
             let { request: parsedRewriteRequest, malformed: malformedRewrite } = parseStructuredRagQuery(rewriteResult, retrievalLabel, plannerTopics);
+            if (malformedRewrite) {
+                recordLlmDebug(character, 'event', 'Retrying rewrite without cache after malformed output.', {
+                    context_type: 'chat_intent_rewrite_retry',
+                    planner_source: ragPlannerConfig.source,
+                    retrieval_label: retrievalLabel,
+                    planner_topics: plannerTopics
+                });
+                ({ content: rewriteResult } = await runRewriteAttempt({
+                    enableCache: false,
+                    cacheKeyExtra: `retry:${Date.now()}`,
+                    contextType: 'chat_intent_rewrite_retry'
+                }));
+                ({ request: parsedRewriteRequest, malformed: malformedRewrite } = parseStructuredRagQuery(rewriteResult, retrievalLabel, plannerTopics));
+            }
             if (malformedRewrite) {
                 const error = new Error('RAG rewrite output was malformed. Please retry.');
                 error.ragResume = {
@@ -2273,30 +1436,13 @@ ${dynamicPromptBase}`;
             retrievalLabel,
             latestUserMessage: recentInputString
         });
-        recordLlmDebug(character, 'event', 'Starting structured memory retrieval.', {
-            context_type: 'chat_intent_retrieve',
-            planner_source: ragPlannerConfig.source,
-            retrieval_label: retrievalLabel,
-            planner_topics: plannerTopics,
-            retrieval_request: retrievalRequest,
-            retrieval_slots: retrievalSlots
-        });
         let dynamicMemories;
         try {
             dynamicMemories = await executeMultiSlotMemorySearch(
                 memory,
                 character.id,
                 retrievalRequest,
-                retrievalSlots,
-                async (progress) => {
-                    recordLlmDebug(character, 'event', `Structured memory retrieval ${progress.phase}.`, {
-                        context_type: 'chat_intent_retrieve_slot',
-                        planner_source: ragPlannerConfig.source,
-                        retrieval_label: retrievalLabel,
-                        planner_topics: plannerTopics,
-                        ...progress
-                    });
-                }
+                retrievalSlots
             );
         } catch (e) {
             e.ragResume = {
@@ -2309,16 +1455,8 @@ ${dynamicPromptBase}`;
             };
             throw e;
         }
-        recordLlmDebug(character, 'event', 'Structured memory retrieval finished.', {
-            context_type: 'chat_intent_retrieve',
-            planner_source: ragPlannerConfig.source,
-            retrieval_label: retrievalLabel,
-            planner_topics: plannerTopics,
-            retrieved_count: Array.isArray(dynamicMemories) ? dynamicMemories.length : 0
-        });
         if (dynamicMemories && dynamicMemories.length > 0) {
             const querySummary = Array.isArray(retrievalRequest.queries) ? retrievalRequest.queries.join(' | ') : retrievalLabel;
-            const currentAbsoluteTime = new Date().toLocaleString();
             const formattedMemories = dynamicMemories.map((m, index) => {
                 const summary = String(m.summary || m.event || '').trim();
                 const content = String(m.content || '').trim();
@@ -2328,24 +1466,15 @@ ${dynamicPromptBase}`;
                 const matchedSlots = Array.isArray(m._matched_slots) ? m._matched_slots.filter(Boolean) : [];
                 const memoryTime = String(m.time || '').trim();
                 const sourceTimeText = String(m.source_time_text || '').trim();
-                const sourceStartedAt = Number(m.source_started_at || 0);
-                const sourceEndedAt = Number(m.source_ended_at || 0);
                 const lines = [
                     `Memory ${index + 1}: ${summary || m.event || `memory_${index + 1}`}`
                 ];
-                lines.push(`Current Time Now: ${currentAbsoluteTime}`);
-                lines.push('Timeline Rule: Compare the memory time with the current time above before using it. This is recalled memory, not something automatically happening right now.');
+                lines.push('Timeline: This is a recalled past event or older memory, not something automatically happening right now.');
                 if (memoryTime) {
                     lines.push(`Event Time: ${memoryTime}`);
                 }
                 if (sourceTimeText) {
                     lines.push(`Source Dialogue Time: ${sourceTimeText}`);
-                }
-                if (sourceStartedAt > 0) {
-                    lines.push(`Source Absolute Start: ${new Date(sourceStartedAt).toLocaleString()}`);
-                }
-                if (sourceEndedAt > 0) {
-                    lines.push(`Source Absolute End: ${new Date(sourceEndedAt).toLocaleString()}`);
                 }
                 if (content && content !== summary) {
                     lines.push(`Details: ${content}`);
@@ -2361,11 +1490,8 @@ ${dynamicPromptBase}`;
                 }
                 return lines.join('\n');
             }).join('\n\n');
-            const sysInjection = `\n[SYSTEM: You successfully retrieved memories related to "${querySummary}". ` +
-                `Current Time Now: ${currentAbsoluteTime}. ` +
-                `You must compare the current time with each memory's Event Time / Source Dialogue Time / Source Absolute Time before using it. ` +
-                `Treat the memory summaries and details below as factual recall anchors from the past, with their own timestamps. They are not automatically the current moment, and they are not permanent character settings unless the memory explicitly says so. ` +
-                `A recalled memory may be recent or old; decide that from the time labels, not by guessing. ` +
+            const sysInjection = `\n[SYSTEM: You successfully retrieved older memories related to "${querySummary}". ` +
+                `Treat the memory summaries and details below as factual recall anchors from the past. They are not automatically the current moment, and they are not permanent character settings unless the memory explicitly says so. ` +
                 `If any recalled memory conflicts with the user's newest message or the latest visible conversation, trust the newest conversation first. ` +
                 `When answering, prefer these concrete facts over vague emotional generalization.]\n`
                 + formattedMemories
@@ -2478,59 +1604,15 @@ ${dynamicPromptBase}`;
             });
 
             if (isUserReply && !extraSystemDirective) {
-                updateRagProgress(character.id, wsClients, { currentKey: 'switch' });
-            }
-
-            const topicSwitchState = (isUserReply && !extraSystemDirective)
-                ? await (async () => {
-                    try {
-                        return await runTopicSwitchGate({
-                            character: charCheck,
-                            transformedHistory,
-                            conversationDigest,
-                            recentInputString
-                        });
-                    } catch (switchErr) {
-                        const rawMessage = String(switchErr?.message || 'Unknown topic switch gate error');
-                        console.error('[Engine] Topic switch gate failed:', rawMessage);
-                        setRagFailureState(character.id, {
-                            characterId: character.id,
-                            latestUserMessage: recentInputString,
-                            ...(switchErr?.ragResume || { failedAt: 'switch', latestUserMessage: recentInputString })
-                        });
-                        updateRagProgress(character.id, wsClients, {
-                            currentKey: 'answer',
-                            status: 'error'
-                        });
-                        throw switchErr;
-                    }
-                })()
-                : null;
-
-            if (isUserReply && !extraSystemDirective) {
-                updateRagProgress(character.id, wsClients, { currentKey: 'route' });
-            }
-
-            const {
-                prompt: systemPrompt,
-                promptWithoutDigest,
-                stablePromptBlock,
-                dynamicPromptBlock,
-                dynamicPromptWithoutDigest,
-                retrievedMemoriesContext,
-                promptStats
-            } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
-                conversationDigest,
-                antiRepeatMessages: contextHistory,
-                recentInputString,
-                topicSwitchState
-            });
-            if (isUserReply && !extraSystemDirective) {
                 updateRagProgress(character.id, wsClients, { currentKey: 'topics' });
             }
+
+            const { prompt: systemPrompt, retrievedMemoriesContext } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
+                conversationDigest,
+                antiRepeatMessages: contextHistory
+            });
             const apiMessages = [
-                { role: 'system', content: stablePromptBlock || systemPrompt },
-                ...(dynamicPromptBlock ? [{ role: 'system', content: dynamicPromptBlock }] : []),
+                { role: 'system', content: systemPrompt },
                 ...transformedHistory
             ];
 
@@ -2555,7 +1637,6 @@ ${dynamicPromptBase}`;
                         transformedHistory,
                         recentInputString,
                         conversationDigest,
-                        topicSwitchState,
                         wsClients,
                         apiMessages,
                         msgMetadata,
@@ -2585,44 +1666,6 @@ ${dynamicPromptBase}`;
                 updateRagProgress(character.id, wsClients, { currentKey: 'answer' });
             }
 
-            const currentBreakdown = { ...(promptStats?.universalBreakdown || {}) };
-            const estimatedHistoryTokens = estimateMessageTokens(transformedHistory);
-            const estimatedFullHistoryTokens = estimateMessageTokens(
-                (Array.isArray(contextHistory) ? contextHistory : []).map(m => ({
-                    role: m?.role === 'character' ? 'assistant' : 'user',
-                    content: String(m?.content || '')
-                }))
-            );
-            const estimatedMessageEnvelopeTokens = 8 + (Array.isArray(transformedHistory) ? transformedHistory.length * 2 : 0);
-            const estimatedFullMessageEnvelopeTokens = 8 + (Array.isArray(contextHistory) ? contextHistory.length * 2 : 0);
-            const estimatedSystemPromptTokens = getTokenCount(systemPrompt);
-            const estimatedSystemPromptWithoutDigestTokens = getTokenCount(promptWithoutDigest || systemPrompt);
-            const estimatedWithoutCacheTokens = estimatedSystemPromptWithoutDigestTokens + estimatedFullHistoryTokens + estimatedFullMessageEnvelopeTokens;
-            const estimatedWithCacheTokens = estimatedSystemPromptTokens + estimatedHistoryTokens + estimatedMessageEnvelopeTokens;
-            const estimatedRagInjectedTokens = Math.max(0, Number(currentBreakdown.z_memory || 0));
-            const lastRequestContextSnapshot = {
-                estimated_without_cache_tokens: estimatedWithoutCacheTokens,
-                estimated_with_cache_tokens: estimatedWithCacheTokens,
-                estimated_rag_injected_tokens: estimatedRagInjectedTokens,
-                estimated_history_tokens: estimatedHistoryTokens,
-                estimated_full_history_tokens: estimatedFullHistoryTokens,
-                estimated_message_envelope_tokens: estimatedMessageEnvelopeTokens,
-                estimated_full_message_envelope_tokens: estimatedFullMessageEnvelopeTokens,
-                estimated_system_prompt_tokens: estimatedSystemPromptTokens,
-                estimated_system_prompt_without_digest_tokens: estimatedSystemPromptWithoutDigestTokens,
-                breakdown: currentBreakdown,
-                module_routes: { ...(promptStats?.moduleRoutes || {}) },
-                topic_switch: topicSwitchState ? {
-                    decision: String(topicSwitchState.decision || '').trim() || 'CONTINUE_CURRENT_TOPIC',
-                    reason: String(topicSwitchState.reason || '').trim() || 'unspecified',
-                    fallback: !!topicSwitchState.fallback
-                } : null,
-                context_msg_limit: Number(charCheck.context_msg_limit || 0),
-                live_history_window_size: Number(liveHistory.length || 0),
-                visible_history_count: Number(contextHistory.length || 0),
-                timestamp: Date.now()
-            };
-
             recordLlmDebug(charCheck, 'input', apiMessages, {
                 context_type: isUserReply ? 'private_reply' : (isTimerWakeup ? 'timer_wakeup' : 'proactive'),
                 isUserReply,
@@ -2632,26 +1675,14 @@ ${dynamicPromptBase}`;
                 maxTokens: charCheck.max_tokens || 2000,
                 model: charCheck.model_name,
                 presencePenalty: isUserReply ? 0.35 : 0,
-                frequencyPenalty: isUserReply ? 0.45 : 0,
-                context_snapshot: isUserReply ? lastRequestContextSnapshot : null
+                frequencyPenalty: isUserReply ? 0.45 : 0
             });
-            const uncachedApiMessages = isUserReply
-                ? [
-                    { role: 'system', content: stablePromptBlock || promptWithoutDigest || systemPrompt },
-                    ...(dynamicPromptWithoutDigest ? [{ role: 'system', content: dynamicPromptWithoutDigest }] : []),
-                    ...(Array.isArray(contextHistory) ? contextHistory : []).map(m => ({
-                        role: m?.role === 'character' ? 'assistant' : 'user',
-                        content: String(m?.content || '')
-                    }))
-                ]
-                : null;
 
             let { content: generatedText, usage, finishReason } = await callLLM({
                 endpoint: character.api_endpoint,
                 key: character.api_key,
                 model: character.model_name,
                 messages: apiMessages,
-                uncachedMessages: uncachedApiMessages,
                 maxTokens: character.max_tokens || 2000,
                 presencePenalty: isUserReply ? 0.35 : 0,
                 frequencyPenalty: isUserReply ? 0.45 : 0,
@@ -2663,7 +1694,6 @@ ${dynamicPromptBase}`;
                 cacheCharacterId: character.id,
                 cacheKeyMode: 'private_prefix',
                 enablePromptCacheHints: !!isUserReply,
-                promptCacheHintMode: 'stable_system_only',
                 returnUsage: true,
                 debugAttempt: buildLlmAttemptRecorder(character, {
                     context_type: isUserReply ? 'private_reply' : (isTimerWakeup ? 'timer_wakeup' : 'proactive')
@@ -2671,52 +1701,42 @@ ${dynamicPromptBase}`;
             });
 
             if ((finishReason === 'length' || looksPrematurelyCutOff(generatedText)) && generatedText) {
-                const continuationMaxAttempts = 3;
-                const continuationMaxTokens = Math.min(character.max_tokens || 2000, 800);
-                for (let continuationIndex = 0; continuationIndex < continuationMaxAttempts; continuationIndex++) {
-                    try {
-                        const continuation = await callLLM({
-                            endpoint: character.api_endpoint,
-                            key: character.api_key,
-                            model: character.model_name,
-                            messages: [
-                                ...apiMessages,
-                                { role: 'assistant', content: generatedText },
-                                { role: 'user', content: '[系统续写] 你上一条消息被截断了。不要重说前文，只把刚才没说完的那句话自然续完并收尾。输出纯文本。' }
-                            ],
-                            maxTokens: continuationMaxTokens,
-                            presencePenalty: isUserReply ? 0.2 : 0,
-                            frequencyPenalty: isUserReply ? 0.3 : 0,
-                            enableCache: !!isUserReply,
-                            cacheDb: db,
-                            cacheType: 'private_chat_reply_continuation',
-                            cacheTtlMs: 24 * 60 * 60 * 1000,
-                            cacheScope: `character:${character.id}`,
-                            cacheCharacterId: character.id,
-                            cacheKeyMode: 'private_prefix',
-                            enablePromptCacheHints: !!isUserReply,
-                            promptCacheHintMode: 'stable_system_only',
-                            returnUsage: true,
-                            debugAttempt: buildLlmAttemptRecorder(character, {
-                                context_type: 'private_reply_continuation'
-                            })
-                        });
-                        const continuationText = String(continuation?.content || '').trim();
-                        if (!continuationText) break;
-                        generatedText = `${generatedText}${continuationText}`.trim();
+                try {
+                    const continuation = await callLLM({
+                        endpoint: character.api_endpoint,
+                        key: character.api_key,
+                        model: character.model_name,
+                        messages: [
+                            ...apiMessages,
+                            { role: 'assistant', content: generatedText },
+                            { role: 'user', content: '[系统续写] 你上一条消息被截断了。不要重说前文，只把刚才没说完的那句话自然续完并收尾。输出纯文本。' }
+                        ],
+                        maxTokens: Math.min(character.max_tokens || 2000, 300),
+                        presencePenalty: isUserReply ? 0.2 : 0,
+                        frequencyPenalty: isUserReply ? 0.3 : 0,
+                        enableCache: !!isUserReply,
+                        cacheDb: db,
+                        cacheType: 'private_chat_reply_continuation',
+                        cacheTtlMs: 24 * 60 * 60 * 1000,
+                        cacheScope: `character:${character.id}`,
+                        cacheCharacterId: character.id,
+                        cacheKeyMode: 'private_prefix',
+                        enablePromptCacheHints: !!isUserReply,
+                        returnUsage: true,
+                        debugAttempt: buildLlmAttemptRecorder(character, {
+                            context_type: 'private_reply_continuation'
+                        })
+                    });
+                    if (continuation?.content) {
+                        generatedText = `${generatedText}${continuation.content.startsWith('\n') ? '' : ''}${continuation.content}`.trim();
                         if (continuation.usage) {
                             usage = usage || { prompt_tokens: 0, completion_tokens: 0 };
                             usage.prompt_tokens = (usage.prompt_tokens || 0) + (continuation.usage.prompt_tokens || 0);
                             usage.completion_tokens = (usage.completion_tokens || 0) + (continuation.usage.completion_tokens || 0);
                         }
-                        finishReason = continuation.finishReason || finishReason;
-                        if (!(finishReason === 'length' || looksPrematurelyCutOff(generatedText))) {
-                            break;
-                        }
-                    } catch (continuationErr) {
-                        console.warn(`[Engine] Continuation failed for ${character.name}: ${continuationErr.message}`);
-                        break;
                     }
+                } catch (continuationErr) {
+                    console.warn(`[Engine] Continuation failed for ${character.name}: ${continuationErr.message}`);
                 }
             }
 
@@ -3150,9 +2170,6 @@ ${dynamicPromptBase}`;
                 id: msgId, character_id: character.id, role: 'system',
                 content: `[System] API Error: ${errText}`, timestamp: msgTs
             });
-            if (generationOptions?.propagateError) {
-                throw e;
-            }
         }
 
         // Re-fetch fresh character data for scheduling (status/interval/pressure may have changed during LLM call)
@@ -3199,17 +2216,8 @@ ${dynamicPromptBase}`;
         console.log(`[Engine] Next message for ${character.name} scheduled in ${Math.round(delay / 60000)} minutes. ${exactDelayMs ? '(Self-Scheduled)' : ''}`);
 
         const timerId = setTimeout(() => {
-            console.log(`[DEBUG] Timeout fired for ${character.name}! Queueing proactive trigger.`);
-            queueEngineTask(
-                `char:${character.id}`,
-                () => triggerMessage(character, wsClients, false, !!exactDelayMs),
-                {
-                    dedupeKey: `proactive:${character.id}`,
-                    maxPending: 1
-                }
-            ).catch(err => {
-                console.error(`[Engine] Failed to run proactive task for ${character.name}:`, err.message);
-            });
+            console.log(`[DEBUG] Timeout fired for ${character.name}! Executing triggerMessage.`);
+            triggerMessage(character, wsClients, false, !!exactDelayMs);
         }, delay);
 
         timers.set(character.id, {
@@ -3232,14 +2240,6 @@ ${dynamicPromptBase}`;
 
     // Loop through all active characters and start their engines
     function startEngine(wsClients) {
-        if (PRIVATE_AUTONOMY_DISABLED) {
-            if (!loggedPrivateAutonomyDisabled) {
-                console.warn('[Engine] Private proactive timers are disabled by CP_PRIVATE_AUTONOMY=0.');
-                loggedPrivateAutonomyDisabled = true;
-            }
-            broadcastEngineState(wsClients);
-            return;
-        }
         console.log('[Engine] Starting background timers...');
         const characters = db.getCharacters();
         for (const char of characters) {
@@ -3348,22 +2348,6 @@ ${dynamicPromptBase}`;
         stopTimer(characterId);
     }
 
-    async function triggerImmediateUserReply(characterId, wsClients, options = {}) {
-        const freshChar = db.getCharacter(characterId);
-        if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) {
-            throw new Error('角色不可用');
-        }
-        stopTimer(characterId);
-        await triggerMessage(
-            freshChar,
-            wsClients,
-            true,
-            false,
-            options?.extraSystemDirective || null,
-            options || {}
-        );
-    }
-
     /**
      * Iterates through all other active characters. Gives them a chance to trigger a jealousy message
      * since the user is currently talking to someone else.
@@ -3390,18 +2374,7 @@ ${dynamicPromptBase}`;
                     setTimeout(() => {
                         // Re-fetch to get updated jealousy_level
                         const freshChar = db.getCharacter(char.id);
-                        if (freshChar) {
-                            queueEngineTask(
-                                `char:${freshChar.id}`,
-                                () => triggerJealousyMessage(freshChar, wsClients, activeCharacterId),
-                                {
-                                    dedupeKey: `jealousy:${freshChar.id}`,
-                                    maxPending: 1
-                                }
-                            ).catch(err => {
-                                console.error(`[Engine] Failed to run jealousy task for ${freshChar.name}:`, err.message);
-                            });
-                        }
+                        if (freshChar) triggerJealousyMessage(freshChar, wsClients, activeCharacterId);
                     }, delayMs);
                 }
             }
@@ -3474,7 +2447,6 @@ ${dynamicPromptBase}`;
     }
 
     function scheduleGroupProactive(groupId, wsClients) {
-        if (GROUP_AUTONOMY_DISABLED) return;
         stopGroupProactiveTimer(groupId);
         const profile = db.getUserProfile();
         if (!profile?.group_proactive_enabled) return;
@@ -3484,18 +2456,7 @@ ${dynamicPromptBase}`;
         const delay = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
 
         console.log(`[GroupProactive] Group ${groupId}: next fire in ${Math.round(delay / 60000)} min`);
-        const handle = setTimeout(() => {
-            queueEngineTask(
-                `group:${groupId}`,
-                () => triggerGroupProactive(groupId, wsClients),
-                {
-                    dedupeKey: `group-proactive:${groupId}`,
-                    maxPending: 1
-                }
-            ).catch(err => {
-                console.error(`[Engine] Failed to run group proactive task for ${groupId}:`, err.message);
-            });
-        }, delay);
+        const handle = setTimeout(() => triggerGroupProactive(groupId, wsClients), delay);
         groupProactiveTimers.set(groupId, handle);
     }
 
@@ -3585,13 +2546,6 @@ ${dynamicPromptBase}`;
     }
 
     function startGroupProactiveTimers(wsClients) {
-        if (GROUP_AUTONOMY_DISABLED) {
-            if (!loggedGroupAutonomyDisabled) {
-                console.warn('[Engine] Group proactive timers are disabled by CP_GROUP_AUTONOMY=0.');
-                loggedGroupAutonomyDisabled = true;
-            }
-            return;
-        }
         const groups = db.getGroups();
         for (const g of groups) {
             scheduleGroupProactive(g.id, wsClients);
@@ -3618,7 +2572,6 @@ ${dynamicPromptBase}`;
         startEngine,
         stopTimer,
         handleUserMessage,
-        triggerImmediateUserReply,
         broadcastNewMessage,
         broadcastEvent,
         broadcastWalletSync,

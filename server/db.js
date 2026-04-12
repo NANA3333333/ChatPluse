@@ -3,9 +3,13 @@ const path = require('path');
 const fs = require('fs');
 
 const userDbCache = new Map();
+const deletingUserDbIds = new Set();
 
 function getUserDb(userId) {
     if (!userId) throw new Error("getUserDb requires a valid userId");
+    if (deletingUserDbIds.has(String(userId))) {
+        throw new Error(`User DB is being deleted: ${userId}`);
+    }
     if (userDbCache.has(userId)) return userDbCache.get(userId);
 
     const dataDir = path.join(__dirname, '..', 'data');
@@ -1268,6 +1272,11 @@ function getUserDb(userId) {
         db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
     }
 
+    function getMessageCharacterId(messageId) {
+        const row = db.prepare('SELECT character_id FROM messages WHERE id = ? LIMIT 1').get(messageId);
+        return row?.character_id || null;
+    }
+
     function markMessagesRead(characterId) {
         db.prepare('UPDATE messages SET read = 1 WHERE character_id = ? AND read = 0 AND role = ?')
             .run(characterId, 'character');
@@ -1280,8 +1289,18 @@ function getUserDb(userId) {
 
     function clearMessages(characterId) {
         db.prepare('DELETE FROM messages WHERE character_id = ?').run(characterId);
-        db.prepare('DELETE FROM history_window_cache WHERE character_id = ?').run(characterId);
-        db.prepare('DELETE FROM conversation_digest_cache WHERE character_id = ?').run(characterId);
+        clearCharacterMessageCaches(characterId);
+    }
+
+    function clearCharacterMessageCaches(characterId) {
+        const id = String(characterId || '').trim();
+        if (!id) return 0;
+        let changes = 0;
+        changes += db.prepare('DELETE FROM history_window_cache WHERE character_id = ?').run(id).changes || 0;
+        changes += db.prepare('DELETE FROM conversation_digest_cache WHERE character_id = ?').run(id).changes || 0;
+        changes += db.prepare('DELETE FROM prompt_block_cache WHERE character_id = ?').run(id).changes || 0;
+        changes += db.prepare('DELETE FROM llm_cache WHERE character_id = ? OR cache_scope = ?').run(id, `character:${id}`).changes || 0;
+        return changes;
     }
 
     function clearMemories(characterId) {
@@ -1338,6 +1357,28 @@ function getUserDb(userId) {
                 COALESCE(updated_at, created_at) DESC,
                 created_at DESC
         `).all(characterId);
+        return rows.map(normalizeMemoryRow);
+    }
+
+    function getMemoriesByTimeRange(characterId, startTimestamp, endTimestamp, limit = 80) {
+        const safeStart = Number(startTimestamp || 0);
+        const safeEnd = Number(endTimestamp || 0);
+        const safeLimit = Math.max(1, Math.min(200, Number(limit || 80) || 80));
+        if (!characterId || safeStart <= 0 || safeEnd <= 0) return [];
+        const rangeStart = Math.min(safeStart, safeEnd);
+        const rangeEnd = Math.max(safeStart, safeEnd);
+        const rows = db.prepare(`
+            SELECT * FROM memories
+            WHERE character_id = ?
+              AND COALESCE(is_archived, 0) = 0
+              AND COALESCE(source_started_at, created_at, 0) <= ?
+              AND COALESCE(source_ended_at, source_started_at, created_at, 0) >= ?
+            ORDER BY
+                COALESCE(source_started_at, created_at) ASC,
+                COALESCE(source_ended_at, source_started_at, created_at) ASC,
+                created_at ASC
+            LIMIT ?
+        `).all(characterId, rangeEnd, rangeStart, safeLimit);
         return rows.map(normalizeMemoryRow);
     }
 
@@ -2791,7 +2832,9 @@ function getUserDb(userId) {
         deleteMessage,
         markMessagesRead,
         getUnreadCount,
+        getMessageCharacterId,
         clearMessages,
+        clearCharacterMessageCaches,
         clearMemories,
         clearMoments,
         clearDiaries,
@@ -2799,6 +2842,7 @@ function getUserDb(userId) {
         clearGroupConversationDigest,
         exportCharacterData,
         getMemories,
+        getMemoriesByTimeRange,
         getMemory,
         getMemoryByDedupeKey,
         addMemory,
@@ -2900,4 +2944,24 @@ function getUserDb(userId) {
     return dbInstance;
 }
 
-module.exports = { getUserDb, userDbCache };
+function markUserDbDeleting(userId) {
+    if (!userId) return;
+    deletingUserDbIds.add(String(userId));
+}
+
+function unmarkUserDbDeleting(userId) {
+    if (!userId) return;
+    deletingUserDbIds.delete(String(userId));
+}
+
+function isUserDbDeleting(userId) {
+    return deletingUserDbIds.has(String(userId));
+}
+
+module.exports = {
+    getUserDb,
+    userDbCache,
+    markUserDbDeleting,
+    unmarkUserDbDeleting,
+    isUserDbDeleting
+};

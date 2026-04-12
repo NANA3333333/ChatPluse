@@ -12,7 +12,29 @@ const { getAdaptiveTailWindowSize } = require('./utils/contextWindow');
 const { getEmotionBehaviorGuidance } = require('./emotion');
 const crypto = require('crypto');
 const { callLLM } = require('./llm');
-const { classifyCityIntentSemantic } = require('./semanticIntent');
+
+function previewText(value, maxLen = 1200) {
+    const text = String(value || '');
+    if (text.length <= maxLen) return text;
+    return `${text.slice(0, maxLen)}...<truncated>`;
+}
+
+function recordContextRouteDebug(db, character, direction, payload, meta = {}) {
+    if (!character || character.llm_debug_capture !== 1 || typeof db?.addLlmDebugLog !== 'function') return;
+    try {
+        const normalizedPayload = typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2);
+        db.addLlmDebugLog({
+            character_id: character.id,
+            direction,
+            context_type: meta.context_type || 'context_module_router',
+            payload: normalizedPayload || '',
+            meta,
+            timestamp: Date.now()
+        });
+    } catch (e) {
+        console.warn(`[ContextBuilder] Failed to record route debug for ${character?.name || character?.id}: ${e.message}`);
+    }
+}
 
 function getCachedContextBlock(db, characterId, blockType, sourceParts, compileFn) {
     const sourceText = JSON.stringify(sourceParts || {});
@@ -50,30 +72,39 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
     const text = String(recentInput || '').trim();
     if (!text) return false;
 
-    const explicitCityRegex = /(商业街|活动记录|打工|工厂|餐馆|饭店|便利店|公园|学校|街道|今天去哪了|去哪了|出门|上班|下班|工作地点|逛街|最近在干嘛|刚刚在干嘛|在忙什么|为什么这么累|为什么这么忙|为什么没回|去哪吃|吃了什么|吃火锅|白粥|医院|输液|住院|看病|体力|热量|饥饿|送了|送你|礼物|收到了什么|回家了|回家|在家|回宿舍|病房|诊所|挂点滴)/;
-    if (explicitCityRegex.test(text)) return true;
-
-    const semanticResult = await classifyCityIntentSemantic(text);
-    if (semanticResult.decision === 'yes') return true;
-    if (semanticResult.decision === 'no') return false;
-
     const endpoint = character?.memory_api_endpoint || character?.api_endpoint || '';
     const key = character?.memory_api_key || character?.api_key || '';
     const model = character?.memory_model_name || character?.model_name || '';
     if (!endpoint || !key || !model) {
-        return semanticResult.cityScore >= semanticResult.nonCityScore;
+        recordContextRouteDebug(db, character, 'event', 'City intent routing skipped: missing model config.', {
+            context_type: 'semantic_city_intent',
+            skipped: true,
+            reason: 'missing_model_config',
+            recent_input: text
+        });
+        return false;
     }
 
-    try {
-        const judgePrompt = [
-            '判断用户这句话是不是在问角色的“商业街/真实生活内容”。',
-            '这里的“商业街/真实生活内容”不只包括去了哪，也包括角色最近做了什么、吃了什么、忙什么、为什么累/饿/困/没回消息、住院/输液/看病、收到或送出礼物、当前现实处境和拟人状态来源。',
-            '只要用户在追问角色现实生活中的经历、行动、处境、身体状态来源、礼物流转、最近现实轨迹，回答 YES。',
-            '只有当用户纯粹是在普通安抚、调情、观点讨论、抽象情绪确认、闲聊，而且不需要借助现实生活记录解释时，才回答 NO。',
-            '只能输出 YES 或 NO。'
-        ].join('\n');
+    const judgePrompt = [
+        '判断用户这句话是不是在问角色的“商业街/真实生活内容”。',
+        '这里的“商业街/真实生活内容”不只包括去了哪，也包括角色最近做了什么、吃了什么、忙什么、为什么累/饿/困/没回消息、住院/输液/看病、收到或送出礼物、当前现实处境和拟人状态来源。',
+        '只要用户在追问角色现实生活中的经历、行动、处境、身体状态来源、礼物流转、最近现实轨迹，回答 YES。',
+        '只有当用户纯粹是在普通安抚、调情、观点讨论、抽象情绪确认、闲聊，而且不需要借助现实生活记录解释时，才回答 NO。',
+        '只能输出 YES 或 NO。'
+    ].join('\n');
 
-        const { content } = await callLLM({
+    recordContextRouteDebug(db, character, 'input', {
+        recent_input: text,
+        judge_prompt: judgePrompt
+    }, {
+        context_type: 'semantic_city_intent',
+        model,
+        endpoint,
+        cache_type: 'semantic_city_intent'
+    });
+
+    try {
+        const result = await callLLM({
             endpoint,
             key,
             model,
@@ -90,12 +121,65 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
             cacheKeyExtra: 'v4',
-            cacheKeyMode: 'exact'
+            cacheKeyMode: 'exact',
+            returnUsage: true
         });
-        return /^yes\b/i.test(String(content || '').trim());
+        const content = typeof result === 'string' ? result : result?.content;
+        const normalizedContent = String(content || '').trim();
+        const finishReason = String(result?.finishReason || '').trim();
+        if (finishReason === 'length') {
+            const routeErr = new Error('Semantic city intent output was truncated. Please retry.');
+            recordContextRouteDebug(db, character, 'event', normalizedContent, {
+                context_type: 'semantic_city_intent',
+                error: true,
+                recent_input: text,
+                model,
+                endpoint,
+                reason: 'semantic_city_intent_truncated',
+                finishReason,
+                cached: !!result?.cached,
+                usage: result?.usage || null
+            });
+            throw routeErr;
+        }
+        if (!/^(yes|no)\b/i.test(normalizedContent)) {
+            const routeErr = new Error('Semantic city intent output was malformed. Please retry.');
+            recordContextRouteDebug(db, character, 'event', normalizedContent, {
+                context_type: 'semantic_city_intent',
+                error: true,
+                recent_input: text,
+                model,
+                endpoint,
+                reason: 'semantic_city_intent_malformed',
+                finishReason,
+                cached: !!result?.cached,
+                usage: result?.usage || null
+            });
+            throw routeErr;
+        }
+        const decision = /^yes\b/i.test(normalizedContent);
+        recordContextRouteDebug(db, character, 'output', String(content || ''), {
+            context_type: 'semantic_city_intent',
+            model,
+            endpoint,
+            cache_type: 'semantic_city_intent',
+            decision,
+            cached: !!result?.cached,
+            finishReason,
+            usage: result?.usage || null
+        });
+        return decision;
     } catch (e) {
         console.warn('[ContextBuilder] City intent model fallback failed:', e.message);
-        return semanticResult.cityScore >= semanticResult.nonCityScore;
+        recordContextRouteDebug(db, character, 'event', previewText(e.message, 400), {
+            context_type: 'semantic_city_intent',
+            error: true,
+            recent_input: text,
+            model,
+            endpoint,
+            reason: e.message || 'unknown_error'
+        });
+        throw e;
     }
 }
 
@@ -116,13 +200,68 @@ function parseModuleRouteJson(rawText = '') {
     } catch (e) {
         const readBit = (key) => {
             const match = candidate.match(new RegExp(`"${key}"\\s*:\\s*([01])`, 'i'));
-            return match && match[1] === '1' ? 1 : 0;
+            if (!match) return null;
+            return match[1] === '1' ? 1 : 0;
         };
+        const city = readBit('city_detail');
+        const school = readBit('school_detail');
+        const society = readBit('society_detail');
+        if (city === null || school === null || society === null) return null;
         return {
-            city_detail: readBit('city_detail'),
-            school_detail: readBit('school_detail'),
-            society_detail: readBit('society_detail')
+            city_detail: city,
+            school_detail: school,
+            society_detail: society
         };
+    }
+}
+
+function isValidModuleRoutePayload(rawText = '') {
+    return !!parseModuleRouteJson(rawText);
+}
+
+function buildRecentPrivateRouteContext(db, character, maxItems = 6) {
+    if (!db || typeof db.getVisibleMessages !== 'function' || !character?.id) return '';
+    try {
+        const rows = db.getVisibleMessages(character.id, Math.max(1, maxItems)) || [];
+        if (!Array.isArray(rows) || rows.length === 0) return '';
+        const lines = rows.slice(-maxItems).map(row => {
+            const role = row?.role === 'character' ? '角色' : '用户';
+            return `${role}: ${String(row?.content || '').trim()}`;
+        }).filter(Boolean);
+        if (lines.length === 0) return '';
+        return ['[最近私聊窗口]', ...lines].join('\n');
+    } catch (e) {
+        console.warn('[ContextBuilder] Failed to build recent private route context:', e.message);
+        return '';
+    }
+}
+
+function buildRecentCityRouteContext(db, character, maxItems = 5) {
+    if (!db || !character?.id) return '';
+    try {
+        if (!db.city) {
+            try {
+                const initCityDb = require('./plugins/city/cityDb');
+                db.city = initCityDb(typeof db.getRawDb === 'function' ? db.getRawDb() : db);
+            } catch (e) { /* ignore */ }
+        }
+        if (!db.city || typeof db.city.getCharacterRecentLogs !== 'function') return '';
+        const rows = db.city.getCharacterRecentLogs(character.id, Math.max(1, maxItems)) || [];
+        if (!Array.isArray(rows) || rows.length === 0) return '';
+        const lines = rows.slice(0, maxItems).map((row, index) => {
+            const location = String(row?.location || '').trim();
+            const actionType = String(row?.action_type || '').trim();
+            const message = String(row?.message || '').trim();
+            const parts = [`${index + 1}. ${message}`];
+            if (location) parts.push(`地点=${location}`);
+            if (actionType) parts.push(`类型=${actionType}`);
+            return parts.join(' | ');
+        }).filter(Boolean);
+        if (lines.length === 0) return '';
+        return ['[最近商业街记录]', ...lines].join('\n');
+    } catch (e) {
+        console.warn('[ContextBuilder] Failed to build recent city route context:', e.message);
+        return '';
     }
 }
 
@@ -134,63 +273,70 @@ async function routeContextModules(db, character, recentInput = '') {
         society_detail: 0
     };
 
-    if (!text) return defaultRoutes;
-
-    const schoolRegex = /(学校|上课|下课|老师|同学|考试|作业|校园|宿舍|教室)/;
-    const societyRegex = /(公司|老板|同事|客户|部门|项目|实习|上班|工作|开会|社会关系|职位)/;
-    const cityLifeRegex = /(商业街|活动记录|最近在干嘛|刚刚在干嘛|在忙什么|去了哪|去哪了|出门|逛街|上班|下班|打工|工厂|餐馆|饭店|便利店|公园|街道|工作地点|为什么这么累|为什么这么忙|为什么没回|为什么饿|为什么困|体力|热量|饥饿|吃了什么|吃火锅|白粥|医院|输液|住院|看病|送了|送你|礼物|收到了什么|回家了|回家|在家|回宿舍|病房|诊所|挂点滴)/;
-
-    if (schoolRegex.test(text)) defaultRoutes.school_detail = 1;
-    if (societyRegex.test(text)) defaultRoutes.society_detail = 1;
-    if (cityLifeRegex.test(text)) defaultRoutes.city_detail = 1;
-
-    const cityIntent = await didUserAskAboutCity(db, character, text);
-    defaultRoutes.city_detail = (defaultRoutes.city_detail === 1 || cityIntent) ? 1 : 0;
+    if (!text) {
+        recordContextRouteDebug(db, character, 'event', 'Module routing skipped: empty recent input.', {
+            context_type: 'context_module_router',
+            skipped: true,
+            reason: 'empty_recent_input'
+        });
+        return defaultRoutes;
+    }
 
     const endpoint = character?.memory_api_endpoint || character?.api_endpoint || '';
     const key = character?.memory_api_key || character?.api_key || '';
     const model = character?.memory_model_name || character?.model_name || '';
     if (!endpoint || !key || !model) {
+        recordContextRouteDebug(db, character, 'event', 'Module routing skipped: missing model config.', {
+            context_type: 'context_module_router',
+            skipped: true,
+            reason: 'missing_model_config',
+            recent_input: text
+        });
         return defaultRoutes;
     }
 
-    try {
-        const judgePrompt = [
-            '你是私聊上下文模块路由器。',
-            '任务：判断这一轮主模型是否需要加载某些“详细模块内容”。',
-            '只输出一行 JSON，格式必须是：{"city_detail":0,"school_detail":0,"society_detail":0}',
-            '字段说明：',
-            '- city_detail=1：凡是这轮回复需要角色现实生活里的拟人内容，都开。包括最近去了哪、做了什么、吃了什么、最近外出/工作/休息轨迹、为什么这么累/忙/饿/困/没回消息、医院/输液/住院/看病、送礼/收礼、物品流转、当前现实处境、身体状态来源。',
-            '- city_detail=1 的核心原则：私聊模块只负责“对话本身”；只要问题触及角色现实生活、行动记录、状态来源、现实事件，就应视为商业街内容。',
-            '- 特别注意：凡是地点、去向、人在什么地方、从哪里回来的纠错，凡是吃了什么/喝了什么/收到了什么/送了什么，这些都不是“对话本身”，默认都应开 city_detail。',
-            '- 即使用户是在质问、吐槽、纠错、阴阳怪气，只要话题核心还是地点、食物、现实去向、现实状态来源，仍然算商业街内容。',
-            '- city_detail=0：只有在纯私聊对话就能完成回复时才关闭，例如单纯安慰、调情、情绪回应、观点建议、抽象闲聊，而且不需要现实生活记录做支撑。',
-            '- school_detail：为未来学校模块预留，当前仅在用户明确问学校/课程/考试/老师/同学近况时设为1，否则0。',
-            '- society_detail：为未来社会模块预留，当前仅在用户明确问工作/公司/部门/老板/社会身份近况时设为1，否则0。',
-            '规则：对 city_detail 采取偏开启策略。宁可多开商业街，也不要把角色的现实生活问题错留在纯私聊里。',
-            '示例：',
-            '- “你吃火锅干嘛” -> city_detail=1',
-            '- “医院送的白粥配咸菜吗” -> city_detail=1',
-            '- “你怎么这么累/怎么不回我” -> city_detail=1',
-            '- “你刚刚在干嘛” -> city_detail=1',
-            '- “去医院！怎么又回家了！” -> city_detail=1',
-            '- “你不是还在医院输液吗” -> city_detail=1',
-            '- “你怎么又回家了” -> city_detail=1',
-            '- “你不是说在医院吗” -> city_detail=1',
-            '- “想我没” -> city_detail=0',
-            '- “你是不是故意气我” -> city_detail=0，除非还在追问现实事件原因',
-            '只能输出 JSON，不能解释。'
-        ].join('\n');
+    const judgePrompt = [
+        '你是私聊上下文模块路由器。',
+        '任务：判断这一轮主模型是否需要加载某些“详细模块内容”。',
+        '只输出一行 JSON，格式必须是：{"city_detail":0,"school_detail":0,"society_detail":0}',
+        '核心规则只有一条：私聊模块只负责对话本身；只有当用户需要“角色像真人一样在现实里做过、见过、去过、花过、吃过、经历过”的信息时，才路由到商业街。',
+        '- 这类拟人现实信息通常是：现实生活行动、地点轨迹、身体状态来源、账单去向、吃了什么、去了哪里、从哪回来、公告广播、租房广告、现实事件纠错。',
+        '- 纯对话理解、情绪回应、关系互动、记忆检索、时间回忆、总结回顾，都留在私聊对话层，不属于商业街。',
+        '- 像“昨天发生了什么”“三天前发生了什么”“上周聊了什么”“你记得我说过什么吗”这类问题，本质是检索回忆，不是商业街，city_detail=0。',
+        '- 只有当用户明确追问现实生活轨迹或现实来源，比如“你刚才去哪了”“你路过哪儿了”“你吃了什么”“你为什么这么累”“你花钱花哪了”，才设 city_detail=1。',
+        '- 只有纯情绪回应、纯调情、纯安抚、纯观点讨论，不需要现实记录支撑时，city_detail=0。',
+        '- school_detail 只有在明确问学校/课程/考试/老师/同学近况时才设 1，否则 0。',
+        '- society_detail 只有在明确问工作/公司/部门/老板/社会身份近况时才设 1，否则 0。',
+        '拿不准时优先留在对话层，也就是 city_detail=0。',
+        '只能输出 JSON，不能解释。'
+    ].join('\n');
 
-        const { content } = await callLLM({
+    recordContextRouteDebug(db, character, 'input', {
+        recent_input: text,
+        judge_prompt: judgePrompt
+    }, {
+        context_type: 'context_module_router',
+        model,
+        endpoint,
+        cache_type: 'context_module_router'
+    });
+
+    try {
+        const result = await callLLM({
             endpoint,
             key,
             model,
             messages: [
                 { role: 'system', content: judgePrompt },
-                { role: 'user', content: text }
+                {
+                    role: 'user',
+                    content: [
+                        `[本轮用户输入]\n${text}`,
+                        '[判断要求]\n只根据这一条用户输入判断。不要扩展，不要参考旧对话主线。'
+                    ].filter(Boolean).join('\n\n')
+                }
             ],
-            maxTokens: 40,
+            maxTokens: 120,
             temperature: 0,
             enableCache: true,
             cacheDb: db,
@@ -198,19 +344,72 @@ async function routeContextModules(db, character, recentInput = '') {
             cacheTtlMs: 12 * 60 * 60 * 1000,
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
-            cacheKeyExtra: 'v4',
-            cacheKeyMode: 'exact'
+            cacheKeyExtra: 'v6',
+            cacheKeyMode: 'exact',
+            validateCachedContent: (cachedText) => isValidModuleRoutePayload(cachedText),
+            shouldCacheResult: (resultText) => isValidModuleRoutePayload(resultText),
+            returnUsage: true
         });
+        const content = typeof result === 'string' ? result : result?.content;
+        const finishReason = String(result?.finishReason || '').trim();
         const parsed = parseModuleRouteJson(content);
-        if (!parsed) return defaultRoutes;
-        return {
+        if (finishReason === 'length') {
+            const routeErr = new Error('Context module router output was truncated. Please retry.');
+            recordContextRouteDebug(db, character, 'event', String(content || ''), {
+                context_type: 'context_module_router',
+                error: true,
+                recent_input: text,
+                model,
+                endpoint,
+                reason: 'router_output_truncated',
+                finishReason,
+                cached: !!result?.cached,
+                usage: result?.usage || null
+            });
+            throw routeErr;
+        }
+        if (!parsed) {
+            const routeErr = new Error('Context module router output was malformed. Please retry.');
+            recordContextRouteDebug(db, character, 'event', String(content || ''), {
+                context_type: 'context_module_router',
+                error: true,
+                recent_input: text,
+                model,
+                endpoint,
+                reason: 'router_output_malformed',
+                finishReason,
+                cached: !!result?.cached,
+                usage: result?.usage || null
+            });
+            throw routeErr;
+        }
+        const resolvedRoutes = {
             city_detail: parsed.city_detail === 1 ? 1 : defaultRoutes.city_detail,
             school_detail: parsed.school_detail === 1 ? 1 : defaultRoutes.school_detail,
             society_detail: parsed.society_detail === 1 ? 1 : defaultRoutes.society_detail
         };
+        recordContextRouteDebug(db, character, 'output', String(content || ''), {
+            context_type: 'context_module_router',
+            model,
+            endpoint,
+            cache_type: 'context_module_router',
+            parsed_routes: resolvedRoutes,
+            cached: !!result?.cached,
+            finishReason,
+            usage: result?.usage || null
+        });
+        return resolvedRoutes;
     } catch (e) {
-        console.warn('[ContextBuilder] Module router fallback failed:', e.message);
-        return defaultRoutes;
+        console.warn('[ContextBuilder] Module router failed:', e.message);
+        recordContextRouteDebug(db, character, 'event', previewText(e.message, 400), {
+            context_type: 'context_module_router',
+            error: true,
+            recent_input: text,
+            model,
+            endpoint,
+            reason: e.message || 'unknown_error'
+        });
+        throw e;
     }
 }
 
@@ -445,14 +644,37 @@ function buildCitySceneChatGuidance(db, character, isGroupContext) {
         }
     } else if (character.city_status === 'eating') {
         prompt += `地点=${locationLabel}；状态=在吃东西。面前的东西还没吃完，动作和注意力都被食物牵着。`;
+        if (districtType === 'food') {
+            prompt += ' 你还处在真实用餐场景里，筷子、托盘、热气、咀嚼和吞咽这些细节都可能打断你的说话节奏。';
+        }
     } else if (character.city_status === 'hungry') {
-        prompt += '状态=明显饥饿。胃里空得发慌，注意力很容易被饥饿拖走。';
+        prompt += `地点=${locationLabel}；状态=明显饥饿。胃里空得发慌，注意力很容易被饥饿拖走。`;
+    } else if (character.city_status === 'medical') {
+        prompt += `地点=${locationLabel}；状态=在治疗/恢复中。你现在更像是在医院或治疗场景里撑着回消息，身体不算轻松，说话会更虚、更慢，也会更在意自己的恢复情况。`;
     } else if (character.city_status === 'coma') {
-        prompt += '状态很差。意识发飘，身体发虚，很难真正集中起来。';
+        prompt += `地点=${locationLabel}；状态很差。意识发飘，身体发虚，很难真正集中起来。`;
     }
 
     prompt += '\n';
     return prompt;
+}
+
+function buildAvailableCityDistrictSignalGuide(db) {
+    const districts = db?.city?.getEnabledDistricts ? (db.city.getEnabledDistricts() || []) : [];
+    if (!Array.isArray(districts) || districts.length === 0) return '';
+    const lines = districts
+        .map((district) => {
+            if (!district?.id) return '';
+            const parts = [
+                `${district.emoji || ''}${district.name || district.id}`.trim(),
+                `id=${district.id}`,
+                `type=${district.type || 'generic'}`
+            ];
+            return `- ${parts.join(' | ')}`;
+        })
+        .filter(Boolean);
+    if (lines.length === 0) return '';
+    return ['[可用商业街地点信号]', '如果你要触发 CITY_ACTION / CITY_INTENT，优先从下面这些真实地点里选，不要自己编地点名。', ...lines].join('\n');
 }
 
 async function buildUniversalContext(context, character, recentInput = '', isGroupContext = false, activeTargets = []) {
@@ -538,10 +760,14 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                 block += `[你的体力状况]: ${character.calories}/4000 (${calPercent}%)\n`;
             }
             if (character.location) {
-                block += `[你的当前位置]: ${character.location}\n`;
+                const currentDistrict = db.city?.getDistrict ? db.city.getDistrict(character.location) : null;
+                const locationLabel = currentDistrict
+                    ? `${currentDistrict.emoji || ''}${currentDistrict.name || currentDistrict.id || character.location}`.trim()
+                    : character.location;
+                block += `[你的当前位置]: ${locationLabel}\n`;
             }
             if (character.city_status && character.city_status !== 'idle') {
-                const statusLabels = { hungry: '饥饿', working: '工作中', sleeping: '休息中', eating: '进食中', coma: '晕倒' };
+                const statusLabels = { hungry: '饥饿', working: '工作中', sleeping: '休息中', eating: '进食中', medical: '治疗中', coma: '晕倒' };
                 block += `[你的当前行动状态]: ${statusLabels[character.city_status] || character.city_status}\n`;
             }
             block += `[你的综合身体状态等级]: ${physicalCondition.label}\n`;
@@ -623,7 +849,7 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     try {
         const memories = [];
         if (memories && memories.length > 0) {
-            prompt += '\n[注意：相关记忆片段提取]\n下面是你已经回想起来的真实旧信息。只要这些记忆与用户当前问题相关，就不要再说“我不记得了”或“我想不起来了”；应优先根据这些记忆直接回答，只有在记忆彼此冲突或确实没有答案时，才允许表达不确定。\n你回想起了以下事情：\n';
+            prompt += `\n[注意：相关记忆片段提取]\n当前时间: ${new Date().toLocaleString()}\n下面是你已经回想起来的真实旧信息。使用前必须先看“时间 / 来源对话时间”，比较它和当前时间的关系，再判断这是刚发生、最近发生，还是更早以前的事。只要这些记忆与用户当前问题相关，就不要再说“我不记得了”或“我想不起来了”；应优先根据这些记忆直接回答，只有在记忆彼此冲突或确实没有答案时，才允许表达不确定。\n你回想起了以下事情：\n`;
             for (const mem of memories) {
                 const parts = [];
                 if (mem.summary || mem.event) parts.push(mem.summary || mem.event);
@@ -749,25 +975,32 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
             let hasCityData = false;
             const userAskedAboutCity = moduleRoutes.city_detail === 1;
             const cityDetailEnabled = moduleRoutes.city_detail === 1;
+            const districtSignalGuide = buildAvailableCityDistrictSignalGuide(db);
             cityWorldContext += getCachedContextBlock(
                 db,
                 character.id,
                 cityDetailEnabled
                     ? (userAskedAboutCity ? 'city_rules_asked' : 'city_rules_base')
                     : 'city_rules_presence_only',
-                { template_version: 3, cityDetailEnabled, userAskedAboutCity },
+                { template_version: 5, cityDetailEnabled, userAskedAboutCity },
                 () => {
                     if (!cityDetailEnabled) {
                         let staticBlock = '[商业街存在性提示]\n';
+                        staticBlock += '- 商业街内容默认只是背景设定，不是本轮问题的主答案来源。\n';
+                        staticBlock += '- 如果系统已经提供了更直接的日期回顾/RAG记忆，优先使用那些内容，商业街只能补充，不能抢主线。\n';
                         staticBlock += '- 你有独立于私聊/群聊之外的真实生活与商业街世界线。\n';
                         staticBlock += '- 商业街会影响你的身体状态、现实处境、忙碌/疲惫/饥饿等感受。\n';
                         staticBlock += '- 私聊只负责对话本身；凡是涉及你的现实生活、行动、身体状态来源、礼物或物品流转，原则上都属于商业街内容。\n';
                         staticBlock += '- 如果用户这轮没有在问现实生活内容，不要主动展开“去了哪/做了什么”的详细日志。\n';
                         staticBlock += '- 只有当用户明确或隐含地追问最近现实经历、现实处境或拟人状态来源时，才需要加载商业街详细记录。\n';
+                        if (districtSignalGuide) staticBlock += `${districtSignalGuide}\n`;
                         return staticBlock;
                     }
 
                     let staticBlock = '[商业街规则]\n';
+                    staticBlock += '[优先级]\n';
+                    staticBlock += '- 商业街内容是背景设定，优先级低于本轮用户最新话语、直接日期回顾结果、以及更明确的RAG记忆。\n';
+                    staticBlock += '- 如果已有日期回顾或其他直接记忆证据，先回答那些内容；商业街只能补充，不要抢答。\n';
                     staticBlock += '[CITY SOURCE RULES]\n';
                     staticBlock += '- 下面内容是你的现实生活/商业街经历来源，不是群聊消息，也不是私聊消息。\n';
                     staticBlock += '- 这些内容可以影响你当前状态，也可以被你像真人一样提起。\n';
@@ -775,13 +1008,19 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                     staticBlock += '- 商业街=你的真实生活，不是功能或后台。\n';
                     staticBlock += '- 私聊本身只承载对话；凡是你的拟人现实内容，默认都应从商业街世界线理解。\n';
                     staticBlock += '- 看到睡觉、工作、饥饿、疲惫、钱包变化这类信息时，把它们当成你此刻真实在经历的处境，而不是系统设定。\n';
+                    staticBlock += '- “当前状态/当前位置”只描述你现在这一刻，不会抹掉更早一点的真实行动轨迹。\n';
+                    staticBlock += '- 如果用户问的是“刚才/之前/回家前/路过某地/从哪回来/是不是去过某地”，优先按时间顺序结合【本人亲历记录】回答，不要因为你现在已经在家/在睡觉，就否认刚才确实发生过的路过、外出或返程。\n';
+                    staticBlock += '- 当“现在在家/休息”和“之前路过某地/刚从外面回来”同时出现时，这两者通常是时间先后关系，不是互相否定。\n';
                     staticBlock += '- 就算用户提到 token、缓存、prompt、AI、测试这些词，也不要把商业街和身体状态解释成后台机制；先按对方在乱讲话、试探你、拿奇怪说法描述现实来理解。\n';
                     staticBlock += '- 亲身经历只认【本人亲历记录】；公共事件只能说成听说/看见。\n';
                     staticBlock += '- 允许补主观感受，不允许补没给出的客观事实。\n';
                     staticBlock += '- 没有亲历记录时，只能说最近没出门、没新经历或记不清细节。\n';
+                    if (districtSignalGuide) staticBlock += `${districtSignalGuide}\n`;
                     if (userAskedAboutCity) {
                         staticBlock += '[商业街问答优先级]\n';
                         staticBlock += '- 用户此轮在问你的真实生活轨迹；优先回答去过哪、做过什么、吃了什么、体力/钱包变化。\n';
+                        staticBlock += '- 如果用户同时提到“现在”和“之前/回家前/路过某地”，先把时间线说清：现在在哪里，和更早一点刚发生过什么，可以同时成立。\n';
+                        staticBlock += '- 对“你不是刚路过xx吗/你回家前是不是经过xx/你刚从哪回来”这类纠错题，优先承认或否认具体轨迹，不要只拿当前所在地顶掉上一段路程。\n';
                         staticBlock += '- 没有亲历记录时，只能回答没有明确新经历，或改成听说来的公共信息。\n';
                         staticBlock += '- 禁止把商业街解释成功能、界面、后台或测试内容。\n';
                     }
@@ -795,6 +1034,10 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
             const recentLogs = limitX > 0 && typeof db.city.getCharacterRecentLogs === 'function'
                 ? (db.city.getCharacterRecentLogs(character.id, limitX) || [])
                 : [];
+            const limitA = parseInt(cityConfig.city_announcement_limit ?? 5, 10);
+            const announcements = limitA > 0 && typeof db.city.getCityAnnouncements === 'function'
+                ? (db.city.getCityAnnouncements(limitA) || [])
+                : [];
             const limitY = parseInt(cityConfig.city_global_log_limit ?? 5, 10);
             const globalLogs = limitY > 0
                 ? (db.city.getCityLogs(Math.max(limitY * 3, limitY)) || [])
@@ -807,18 +1050,29 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                     character.id,
                     userAskedAboutCity ? 'city_runtime_asked' : 'city_runtime_base',
                     {
-                        template_version: 3,
+                        template_version: 5,
                         userAskedAboutCity,
+                        announcements: announcements.map(a => ({ timestamp: a.timestamp, title: a.title || '', content: a.content || '' })),
                         self_logs: recentLogs.map(l => ({ timestamp: l.timestamp, message: l.message || '' })),
                         global_logs: globalLogs.map(l => ({ timestamp: l.timestamp, message: l.message || l.content || '' }))
                     },
                     () => {
                         let runtimeBlock = '';
+                        if (limitA > 0 && announcements.length > 0) {
+                            hasCityData = true;
+                            runtimeBlock += '\n【公告区】\n';
+                            runtimeBlock += '下面是商业街公共公告、中介广告、市长广播。它们不是你的亲身经历，但属于你此刻可见的公共世界信息。\n';
+                            for (const item of announcements) {
+                                const titlePart = String(item.title || '').trim() ? `${String(item.title || '').trim()}｜` : '';
+                                runtimeBlock += `- [${new Date(item.timestamp).toLocaleString()}] ${titlePart}${String(item.content || '').trim()}\n`;
+                            }
+                        }
                         if (limitX > 0) {
                             if (recentLogs.length > 0) {
                                 hasCityData = true;
                                 runtimeBlock += '\n【本人亲历记录】\n';
                                 runtimeBlock += '只把下面这些说成“我做过/我刚经历过”。\n';
+                                runtimeBlock += '这些记录按时间倒序排列；上面更近，下面更早。它们描述的是连续轨迹，不是互相覆盖。\n';
                                 for (const l of recentLogs) {
                                     const firstPersonLog = l.message.replace(new RegExp(character.name, 'g'), '我');
                                     runtimeBlock += `- [${new Date(l.timestamp).toLocaleString()}] ${firstPersonLog}\n`;
@@ -838,8 +1092,10 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
                             }
                         }
                         runtimeBlock += '\n[商业街执行规则]\n';
+                        runtimeBlock += '- 回答顺序默认先看【公告区】，再看【本人亲历记录】，最后看【公共事件 / 传闻】。\n';
+                        runtimeBlock += '- 公告区里的内容可以说成“街上在传/我看到公告/中介所正在打广告/市长刚发了广播”。\n';
                         runtimeBlock += '- 优先用本人亲历记录回答“我做过什么”。\n';
-                        runtimeBlock += '- 公共事件只回答“我听说/我看到”。\n';
+                        runtimeBlock += '- 公告区和公共事件都只能回答“我看到/我听说/街上在传”，不能说成“我做过”。\n';
                         runtimeBlock += '- 不要提日志、系统、后台、前端模块。\n';
                         return runtimeBlock;
                     }

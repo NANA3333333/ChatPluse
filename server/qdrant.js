@@ -209,6 +209,18 @@ async function deleteCharacterPoints(userId, characterId) {
     });
 }
 
+async function deleteUserCollection(userId) {
+    const collectionName = getCollectionName(userId);
+    try {
+        await qdrantRequest(`/collections/${collectionName}`, {
+            method: 'DELETE'
+        });
+    } finally {
+        ensuredCollections.delete(collectionName);
+        pendingCollectionEnsures.delete(collectionName);
+    }
+}
+
 async function healthcheck() {
     try {
         await qdrantRequest('/collections');
@@ -231,6 +243,7 @@ async function getCollectionInfo(collectionName) {
 module.exports = {
     DEFAULT_VECTOR_SIZE,
     deleteCharacterPoints,
+    deleteUserCollection,
     deleteMemoryPoint,
     ensureCollection,
     getCollectionInfo,

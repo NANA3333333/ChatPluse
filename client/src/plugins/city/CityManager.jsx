@@ -49,12 +49,13 @@ const CONFIG_LABELS = {
     gambling_payout: '赌博赔率',
     city_self_log_limit: '记忆获取条数 (自己的经历)',
     city_social_log_limit: '社交获取条数 (他人的经历)',
+    city_announcement_limit: '公告获取条数',
     city_stranger_meet_prob: '陌生人相遇概率 (%)',
     city_chat_probability: '私聊消息概率',
     city_moment_probability: '发朋友圈概率',
     city_diary_probability: '写日记概率',
 };
-const HIDDEN_CONFIG_KEYS = ['dlc_enabled', 'mayor_prompt', 'mayor_enabled', 'mayor_interval_hours', 'mayor_model_char_id', 'mayor_custom_endpoint', 'mayor_custom_key', 'mayor_custom_model', 'city_chat_probability', 'city_moment_probability', 'city_diary_probability', 'city_self_log_limit', 'city_social_log_limit', 'city_stranger_meet_prob', 'tick_label', 'tick_interval_minutes'];
+const HIDDEN_CONFIG_KEYS = ['dlc_enabled', 'mayor_prompt', 'mayor_enabled', 'mayor_interval_hours', 'mayor_model_char_id', 'mayor_last_run_at', 'mayor_custom_endpoint', 'mayor_custom_key', 'mayor_custom_model', 'city_chat_probability', 'city_moment_probability', 'city_diary_probability', 'city_self_log_limit', 'city_social_log_limit', 'city_announcement_limit', 'city_stranger_meet_prob', 'tick_label', 'tick_interval_minutes'];
 
 const EMPTY_DISTRICT = {
     id: '', name: '', emoji: '🏬', type: 'generic', description: '',
@@ -302,6 +303,38 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
     };
     const deleteEvent = async (id) => { await fetch(`${apiUrl}/city/events/${id}`, { method: 'DELETE', headers }); fetchAll(); };
     const deleteQuest = async (id) => { await fetch(`${apiUrl}/city/quests/${id}`, { method: 'DELETE', headers }); fetchAll(); };
+    const claimQuestForCharacter = async (questId, characterId) => {
+        try {
+            const res = await fetch(`${apiUrl}/city/quests/${questId}/claim`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ characterId })
+            });
+            const data = await res.json();
+            if (!res.ok || data?.success === false) throw new Error(data?.error || '领取失败');
+            showActionNotice('success', '悬赏任务已领取');
+            fetchAll();
+            if (onRefreshLogs) onRefreshLogs();
+        } catch (e) {
+            showActionNotice('error', `领取失败: ${e.message}`);
+        }
+    };
+    const completeQuestAction = async (questId, characterId) => {
+        try {
+            const res = await fetch(`${apiUrl}/city/quests/${questId}/complete`, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ characterId })
+            });
+            const data = await res.json();
+            if (!res.ok || data?.success === false) throw new Error(data?.error || '完成失败');
+            showActionNotice('success', '悬赏任务已完成');
+            fetchAll();
+            if (onRefreshLogs) onRefreshLogs();
+        } catch (e) {
+            showActionNotice('error', `完成失败: ${e.message}`);
+        }
+    };
 
     const clearLogs = async () => { if (!confirm(`确认清空商业街所有活动记录吗？此操作不可撤销。`)) return; await fetch(`${apiUrl}/city/logs/clear`, { method: 'DELETE', headers }); setMayorResult(null); fetchAll(); if (onRefreshLogs) onRefreshLogs(); alert('活动记录已清空。'); };
     const wipeData = async () => { if (!confirm(`危险操作：确认格式化商业街所有数据（分区、物品、资产、日志）吗？此操作不可撤销。`)) return; await fetch(`${apiUrl}/city/data/wipe`, { method: 'DELETE', headers }); setMayorResult(null); setEconomy(null); fetchAll(); if (onRefreshLogs) onRefreshLogs(); alert('商业街数据已彻底清空。'); };
@@ -569,6 +602,18 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                     </div>
                     <div>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
+                            <span>公告区读取上限</span>
+                            <span style={{ fontWeight: '600', color: '#7c3aed' }}>{config.city_announcement_limit || '5'} 条</span>
+                        </div>
+                        <input type="range" min="0" max="20" value={parseInt(config.city_announcement_limit) || 5}
+                            onChange={e => updateConfig('city_announcement_limit', e.target.value)}
+                            style={{ width: '100%' }} />
+                        <div style={{ fontSize: '10px', color: '#999', marginTop: '4px' }}>
+                            决定角色在私聊或商业街行动时，最多能读到公告区多少条广播、广告和街头公告。
+                        </div>
+                    </div>
+                    <div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
                             <span>陌生人相遇概率</span>
                             <span style={{ fontWeight: '600', color: '#ff9800' }}>{config.city_stranger_meet_prob || '20'}%</span>
                         </div>
@@ -717,25 +762,52 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                             {mayorResult.success ? (
                                 <div>
                                     决策完成：{mayorResult.results?.price_changes || 0} 个调价，{mayorResult.results?.events || 0} 个事件，{mayorResult.results?.quests || 0} 个任务
-                                    {mayorResult.fallback && <span style={{ color: '#ff9800' }}>（规则生成）</span>}
                                     {mayorResult.results?.announcement && <div style={{ marginTop: '4px', fontStyle: 'italic' }}>广播：{mayorResult.results.announcement}</div>}
                                 </div>
-                            ) : <div>失败：{mayorResult.reason || mayorResult.error || '未知错误'}</div>}
+                            ) : (
+                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                    <div>失败：{mayorResult.error || mayorResult.reason || '未知错误'}</div>
+                                    <button
+                                        style={btnStyle(mayorRunning ? '#9e9e9e' : '#d32f2f')}
+                                        onClick={runMayor}
+                                        disabled={mayorRunning}
+                                    >
+                                        {mayorRunning ? '重试中...' : '重新生成'}
+                                    </button>
+                                </div>
+                            )}
                         </div>
                     )}
                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
                         <div style={{ flex: '1 1 280px' }}>
-                            <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px' }}>活跃事件 ({events.length})</div>
-                            {events.length === 0 ? <div style={{ fontSize: '11px', color: '#bbb' }}>暂无事件</div> : events.map(e => (
+                            {(() => {
+                                const visibleEvents = events
+                                    .map((event) => {
+                                        const remainingMs = Number(event.expires_at || 0) - Date.now();
+                                        const remainingHours = Math.ceil(remainingMs / 3600000);
+                                        return {
+                                            ...event,
+                                            remainingMs,
+                                            remainingHours
+                                        };
+                                    })
+                                    .filter((event) => event.remainingMs > 0 && event.remainingHours > 0);
+                                return (
+                                    <>
+                            <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px' }}>活跃事件 ({visibleEvents.length})</div>
+                            {visibleEvents.length === 0 ? <div style={{ fontSize: '11px', color: '#bbb' }}>暂无事件</div> : visibleEvents.map(e => (
                                 <div key={e.id} style={{ padding: '6px', border: '1px solid #eee', borderRadius: '6px', marginBottom: '4px', fontSize: '11px', display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
                                     <div style={{ flex: 1 }}>
                                         <span>{e.emoji} <b>{e.title}</b></span>
                                         <div style={{ color: '#888' }}>{e.description}</div>
-                                        <div style={{ color: '#aaa', fontSize: '10px' }}>剩余 {Math.max(0, Math.round((e.expires_at - Date.now()) / 3600000))}h</div>
+                                        <div style={{ color: '#aaa', fontSize: '10px' }}>剩余 {e.remainingHours}h</div>
                                     </div>
                                     <button onClick={() => deleteEvent(e.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ccc', padding: '2px', fontSize: '12px', lineHeight: 1, flexShrink: 0 }} title="删除事件">×</button>
                                 </div>
                             ))}
+                                    </>
+                                );
+                            })()}
                         </div>
                         <div style={{ flex: '1 1 280px' }}>
                             <div style={{ fontWeight: '600', fontSize: '13px', marginBottom: '6px' }}>悬赏任务 ({quests.length})</div>
@@ -744,7 +816,38 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                                     <div style={{ flex: 1 }}>
                                         <span>{q.emoji} <b>{q.title}</b> <span style={{ color: '#ff9800' }}>({q.difficulty})</span></span>
                                         <div style={{ color: '#888' }}>{q.description}</div>
-                                        <div style={{ color: '#4caf50', fontSize: '10px' }}>奖励: {q.reward_gold}币 {q.reward_cal > 0 ? (q.reward_cal + '卡') : ''}{q.claimed_by ? ' 路 已被领取' : ''}</div>
+                                        <div style={{ color: '#4caf50', fontSize: '10px' }}>奖励: {q.reward_gold}币 {q.reward_cal > 0 ? (q.reward_cal + '卡') : ''}</div>
+                                        <div style={{ color: q.is_completed ? '#2e7d32' : q.claimed_by ? '#ff9800' : '#999', fontSize: '10px', marginTop: '3px' }}>
+                                            {q.is_completed
+                                                ? '已完成'
+                                                : q.claimed_by
+                                                    ? `已领取：${(characters.find(c => c.id === q.claimed_by) || {}).name || q.claimed_by}`
+                                                    : '待领取'}
+                                        </div>
+                                        {!q.is_completed && (
+                                            <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap', alignItems: 'center' }}>
+                                                {!q.claimed_by ? (
+                                                    <select
+                                                        defaultValue=""
+                                                        style={{ ...inputStyle, minWidth: '120px', height: '30px', fontSize: '11px', padding: '4px 8px' }}
+                                                        onChange={(e) => {
+                                                            if (!e.target.value) return;
+                                                            claimQuestForCharacter(q.id, e.target.value);
+                                                            e.target.value = '';
+                                                        }}
+                                                    >
+                                                        <option value="">指派角色领取</option>
+                                                        {characters.map(c => (
+                                                            <option key={c.id} value={c.id}>{c.name}</option>
+                                                        ))}
+                                                    </select>
+                                                ) : (
+                                                    <button onClick={() => completeQuestAction(q.id, q.claimed_by)} style={{ ...btnStyle('#4caf50'), padding: '4px 8px', fontSize: '11px' }}>
+                                                        标记完成
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
                                     </div>
                                     <button onClick={() => deleteQuest(q.id)} style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#ccc', padding: '2px', fontSize: '12px', lineHeight: 1, flexShrink: 0 }} title="删除任务">×</button>
                                 </div>

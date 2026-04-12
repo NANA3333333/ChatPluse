@@ -1,12 +1,35 @@
 const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { getMemory, clearMemoryCache } = require('../../memory');
-const { userDbCache } = require('../../db');
+const { clearMemoryCache } = require('../../memory');
+const { userDbCache, markUserDbDeleting, unmarkUserDbDeleting } = require('../../db');
+const { closeSchedulerDb } = require('../scheduler/db');
 const qdrant = require('../../qdrant');
+
+const pendingUserDeletionJobs = new Map();
 
 module.exports = function initAdminDashboard(app, context) {
     const { authMiddleware, authDb, wss, getWsClients } = context;
+
+    const wait = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+    const removeFileIfExists = async (filePath, options = {}) => {
+        const retries = Math.max(1, Number(options.retries || 6));
+        const delayMs = Math.max(20, Number(options.delayMs || 120));
+        for (let attempt = 0; attempt < retries; attempt += 1) {
+            try {
+                if (!fs.existsSync(filePath)) return;
+                fs.unlinkSync(filePath);
+                return;
+            } catch (e) {
+                const isBusy = e && ['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(String(e.code || ''));
+                if (!isBusy || attempt === retries - 1) {
+                    throw e;
+                }
+                await wait(delayMs * (attempt + 1));
+            }
+        }
+    };
 
     const disconnectUserSessions = (userId) => {
         const clients = getWsClients(userId);
@@ -29,6 +52,81 @@ module.exports = function initAdminDashboard(app, context) {
             } catch (e) { }
         }
         return total;
+    };
+
+    const removeDirectoryIfExists = async (dirPath, options = {}) => {
+        const retries = Math.max(1, Number(options.retries || 6));
+        const delayMs = Math.max(20, Number(options.delayMs || 120));
+        for (let attempt = 0; attempt < retries; attempt += 1) {
+            try {
+                if (!fs.existsSync(dirPath)) return;
+                fs.rmSync(dirPath, { recursive: true, force: true });
+                return;
+            } catch (e) {
+                const isBusy = e && ['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(String(e.code || ''));
+                if (!isBusy || attempt === retries - 1) {
+                    throw e;
+                }
+                await wait(delayMs * (attempt + 1));
+            }
+        }
+    };
+
+    const removeUserVectorArtifacts = async (userId) => {
+        const vectorsRoot = path.join(__dirname, '..', '..', 'data', 'vectors');
+        if (!fs.existsSync(vectorsRoot)) return;
+        const entries = fs.readdirSync(vectorsRoot, { withFileTypes: true });
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            const candidateDir = path.join(vectorsRoot, entry.name, String(userId));
+            await removeDirectoryIfExists(candidateDir);
+        }
+    };
+
+    const cleanupUserStorage = async (userId) => {
+        closeSchedulerDb(userId);
+        const db = userDbCache.get(userId);
+        if (db) {
+            try { db.checkpoint(); } catch (e) { }
+            try { db.close(); } catch (e) { }
+            userDbCache.delete(userId);
+        }
+        clearMemoryCache(userId);
+        await wait(250);
+
+        try {
+            await qdrant.deleteUserCollection(userId);
+        } catch (e) { }
+        await removeUserVectorArtifacts(userId);
+        clearMemoryCache(userId);
+
+        const dbPath = path.join(__dirname, '..', '..', 'data', `chatpulse_user_${userId}.db`);
+        await removeFileIfExists(dbPath);
+        await removeFileIfExists(`${dbPath}-wal`);
+        await removeFileIfExists(`${dbPath}-shm`);
+    };
+
+    const scheduleDeferredUserDeletion = (userId) => {
+        const key = String(userId);
+        if (pendingUserDeletionJobs.has(key)) return;
+        const timer = setInterval(async () => {
+            try {
+                await cleanupUserStorage(key);
+                clearInterval(timer);
+                pendingUserDeletionJobs.delete(key);
+                unmarkUserDbDeleting(key);
+                console.log(`[Admin] Deferred user storage cleanup completed for ${key}.`);
+            } catch (e) {
+                const code = String(e?.code || '');
+                if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(code)) {
+                    clearInterval(timer);
+                    pendingUserDeletionJobs.delete(key);
+                    unmarkUserDbDeleting(key);
+                    console.error(`[Admin] Deferred user storage cleanup failed for ${key}:`, e);
+                }
+            }
+        }, 5000);
+        pendingUserDeletionJobs.set(key, timer);
     };
 
     const toUploadRelativePath = (value) => {
@@ -248,36 +346,26 @@ module.exports = function initAdminDashboard(app, context) {
         try {
             const targetId = req.params.id;
             if (targetId === req.user.id) return res.status(400).json({ error: "Cannot delete yourself" });
+            markUserDbDeleting(targetId);
 
             // 1. Force disconnect websocket
             disconnectUserSessions(targetId);
-
-            // 2. Shut down engine memory and close DB
-            const db = userDbCache.get(targetId);
-            if (db) {
-                db.close();
-                userDbCache.delete(targetId);
-            }
-            clearMemoryCache(targetId);
-
-            // Delete memory index
-            try {
-                const memory = getMemory(targetId);
-                const chars = db ? db.getCharacters() : [];
-                for (const c of chars) {
-                    await memory.wipeIndex(c.id);
-                }
-            } catch (e) { }
-
-            // 3. Delete db file
-            const dbPath = path.join(__dirname, '..', '..', 'data', `chatpulse_user_${targetId}.db`);
-            if (fs.existsSync(dbPath)) fs.unlinkSync(dbPath);
-
-            // 4. Delete from authDb
             authDb.deleteUser(targetId);
 
-            res.json({ success: true });
+            try {
+                await cleanupUserStorage(targetId);
+                unmarkUserDbDeleting(targetId);
+                res.json({ success: true, queuedCleanup: false });
+            } catch (e) {
+                const code = String(e?.code || '');
+                if (['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(code)) {
+                    scheduleDeferredUserDeletion(targetId);
+                    return res.json({ success: true, queuedCleanup: true });
+                }
+                throw e;
+            }
         } catch (e) {
+            try { unmarkUserDbDeleting(req.params.id); } catch (err) { }
             console.error(e);
             res.status(500).json({ error: e.message });
         }

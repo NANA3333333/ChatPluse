@@ -209,13 +209,24 @@ scripts/
 
 ChatPulse is a local-first AI social simulation app built with React, Express, SQLite, WebSocket realtime updates, and optional Qdrant-backed memory retrieval.
 
+### 2026-04-12 Update Notes
+
+This update focused on topic switching, date recall stability, and cleaning up stale architecture notes:
+
+- Added a dedicated topic-switch gate before the existing RAG route stage. The live pipeline is now `Summary -> Switch -> Route -> Topics -> Decision -> Rewrite -> Retrieve -> Output`.
+- Synced the front-end RAG progress header and settings drawer so the last round can explicitly show `Switch topic`, `Continue current topic`, or `History follow-up`.
+- Hardened the date-recall path with date-browse routing, chunked day summaries, context partitioning, and better cache invalidation for polluted strong-topic lines.
+- Prevented malformed / truncated outputs from pre-planner stages (`topic switch`, `topics`, `decision`, and `temporal browse summarize`) from being reused from cache.
+- Changed the topic-switch gate to fail closed: if that layer breaks, the turn now stops immediately and returns an error instead of silently falling back to `continue current topic`.
+- Updated this README to remove stale wording that still described `vectra` as part of the current real-time retrieval architecture.
+
 ### Stack
 
 - Frontend: React 19 + Vite
 - Backend: Node.js + Express + ws
 - Primary storage: SQLite via `better-sqlite3`
 - Vector search: Qdrant
-- Local fallback index: vectra + `@xenova/transformers`
+- Real-time memory path: Qdrant + SQLite text/metadata
 
 ### Local Setup
 
@@ -299,16 +310,14 @@ On first startup, the project automatically creates:
 - `data/master.db` for auth
 - `data/chatpulse_user_<id>.db` per user
 - `server/public/uploads/`
-- local vectra indices under `data/vectors/...`
 - a JWT secret file when not provided by env
 
 Qdrant behavior:
 
 - Uses Qdrant when reachable
-- Real-time private/group chat RAG no longer depends on local vectra as an automatic fallback by default
 - Creates Qdrant collections lazily on first memory write
 
-So the project is still runnable locally, but real-time memory retrieval is now expected to have Qdrant available.
+SQLite stores full message / memory content and metadata. Qdrant is the active real-time vector retrieval backend.
 
 ### 2026-04-05 Fix Notes
 

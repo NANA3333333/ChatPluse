@@ -1,10 +1,12 @@
 // Native fetch is available in Node 18+ (no require needed)
 const crypto = require('crypto');
+const { getTokenCount } = require('./utils/tokenizer');
 
 function normalizeMessages(messages = []) {
     return messages.map(msg => ({
         role: String(msg?.role || ''),
-        content: typeof msg?.content === 'string' ? msg.content : JSON.stringify(msg?.content ?? '')
+        content: typeof msg?.content === 'string' ? msg.content : JSON.stringify(msg?.content ?? ''),
+        cache_candidate: String(msg?.cache_candidate || '').trim()
     }));
 }
 
@@ -34,12 +36,13 @@ function buildCachePayload({ endpoint, model, messages, maxTokens, temperature, 
 
     let normalizedMessages = rawMessages;
     if (cacheKeyMode === 'private_prefix') {
-        const systemMessages = rawMessages
-            .filter(msg => msg.role === 'system')
-            .map(msg => ({
-                role: msg.role,
-                content: normalizePrivatePrefixCacheContent(msg.content)
-            }));
+        const stableSystemMessage = rawMessages.find(msg => msg.role === 'system');
+        const systemMessages = stableSystemMessage
+            ? [{
+                role: stableSystemMessage.role,
+                content: normalizePrivatePrefixCacheContent(stableSystemMessage.content)
+            }]
+            : [];
 
         const nonSystemMessages = rawMessages.filter(msg => msg.role !== 'system');
         const lastUserMessage = [...nonSystemMessages].reverse().find(msg => msg.role === 'user');
@@ -84,15 +87,18 @@ function supportsClaudePromptCacheHints(model, enablePromptCacheHints = false) {
     return !!(enablePromptCacheHints && String(model || '').toLowerCase().includes('claude'));
 }
 
-function buildClaudePromptCacheMessages(messages = []) {
+function buildClaudePromptCacheMessages(messages = [], hintMode = 'auto') {
     let markedCount = 0;
     return (messages || []).map((msg, index) => {
         if (!msg || typeof msg !== 'object') return msg;
         const clone = { ...msg };
-        const shouldMark = markedCount < 2 && (
-            clone.role === 'system' ||
-            (index > 0 && typeof clone.content === 'string' && clone.content.length >= 512)
-        );
+        const shouldMark = hintMode === 'stable_system_only'
+            ? (markedCount < 1 && clone.role === 'system' && index === 0)
+            : (markedCount < 2 && (
+                clone.role === 'system' ||
+                (index > 0 && typeof clone.content === 'string' && clone.content.length >= 512)
+            ));
+        delete clone.cache_candidate;
         if (shouldMark && typeof clone.content === 'string') {
             clone.content = [{
                 type: 'text',
@@ -215,6 +221,7 @@ async function callLLM({
     cacheCharacterId = '',
     cacheKeyMode = 'exact',
     enablePromptCacheHints = false,
+    promptCacheHintMode = 'auto',
     debugAttempt = null,
     validateCachedContent = null,
     shouldCacheResult = null
@@ -297,7 +304,7 @@ async function callLLM({
             if (supportsClaudePromptCacheHints(model, enablePromptCacheHints)) {
                 requestVariants.push({
                     label: 'claude_prompt_cache',
-                    messages: buildClaudePromptCacheMessages(finalMessages),
+                    messages: buildClaudePromptCacheMessages(finalMessages, promptCacheHintMode),
                     headers: { 'anthropic-beta': 'prompt-caching-2024-07-31' }
                 });
             }
@@ -319,6 +326,8 @@ async function callLLM({
                     presencePenalty,
                     frequencyPenalty
                 });
+                const requestBodyTokenCount = getTokenCount(JSON.stringify(requestBody));
+                const uncachedRequestBodyTokenCount = getTokenCount(JSON.stringify(uncachedDebugRequestBody));
                 try {
                     if (typeof debugAttempt === 'function') {
                         debugAttempt({
@@ -333,6 +342,8 @@ async function callLLM({
                             frequencyPenalty,
                             messageCount: Array.isArray(variant.messages) ? variant.messages.length : 0,
                             promptCacheHint: variant.label === 'claude_prompt_cache',
+                            requestBodyTokens: requestBodyTokenCount,
+                            uncachedRequestBodyTokens: uncachedRequestBodyTokenCount,
                             requestBodyPreview: safeJsonPreview(requestBody, 12000),
                             uncachedRequestBodyPreview: safeJsonPreview(uncachedDebugRequestBody, 12000),
                             messageSummary: summarizeMessages(variant.messages)
@@ -367,6 +378,8 @@ async function callLLM({
                                 durationMs: Date.now() - attemptStartedAt,
                                 error: lastVariantError.message,
                                 promptCacheHint: variant.label === 'claude_prompt_cache',
+                                requestBodyTokens: requestBodyTokenCount,
+                                uncachedRequestBodyTokens: uncachedRequestBodyTokenCount,
                                 requestBodyPreview: safeJsonPreview(requestBody, 12000),
                                 uncachedRequestBodyPreview: safeJsonPreview(uncachedDebugRequestBody, 12000),
                                 messageSummary: summarizeMessages(variant.messages),
@@ -399,6 +412,8 @@ async function callLLM({
                                 usage: data?.usage || null,
                                 finishReason: data?.choices?.[0]?.finish_reason || 'unknown',
                                 promptCacheHint: variant.label === 'claude_prompt_cache',
+                                requestBodyTokens: requestBodyTokenCount,
+                                uncachedRequestBodyTokens: uncachedRequestBodyTokenCount,
                                 requestBodyPreview: safeJsonPreview(requestBody, 12000),
                                 uncachedRequestBodyPreview: safeJsonPreview(uncachedDebugRequestBody, 12000),
                                 messageSummary: summarizeMessages(variant.messages),

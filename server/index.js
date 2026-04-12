@@ -42,6 +42,23 @@ const { getTokenCount } = require('./utils/tokenizer');
 const { getBackgroundQueueStats } = require('./backgroundQueue');
 const qdrant = require('./qdrant');
 
+let pluginContext = null;
+
+function getEngineWithPluginHooks(userId) {
+    const engine = getEngine(userId);
+    if (!engine || !pluginContext?.hooks) return engine;
+    if (typeof pluginContext.hooks.cityReplyStateSyncCallback === 'function' && typeof engine.setCityReplyStateSyncCallback === 'function') {
+        engine.setCityReplyStateSyncCallback(pluginContext.hooks.cityReplyStateSyncCallback);
+    }
+    if (typeof pluginContext.hooks.cityReplyIntentCallback === 'function' && typeof engine.setCityReplyIntentCallback === 'function') {
+        engine.setCityReplyIntentCallback(pluginContext.hooks.cityReplyIntentCallback);
+    }
+    if (typeof pluginContext.hooks.cityReplyActionCallback === 'function' && typeof engine.setCityReplyActionCallback === 'function') {
+        engine.setCityReplyActionCallback(pluginContext.hooks.cityReplyActionCallback);
+    }
+    return engine;
+}
+
 function getDigestTailWindowSize(contextLimit, availableCount) {
     const safeLimit = Math.max(0, Number(contextLimit) || 0);
     const safeAvailable = Math.max(0, Number(availableCount) || 0);
@@ -212,7 +229,7 @@ wss.on('connection', (ws) => {
                 ws.userId = decoded.id;
                 const clients = getWsClients(decoded.id);
                 clients.add(ws);
-                const engine = getEngine(decoded.id);
+                const engine = getEngineWithPluginHooks(decoded.id);
                 engine.startEngine(clients);
                 engine.startGroupProactiveTimers(clients);
                 console.log(`[WS] Authenticated frontend socket for user: ${decoded.username}`);
@@ -266,7 +283,7 @@ const authMiddleware = (req, res, next) => {
             configurable: true,
             enumerable: true,
             get() {
-                const engine = getEngine(req.user.id);
+            const engine = getEngineWithPluginHooks(req.user.id);
                 Object.defineProperty(req, 'engine', {
                     value: engine,
                     writable: false,
@@ -388,13 +405,13 @@ app.get('/api/system/announcement', authMiddleware, (req, res) => {
 
 
 // 鈹€鈹€鈹€ PLUGIN MANAGER 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
-const pluginContext = {
+pluginContext = {
     wss,
     getWsClients,
     authDb,
     authMiddleware,
     getUserDb,
-    getEngine,
+    getEngine: getEngineWithPluginHooks,
     getMemory,
     callLLM,
     JWT_SECRET,
@@ -973,10 +990,16 @@ app.post('/api/messages/batch-delete', authMiddleware, (req, res) => {
         if (!Array.isArray(messageIds) || messageIds.length === 0) {
             return res.status(400).json({ error: 'messageIds array required' });
         }
+        const affectedCharacterIds = new Set();
         let deleted = 0;
         for (const id of messageIds) {
+            const characterId = db.getMessageCharacterId?.(id);
+            if (characterId) affectedCharacterIds.add(characterId);
             db.deleteMessage(id);
             deleted++;
+        }
+        for (const characterId of affectedCharacterIds) {
+            db.clearCharacterMessageCaches?.(characterId);
         }
         console.log('[Messages] Batch deleted ' + deleted + ' messages.');
         res.json({ success: true, deleted });
@@ -1133,7 +1156,9 @@ app.delete('/api/messages/:characterId', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        db.clearMessages(req.params.characterId);
+        const characterId = req.params.characterId;
+        db.clearMessages(characterId);
+        db.clearCharacterMessageCaches?.(characterId);
         res.json({ success: true });
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -1154,6 +1179,7 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
 
         // Clear all data
         db.clearMessages(id);
+        db.clearCharacterMessageCaches?.(id);
         db.clearMemories(id);
         db.clearMoments(id);
         db.clearDiaries(id);
@@ -1939,15 +1965,15 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         }
 
         const lastConversationPromptTokens = Number(latestConversationUsageRow?.prompt_tokens || 0);
-        let loggedCachedRequestBodyTokens = 0;
-        let loggedUncachedRequestBodyTokens = 0;
+        let loggedCachedRequestBodyTokens = Number(latestConversationAttemptMeta?.requestBodyTokens || 0);
+        let loggedUncachedRequestBodyTokens = Number(latestConversationAttemptMeta?.uncachedRequestBodyTokens || 0);
         try {
-            if (latestConversationAttemptMeta?.requestBodyPreview) {
+            if (!loggedCachedRequestBodyTokens && latestConversationAttemptMeta?.requestBodyPreview) {
                 loggedCachedRequestBodyTokens = getTokenCount(latestConversationAttemptMeta.requestBodyPreview);
                 const parsedCachedRequestBody = JSON.parse(latestConversationAttemptMeta.requestBodyPreview);
                 loggedCachedRequestBodyTokens = getTokenCount(JSON.stringify(parsedCachedRequestBody));
             }
-            if (latestConversationAttemptMeta?.uncachedRequestBodyPreview) {
+            if (!loggedUncachedRequestBodyTokens && latestConversationAttemptMeta?.uncachedRequestBodyPreview) {
                 const parsedUncachedRequestBody = JSON.parse(latestConversationAttemptMeta.uncachedRequestBodyPreview);
                 loggedUncachedRequestBodyTokens = getTokenCount(JSON.stringify(parsedUncachedRequestBody));
             }
@@ -2027,6 +2053,7 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
             || lastConversationModuleRoutes.city_social
         );
         const lastConversationUsedRag = snapshotRagInjectedTokens > 0;
+        const lastConversationTopicSwitch = latestConversationSnapshot?.topic_switch || null;
 
         res.json({
             success: true,
@@ -2108,6 +2135,9 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 last_conversation_other_tokens: lastConversationOtherTokens,
                 last_conversation_routed_to_city: lastConversationRoutedToCity,
                 last_conversation_used_rag: lastConversationUsedRag,
+                last_conversation_topic_switch_decision: String(lastConversationTopicSwitch?.decision || '').trim(),
+                last_conversation_topic_switch_reason: String(lastConversationTopicSwitch?.reason || '').trim(),
+                last_conversation_topic_switch_fallback: !!lastConversationTopicSwitch?.fallback,
                 cache_only_without_rag_baseline_tokens: cacheOnlyWithoutRagBaselineTokens,
                 cache_only_actual_input_tokens: cacheOnlyActualInputTokens,
                 cache_only_saved_tokens: cacheOnlySavedTokens,

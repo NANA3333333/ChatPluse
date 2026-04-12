@@ -5,11 +5,19 @@ import {
     Briefcase,
     ChevronDown,
     ChevronRight,
+    Cloud,
+    CloudDrizzle,
+    CloudFog,
+    CloudLightning,
+    CloudRain,
+    CloudSun,
     Coffee,
     Moon,
     Package,
     Settings,
     Store,
+    SunMedium,
+    Wind,
 } from 'lucide-react';
 import CityManager from './CityManager';
 import { resolveAvatarUrl } from '../../utils/avatar';
@@ -99,9 +107,121 @@ function getInvertedStateColor(value) {
     return '#f44336';
 }
 
+function getCurrentWeather(events) {
+    if (!Array.isArray(events)) return null;
+    return events.find((event) => String(event.event_type || '').toLowerCase() === 'weather') || null;
+}
+
+function getWeatherVisual(event) {
+    const title = String(event?.title || '');
+    const desc = String(event?.description || '');
+    const text = `${title} ${desc}`;
+    if (/暴风雨|雷暴|storm|thunder/i.test(text)) {
+        return {
+            key: 'storm',
+            label: title || '暴风雨',
+            Icon: CloudLightning,
+            tint: 'linear-gradient(180deg, rgba(43, 56, 86, 0.16), rgba(26, 32, 44, 0.07))',
+            accent: '#5c6ac4',
+            particles: 10,
+        };
+    }
+    if (/大雨|暴雨|rain/i.test(text)) {
+        return {
+            key: 'rain',
+            label: title || '雨天',
+            Icon: CloudRain,
+            tint: 'linear-gradient(180deg, rgba(64, 105, 168, 0.14), rgba(104, 144, 201, 0.06))',
+            accent: '#4f83cc',
+            particles: 14,
+        };
+    }
+    if (/小雨|阵雨|drizzle/i.test(text)) {
+        return {
+            key: 'drizzle',
+            label: title || '小雨',
+            Icon: CloudDrizzle,
+            tint: 'linear-gradient(180deg, rgba(102, 126, 161, 0.12), rgba(159, 184, 218, 0.05))',
+            accent: '#7c93b5',
+            particles: 10,
+        };
+    }
+    if (/大雾|雾|fog/i.test(text)) {
+        return {
+            key: 'fog',
+            label: title || '大雾',
+            Icon: CloudFog,
+            tint: 'linear-gradient(180deg, rgba(215, 223, 233, 0.18), rgba(229, 234, 240, 0.08))',
+            accent: '#90a4ae',
+            particles: 6,
+        };
+    }
+    if (/微风|风|wind/i.test(text)) {
+        return {
+            key: 'wind',
+            label: title || '微风',
+            Icon: Wind,
+            tint: 'linear-gradient(180deg, rgba(163, 230, 197, 0.16), rgba(222, 247, 236, 0.08))',
+            accent: '#2e8b57',
+            particles: 8,
+        };
+    }
+    if (/多云|cloud/i.test(text)) {
+        return {
+            key: 'cloud',
+            label: title || '多云',
+            Icon: CloudSun,
+            tint: 'linear-gradient(180deg, rgba(255, 229, 180, 0.16), rgba(226, 232, 240, 0.08))',
+            accent: '#f59e0b',
+            particles: 6,
+        };
+    }
+    return {
+        key: 'sunny',
+        label: title || '晴天',
+        Icon: SunMedium,
+        tint: 'linear-gradient(180deg, rgba(255, 220, 120, 0.18), rgba(255, 241, 204, 0.06))',
+        accent: '#f59e0b',
+        particles: 5,
+    };
+}
+
+function isWeatherAnnouncement(item) {
+    const haystack = `${item?.title || ''} ${item?.content || ''}`;
+    return /天气|晴天|多云|微风|小雨|大雨|暴风雨|雷暴|大雾|春雨|雨/i.test(haystack);
+}
+
+function getAnnouncementMeta(item) {
+    const sourceType = String(item?.source_type || '').toLowerCase();
+    if (sourceType === 'mayor') {
+        return { label: '市长广播', chipBg: '#efe6ff', chipColor: '#7c3aed', borderColor: '#ddd6fe' };
+    }
+    if (sourceType === 'agency') {
+        return { label: '中介广告', chipBg: '#ffedd5', chipColor: '#c2410c', borderColor: '#fed7aa' };
+    }
+    return { label: '街头公告', chipBg: '#ecfccb', chipColor: '#4d7c0f', borderColor: '#d9f99d' };
+}
+
+function cleanAnnouncementContent(item) {
+    const raw = String(item?.content || '').trim();
+    const withoutPrefix = raw.replace(/^\s*[\[【].{1,12}?[\]】]\s*/, '').trim();
+    return withoutPrefix || raw;
+}
+
+function splitAnnouncementParagraphs(item) {
+    const cleaned = cleanAnnouncementContent(item);
+    return cleaned
+        .split(/\s*[|｜]\s*|\n+/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+}
+
 export default function CityLog({ apiUrl, userProfile }) {
+    const announcementActionTypes = new Set(['ANNOUNCE', 'MAYOR', 'EVENT', 'QUEST']);
     const [tab, setTab] = useState('feed');
     const [logs, setLogs] = useState([]);
+    const [announcements, setAnnouncements] = useState([]);
+    const [events, setEvents] = useState([]);
     const [characters, setCharacters] = useState([]);
     const [loading, setLoading] = useState(true);
     const [expandedBag, setExpandedBag] = useState(null);
@@ -120,13 +240,19 @@ export default function CityLog({ apiUrl, userProfile }) {
     const fetchData = async () => {
         try {
             const headers = { Authorization: `Bearer ${token}` };
-            const [logsRes, charsRes] = await Promise.all([
+            const [logsRes, announcementsRes, eventsRes, charsRes] = await Promise.all([
                 fetch(`${apiUrl}/city/logs?limit=300`, { headers }),
+                fetch(`${apiUrl}/city/announcements?limit=50`, { headers }),
+                fetch(`${apiUrl}/city/events`, { headers }),
                 fetch(`${apiUrl}/city/characters`, { headers }),
             ]);
             const logsData = await logsRes.json();
+            const announcementsData = await announcementsRes.json();
+            const eventsData = await eventsRes.json();
             const charsData = await charsRes.json();
             if (logsData.success) setLogs(logsData.logs || []);
+            if (announcementsData.success) setAnnouncements(announcementsData.announcements || []);
+            if (eventsData.success) setEvents(eventsData.events || []);
             if (charsData.success) setCharacters(charsData.characters || []);
         } catch (e) {
             console.error('CityLog error:', e);
@@ -157,14 +283,16 @@ export default function CityLog({ apiUrl, userProfile }) {
         };
     }, [apiUrl, token]);
 
-    const latestLogDateTag = logs.length > 0
+    const activityLogs = logs.filter((log) => !announcementActionTypes.has(String(log.action_type || '').toUpperCase()));
+
+    const latestLogDateTag = activityLogs.length > 0
         ? (() => {
-            const latest = new Date(logs[0].timestamp);
+            const latest = new Date(activityLogs[0].timestamp);
             return `${latest.getFullYear()}-${String(latest.getMonth() + 1).padStart(2, '0')}-${String(latest.getDate()).padStart(2, '0')}`;
         })()
         : '';
 
-    const groupedLogs = logs.reduce((acc, log) => {
+    const groupedLogs = activityLogs.reduce((acc, log) => {
         const d = new Date(log.timestamp);
         const tag = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
         if (!acc[tag]) acc[tag] = [];
@@ -177,6 +305,13 @@ export default function CityLog({ apiUrl, userProfile }) {
         return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
     })();
 
+    const currentWeather = getCurrentWeather(events);
+    const weatherVisual = currentWeather ? getWeatherVisual(currentWeather) : null;
+    const visibleAnnouncements = announcements.filter((item, index) => {
+        if (!isWeatherAnnouncement(item)) return true;
+        return announcements.findIndex((candidate) => isWeatherAnnouncement(candidate)) === index;
+    });
+
     const isCollapsed = (tag) => {
         if (collapsedDates[tag] !== undefined) return collapsedDates[tag];
         return tag !== latestLogDateTag;
@@ -184,6 +319,31 @@ export default function CityLog({ apiUrl, userProfile }) {
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
+            <style>{`
+                .city-scroll {
+                    scrollbar-width: thin;
+                    scrollbar-color: rgba(148, 163, 184, 0.32) transparent;
+                }
+                .city-scroll::-webkit-scrollbar {
+                    width: 6px;
+                    height: 6px;
+                }
+                .city-scroll::-webkit-scrollbar-track {
+                    background: transparent;
+                }
+                .city-scroll::-webkit-scrollbar-thumb {
+                    background: linear-gradient(180deg, rgba(203, 213, 225, 0.72), rgba(148, 163, 184, 0.38));
+                    border-radius: 999px;
+                    border: 1px solid transparent;
+                    background-clip: padding-box;
+                }
+                .city-scroll::-webkit-scrollbar-thumb:hover {
+                    background: linear-gradient(180deg, rgba(191, 219, 254, 0.78), rgba(148, 163, 184, 0.52));
+                    border-radius: 999px;
+                    border: 1px solid transparent;
+                    background-clip: padding-box;
+                }
+            `}</style>
             <div style={{ display: 'flex', borderBottom: '1px solid #eee', padding: '0 12px', backgroundColor: '#fff', overflowX: 'auto', gap: '8px' }}>
                 <button style={tabStyle(tab === 'feed')} onClick={() => setTab('feed')}>
                     <Activity size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} />实时动态
@@ -212,23 +372,138 @@ export default function CityLog({ apiUrl, userProfile }) {
                     >
                         <div
                             style={{
-                                flex: isMobile ? 'none' : 2,
+                                flex: isMobile ? 'none' : 2.2,
                                 minHeight: isMobile ? '56vh' : 0,
                                 display: 'flex',
                                 flexDirection: 'column',
+                                position: 'relative',
                                 backgroundColor: '#fff',
                                 borderRadius: '12px',
                                 boxShadow: '0 2px 10px rgba(0,0,0,0.05)',
                                 overflow: 'hidden',
                             }}
                         >
-                            <div style={{ padding: '12px 18px', borderBottom: '1px solid #eee', background: 'linear-gradient(to right, #f8f9fa, #fff)' }}>
-                                <h3 style={{ margin: 0, fontSize: isMobile ? '14px' : '15px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <div style={{ padding: '12px 18px', borderBottom: '1px solid #eee', background: weatherVisual ? weatherVisual.tint : 'linear-gradient(to right, #f8f9fa, #fff)' }}>
+                                <h3 style={{ margin: 0, fontSize: isMobile ? '14px' : '15px', display: 'flex', alignItems: 'center', gap: '6px', justifyContent: 'space-between' }}>
                                     <Activity size={16} color="#ff9800" /> 城市动态
                                 </h3>
                             </div>
-                            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px' }}>
-                                {logs.length === 0 ? (
+                            {weatherVisual && (
+                                <div style={{ position: 'absolute', inset: '52px 0 0 0', pointerEvents: 'none', overflow: 'hidden' }}>
+                                    <div style={{ position: 'absolute', inset: 0, background: weatherVisual.tint, opacity: 0.78 }} />
+                                    {Array.from({ length: weatherVisual.particles }).map((_, index) => (
+                                        <span
+                                            key={`weather-particle-${weatherVisual.key}-${index}`}
+                                            style={{
+                                                position: 'absolute',
+                                                left: `${8 + ((index * 11) % 84)}%`,
+                                                top: `${5 + ((index * 9) % 70)}%`,
+                                                width: weatherVisual.key === 'fog' ? '54px' : weatherVisual.key === 'wind' ? '30px' : '2px',
+                                                height: weatherVisual.key === 'fog' ? '12px' : weatherVisual.key === 'wind' ? '2px' : '14px',
+                                                borderRadius: '999px',
+                                                background: weatherVisual.key === 'fog'
+                                                    ? 'rgba(255,255,255,0.24)'
+                                                    : weatherVisual.key === 'wind'
+                                                        ? `${weatherVisual.accent}55`
+                                                        : `${weatherVisual.accent}44`,
+                                                transform: weatherVisual.key === 'wind'
+                                                    ? `translateX(${(index % 4) * 6}px)`
+                                                    : `rotate(${weatherVisual.key === 'storm' ? 18 : 8}deg)`,
+                                                boxShadow: weatherVisual.key === 'sunny'
+                                                    ? `0 0 18px ${weatherVisual.accent}22`
+                                                    : 'none',
+                                            }}
+                                        />
+                                    ))}
+                                </div>
+                            )}
+                            <div className="city-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px', display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: '12px', position: 'relative', zIndex: 1 }}>
+                                <div style={{ flex: isMobile ? 'none' : 0.9, minHeight: isMobile ? '28vh' : 0, display: 'flex', flexDirection: 'column', border: '1px solid #f3e8dc', borderRadius: '10px', overflow: 'hidden', background: '#fffaf5' }}>
+                                    <div style={{ padding: '10px 14px', borderBottom: '1px solid #f3e8dc', background: 'linear-gradient(to right, #fff7ed, #fff)' }}>
+                                        <h3 style={{ margin: 0, fontSize: isMobile ? '13px' : '14px', display: 'flex', alignItems: 'center', gap: '6px', color: '#c2410c' }}>
+                                            <AlertCircle size={15} color="#f97316" /> 公告区
+                                        </h3>
+                                    </div>
+                                    <div className="city-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px' }}>
+                                        {currentWeather && weatherVisual && (
+                                            <div style={{ padding: '10px 12px', borderRadius: '10px', marginBottom: '10px', background: 'rgba(255,255,255,0.72)', border: `1px solid ${weatherVisual.accent}2e`, boxShadow: '0 4px 16px rgba(0,0,0,0.04)' }}>
+                                                <div style={{ display: 'flex', justifyContent: 'space-between', gap: '8px', marginBottom: '4px', alignItems: 'center' }}>
+                                                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '12px', fontWeight: 700, color: weatherVisual.accent }}>
+                                                        <weatherVisual.Icon size={14} />
+                                                        当前天气
+                                                    </span>
+                                                    <span style={{ fontSize: '11px', color: '#b45309', flexShrink: 0 }}>
+                                                        {new Date(currentWeather.created_at || currentWeather.timestamp || Date.now()).toLocaleTimeString()}
+                                                    </span>
+                                                </div>
+                                                <div style={{ fontSize: '13px', fontWeight: 700, color: '#7c2d12', marginBottom: '3px' }}>
+                                                    {currentWeather.emoji || ''} {currentWeather.title || weatherVisual.label}
+                                                </div>
+                                                {currentWeather.description && (
+                                                    <div style={{ fontSize: isMobile ? '12px' : '13px', color: '#7c2d12', lineHeight: 1.65 }}>
+                                                        {currentWeather.description}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                        {visibleAnnouncements.length === 0 ? (
+                                            <div style={{ textAlign: 'center', color: '#bbb', padding: '16px 0', fontSize: '12px' }}>暂无公告</div>
+                                        ) : (
+                                            visibleAnnouncements.map((item) => (
+                                                <div key={`ann-${item.id}`} style={{ padding: '10px 10px 12px', marginBottom: '10px', border: `1px solid ${getAnnouncementMeta(item).borderColor}`, borderRadius: '12px', background: 'rgba(255,255,255,0.72)', boxShadow: '0 4px 14px rgba(120, 53, 15, 0.04)' }}>
+                                                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', marginBottom: '8px', alignItems: 'center' }}>
+                                                        <span style={{ fontSize: '11px', fontWeight: 700, color: getAnnouncementMeta(item).chipColor, background: getAnnouncementMeta(item).chipBg, borderRadius: '999px', padding: '3px 8px', flexShrink: 0 }}>
+                                                            {item.title || (item.source_type === 'mayor' ? '市长广播' : item.source_type === 'agency' ? '中介广告' : '街头公告')}
+                                                        </span>
+                                                        <span style={{ fontSize: '11px', color: '#b45309', flexShrink: 0 }}>{new Date(item.timestamp).toLocaleTimeString()}</span>
+                                                    </div>
+                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                                        {item.title && (
+                                                            <div style={{ fontSize: '13px', fontWeight: 700, color: '#7c2d12', wordBreak: 'break-word' }}>
+                                                                {item.title}
+                                                            </div>
+                                                        )}
+                                                        {splitAnnouncementParagraphs(item).map((part, index) => (
+                                                            <div
+                                                                key={`ann-${item.id}-part-${index}`}
+                                                                style={{
+                                                                    fontSize: isMobile ? '12px' : '13px',
+                                                                    color: '#7c2d12',
+                                                                    lineHeight: 1.7,
+                                                                    wordBreak: 'break-word',
+                                                                    paddingLeft: index === 0 ? 0 : '10px',
+                                                                    borderLeft: index === 0 ? 'none' : '2px solid rgba(249, 115, 22, 0.16)',
+                                                                }}
+                                                            >
+                                                                {part}
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div
+                                    style={{
+                                        flex: isMobile ? 'none' : 1.8,
+                                        minHeight: isMobile ? '36vh' : 0,
+                                        display: 'flex',
+                                        flexDirection: 'column',
+                                        border: '1px solid #eee',
+                                        borderRadius: '10px',
+                                        overflow: 'hidden',
+                                        background: '#fff',
+                                    }}
+                                >
+                                    <div style={{ padding: '10px 14px', borderBottom: '1px solid #eee', background: 'linear-gradient(to right, #f8f9fa, #fff)' }}>
+                                        <h3 style={{ margin: 0, fontSize: isMobile ? '13px' : '14px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                            <Activity size={15} color="#ff9800" /> 个人活动
+                                        </h3>
+                                    </div>
+                                    <div className="city-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '10px' }}>
+                                {activityLogs.length === 0 ? (
                                     <div style={{ textAlign: 'center', color: '#bbb', marginTop: '40px', fontSize: '13px' }}>暂无动态，等待模拟引擎运行...</div>
                                 ) : (
                                     Object.keys(groupedLogs)
@@ -369,6 +644,8 @@ export default function CityLog({ apiUrl, userProfile }) {
                                             );
                                         })
                                 )}
+                                    </div>
+                                </div>
                             </div>
                         </div>
 
@@ -387,7 +664,7 @@ export default function CityLog({ apiUrl, userProfile }) {
                             <div style={{ padding: '12px 18px', borderBottom: '1px solid #eee' }}>
                                 <h3 style={{ margin: 0, fontSize: isMobile ? '14px' : '15px' }}>人口状态</h3>
                             </div>
-                            <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px' }}>
+                            <div className="city-scroll" style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '8px' }}>
                                 {characters.map((c) => {
                                     const status = getStatusDetails(c.city_status);
                                     const emotion = deriveEmotion(c);

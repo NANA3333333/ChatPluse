@@ -226,10 +226,35 @@ module.exports = function initCityPlugin(app, context) {
             district?.id,
             district?.name,
             district?.action_label,
-            district?.description
+            district?.description,
+            district?.type
         ]
             .map(v => String(v || '').trim())
             .filter(Boolean);
+    }
+
+    function resolveStructuredTypeAlias(normalized = '') {
+        const value = normalizeDistrictText(normalized);
+        if (!value) return '';
+        if (['home'].includes(value)) return 'home';
+        if (['rest', 'sleep', 'sleeping'].includes(value)) return 'rest';
+        if (['food', 'eat', 'restaurant', 'meal', 'convenience'].includes(value)) return 'food';
+        if (['work', 'factory', 'job'].includes(value)) return 'work';
+        if (['hospital', 'medical', 'doctor'].includes(value)) return 'medical';
+        if (['park', 'leisure'].includes(value)) return 'leisure';
+        if (['street', 'wander'].includes(value)) return 'wander';
+        if (['mall', 'shopping'].includes(value)) return 'shopping';
+        if (['school', 'education', 'study'].includes(value)) return 'education';
+        if (['casino', 'gambling'].includes(value)) return 'gambling';
+        if ([
+            'hacker',
+            'hackerspace',
+            'hackerspot',
+            'hackersite',
+            'hackerdistrict',
+            'hacker_space'
+        ].map(v => normalizeDistrictText(v)).includes(value)) return 'hacker';
+        return value;
     }
 
     function scoreDistrictFromText(text, district) {
@@ -291,6 +316,22 @@ module.exports = function initCityPlugin(app, context) {
             || null;
     }
 
+    function buildCollapsedCityLog(char, reason, options = {}) {
+        const district = options.district || null;
+        const locationText = district ? `${district.emoji || ''}${district.name || district.id || ''}` : (options.locationLabel || '');
+        const parts = [
+            '【商业街输出折叠】',
+            String(char?.name || '角色').trim() || '角色',
+            locationText ? `地点=${locationText}` : '',
+            reason ? `原因=${String(reason).trim()}` : ''
+        ].filter(Boolean);
+        return parts.join(' | ');
+    }
+
+    function isCollapsedCityLog(text = '') {
+        return String(text || '').trim().startsWith('【商业街输出折叠】');
+    }
+
     function parseSuggestedDistrictCandidates(message, districts) {
         const text = String(message || '').trim().toLowerCase();
         if (!text) return [];
@@ -336,33 +377,6 @@ module.exports = function initCityPlugin(app, context) {
         return deduped;
     }
 
-    function buildSuggestedActionLog(char, district, sourceLabel, reason = '') {
-        const reasonTail = reason ? ` ${reason}` : '';
-        const promptTail = sourceLabel === '群聊'
-            ? '被群里的话撩得有点坐不住。'
-            : '脑子里还挂着用户刚刚那句话。';
-
-        switch (district.type) {
-            case 'work':
-                return `${char.name} 被这句话一催，低头抓了把头发，还是认命地动了起来。${promptTail} 他/她拎着东西往 ${district.emoji}${district.name} 去，心里一边嫌麻烦，一边盘算今天能不能多赚一点。${reasonTail}`.trim();
-            case 'food':
-                return `${char.name} 本来还在硬撑，结果被一提醒，胃里那点空劲一下子翻上来了。${promptTail} 他/她转身就往 ${district.emoji}${district.name} 走，打算先把肚子安抚住再说。${reasonTail}`.trim();
-            case 'rest':
-                return `${char.name} 嘴上还想逞强，身体却先投降了。${promptTail} 他/她慢吞吞挪去 ${district.emoji}${district.name}，只想先躺下缓一口气。${reasonTail}`.trim();
-            case 'medical':
-                return `${char.name} 被这么一说，也意识到自己现在这状态确实不太妙。${promptTail} 他/她老老实实往 ${district.emoji}${district.name} 去，想着至少先把人稳住。${reasonTail}`.trim();
-            case 'education':
-                return `${char.name} 本来还有点拖延，结果被一句话点醒，收拾了下东西就往 ${district.emoji}${district.name} 去。${promptTail}${reasonTail}`.trim();
-            case 'shopping':
-                return `${char.name} 被提醒后心里一动，想起自己确实该去处理点东西了。${promptTail} 他/她拐去 ${district.emoji}${district.name}，边走边琢磨今天要买什么。${reasonTail}`.trim();
-            case 'leisure':
-            case 'wander':
-                return `${char.name} 被这么一撩，心也跟着动了。${promptTail} 他/她干脆朝 ${district.emoji}${district.name} 晃过去，想让脑子和情绪都散一散。${reasonTail}`.trim();
-            default:
-                return `${char.name} 听完后愣了两秒，还是顺手把眼前的事一收，朝 ${district.emoji}${district.name} 过去了。${promptTail}${reasonTail}`.trim();
-        }
-    }
-
     async function maybeTriggerSuggestedCityAction(userId, characterId, content, sourceLabel = '私聊') {
         const db = ensureCityDb(context.getUserDb(userId));
         const config = db.city.getConfig();
@@ -397,7 +411,7 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
   "accept": true,
   "district_id": "factory",
   "reason": "为什么接受或拒绝，简短",
-  "log": "如果接受，1-2句第三人称或自然叙述，描述你立刻去做这件事；如果拒绝则留空"
+  "log": "如果接受，自然描述你立刻去做这件事；如果拒绝则留空"
 }
 
 如果不是明确建议，或者你不会立刻去做，就返回 {"accept":false,"district_id":"","reason":"...", "log":""}。`;
@@ -415,7 +429,7 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
                     key: char.api_key,
                     model: char.model_name,
                     messages,
-                    maxTokens: 220,
+                    maxTokens: 3000,
                     temperature: 0.4
                 });
                 recordCityLlmDebug(db, char, 'output', 'city_suggestion_action', reply, { model: char.model_name, sourceLabel });
@@ -435,12 +449,12 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
         const activeEvents = db.city.getActiveEvents();
         const currentCals = char.calories ?? 2000;
         const narrations = {
-            log: decision.log || buildSuggestedActionLog(char, district, sourceLabel, decision.reason || ''),
+            log: String(decision.log || '').trim() || buildCollapsedCityLog(char, '建议行动文案生成失败', { district }),
             chat: '',
             moment: '',
-            diary: decision.reason ? `我会这么做，原因是：${decision.reason}` : ''
+            diary: ''
         };
-        applyDecision(district, char, db, userId, currentCals, config, activeEvents, narrations);
+            await applyDecision(district, char, db, userId, currentCals, config, activeEvents, narrations, { preserveDirectedDistrict: true });
         return { triggered: true, districtId: district.id, reason: decision.reason || '' };
     }
 
@@ -527,72 +541,51 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
         return clamp(Math.round(derived), 0, 100);
     }
 
-    function buildBrokeFallbackLog(char, district, requiredMoney) {
-        const wallet = Number(char.wallet || 0);
-        const need = Math.max(0, Math.ceil(Number(requiredMoney || 0)));
-        const shortfall = Math.max(0, need - wallet);
-        const emotion = deriveEmotion(char).state;
-
-        if (emotion === 'angry' || emotion === 'irritated') {
-            return `${char.name} 本来都走到 ${district.emoji}${district.name} 门口了，伸手一摸口袋，才发现还差 ${shortfall} 金币，脸一下子就沉了，只能憋着火转身走开。`;
-        }
-        if (emotion === 'hurt' || emotion === 'sad') {
-            return `${char.name} 在 ${district.emoji}${district.name} 前站了一会儿，低头把手里的钱来回数了两遍，还是差 ${shortfall} 金币，最后什么也没说，默默作罢。`;
-        }
-        if (emotion === 'lonely') {
-            return `${char.name} 本来想去 ${district.emoji}${district.name} 找点热闹，结果数了数口袋里的钱，离门槛还差 ${shortfall} 金币，只好把那点心思又按了回去。`;
-        }
-        if (district.type === 'food') {
-            return `${char.name} 胃都已经在催了，脚步也拐到 ${district.emoji}${district.name} 这边来了，结果钱一掏出来还差 ${shortfall} 金币，只能站在门口咽了口气，掉头去想别的办法。`;
-        }
-        if (district.type === 'leisure' || district.type === 'shopping') {
-            return `${char.name} 本来都被 ${district.emoji}${district.name} 勾得心痒了，临到要进去才发现手头的钱不够，还差 ${shortfall} 金币，只能装作若无其事地从门口晃过去。`;
-        }
-        return `${char.name} 想去 ${district.emoji}${district.name}，结果把口袋翻了个遍，手头只有 ${wallet} 金币，离需要的 ${need} 金币还差 ${shortfall}，最后还是只能先忍住。`;
+    function getAvailableDistrictItems(db, districtId) {
+        if (!db?.city || !districtId) return [];
+        return db.city.getItemsAtDistrict(districtId)
+            .filter(item => Number(item?.stock ?? -1) === -1 || Number(item?.stock ?? 0) > 0);
     }
 
-    function buildActionFallbackLog(char, district, db) {
-        const previousDistrict = char.location ? db.city.getDistrict(char.location) : null;
-        const fromText = previousDistrict && previousDistrict.id !== district.id
-            ? `从 ${previousDistrict.emoji}${previousDistrict.name} 离开，`
-            : '';
-        const state = normalizeSurvivalState(char);
-        const physical = getPhysicalCondition(char, state, char.calories ?? 2000);
-        const emotion = deriveEmotion(char).state;
+    function formatDistrictItemsForPrompt(items = []) {
+        if (!Array.isArray(items) || items.length === 0) return '无';
+        return items.map(item => {
+            const stockText = Number(item?.stock ?? -1) === -1 ? '库存不限' : `库存${Number(item?.stock || 0)}`;
+            const priceText = `${Number(item?.buy_price || 0)}金币`;
+            const calText = Number(item?.cal_restore || 0) > 0 ? `+${Number(item.cal_restore)}卡` : '无热量恢复';
+            return `${item.emoji || ''}${item.name}(${priceText}, ${calText}, ${stockText})`;
+        }).join('、');
+    }
 
-        const statusLead = (() => {
-            if (physical.level === 'critical') return '整个人都在硬撑，';
-            if (physical.level === 'drained') return '身体发沉，还是咬牙动了起来，';
-            if (physical.level === 'tired') return '状态不算好，动作也慢了半拍，';
-            if (state.stomach_load >= 70) return '胃里还有点发撑，脚步却没停，';
-            if (state.satiety <= 20 || (char.calories ?? 2000) <= 700) return '肚子里空空的，心思也有点飘，';
-            if (state.health <= 40) return '身上还带着点不舒服，';
-            if (state.stress >= 70) return '心里压着事，';
-            if (emotion === 'happy') return '精神头还算足，';
-            if (emotion === 'hurt' || emotion === 'sad') return '情绪没完全缓过来，';
-            return '';
-        })();
+    function pickSettledShopItemFromNarrations(shopItems = [], richNarrations = null) {
+        if (!Array.isArray(shopItems) || shopItems.length === 0) return null;
+        const haystack = [
+            richNarrations?.log,
+            richNarrations?.diary,
+            richNarrations?.moment,
+            richNarrations?.chat
+        ].map(value => String(value || '').trim().toLowerCase()).filter(Boolean).join('\n');
+        if (!haystack) return null;
 
-        switch (district.type) {
-            case 'work':
-                return `${char.name} ${fromText}${statusLead}朝 ${district.emoji}${district.name} 赶去，准备把手头这班活接上，看看今天还能不能再多挣一点。`.replace(/\s+/g, ' ').trim();
-            case 'food':
-                return `${char.name} ${fromText}${statusLead}拐进 ${district.emoji}${district.name}，想着先把肚子和整个人都安顿住再说。`.replace(/\s+/g, ' ').trim();
-            case 'rest':
-                return `${char.name} ${fromText}${statusLead}回到 ${district.emoji}${district.name}，总算肯把自己往床边或椅子上一丢，先缓口气。`.replace(/\s+/g, ' ').trim();
-            case 'medical':
-                return `${char.name} ${fromText}${statusLead}老老实实去了 ${district.emoji}${district.name}，打算先把身体这点不对劲处理一下。`.replace(/\s+/g, ' ').trim();
-            case 'shopping':
-                return `${char.name} ${fromText}${statusLead}绕去 ${district.emoji}${district.name}，边走边盘算今天到底要补点什么。`.replace(/\s+/g, ' ').trim();
-            case 'education':
-                return `${char.name} ${fromText}${statusLead}收了收神，往 ${district.emoji}${district.name} 去，打算把该学的东西先啃一点。`.replace(/\s+/g, ' ').trim();
-            case 'leisure':
-                return `${char.name} ${fromText}${statusLead}晃到 ${district.emoji}${district.name} 去，想让脑子和情绪都稍微松一松。`.replace(/\s+/g, ' ').trim();
-            case 'wander':
-                return `${char.name} ${fromText}${statusLead}在商业街里慢慢晃开，想边走边把脑子里的杂音散掉一点。`.replace(/\s+/g, ' ').trim();
-            default:
-                return `${char.name} ${fromText}${statusLead}去了 ${district.emoji}${district.name}，准备把眼前这件事先处理掉。`.replace(/\s+/g, ' ').trim();
+        let best = null;
+        for (const item of shopItems) {
+            const aliases = [
+                item?.id,
+                item?.name,
+                item?.emoji
+            ].map(value => String(value || '').trim().toLowerCase()).filter(Boolean);
+            let score = 0;
+            for (const alias of aliases) {
+                if (!alias) continue;
+                if (haystack.includes(alias)) {
+                    score = Math.max(score, alias.length + (alias === String(item?.name || '').trim().toLowerCase() ? 10 : 0));
+                }
+            }
+            if (score > 0 && (!best || score > best.score)) {
+                best = { item, score };
+            }
         }
+        return best?.item || null;
     }
 
     function isHackerDistrict(district) {
@@ -614,6 +607,23 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
         } catch (e) {
             return String(timestamp || '');
         }
+    }
+
+    function buildCityAttemptRecorder(db, character, contextType, baseMeta = {}) {
+        return (attemptMeta = {}) => {
+            recordCityLlmDebug(
+                db,
+                character,
+                attemptMeta.phase === 'start' ? 'attempt' : 'attempt_result',
+                contextType,
+                '',
+                {
+                    ...baseMeta,
+                    llm_attempt: true,
+                    ...attemptMeta
+                }
+            );
+        };
     }
 
     function clipHackerIntelContent(content, maxLength = 90) {
@@ -674,52 +684,132 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
     }
 
     function buildReplyIntentNarrationsFallback(char, district, replyText, db) {
-        const previousDistrict = char.location ? db.city.getDistrict(char.location) : null;
-        const fromText = previousDistrict && previousDistrict.id !== district.id
-            ? `从 ${previousDistrict.emoji}${previousDistrict.name} 那边挪开，`
-            : '';
-        const normalizedReply = String(replyText || '').replace(/\[[^\]]+\]/g, ' ').replace(/\s+/g, ' ').trim();
-        const districtLabel = `${district.emoji}${district.name}`;
         return {
-            log: normalizedReply
-                ? `${char.name} ${fromText}顺着刚才私聊里定下的主意，往 ${districtLabel} 去了。`
-                : `${char.name} ${fromText}往 ${districtLabel} 去了。`,
+            log: buildCollapsedCityLog(char, '私聊行动文案生成失败', { district }),
             chat: '',
             moment: '',
             diary: ''
         };
     }
 
+    async function buildGamblingOutcomeNarrations(char, district, db, outcome = {}, styleHint = null) {
+        const fallbackLog = buildCollapsedCityLog(char, outcome.didWin ? '赌场赢钱文案生成失败' : '赌场输钱文案生成失败', { district });
+        const fallback = { log: fallbackLog, chat: '', moment: '', diary: '' };
+
+        if (!(char.api_endpoint && char.api_key && char.model_name)) return fallback;
+
+        const currentLocation = char.location ? db.city.getDistrict(char.location) : null;
+        const currentLocationLabel = currentLocation ? `${currentLocation.emoji}${currentLocation.name}` : (char.location || '未知地点');
+        const walletBefore = Number(char.wallet || 0);
+        const walletAfter = Math.max(0, walletBefore + Number(outcome.moneyDelta || 0));
+        const styleText = styleHint && typeof styleHint === 'object'
+            ? [styleHint.log, styleHint.diary, styleHint.moment, styleHint.chat].map(v => String(v || '').trim()).filter(Boolean)[0] || ''
+            : '';
+
+        const prompt = `你正在生成一次正常的商业街赌场行动结果。
+
+角色：${char.name}
+当前地点：${currentLocationLabel}
+目标地点：${district.emoji}${district.name}
+
+[已确定的赌场结果]
+- 这次结果已经结算完成，不能改写。
+- 胜负：${outcome.didWin ? '赢了' : '输了'}
+- 金币变化：${Number(outcome.moneyDelta || 0) >= 0 ? '+' : ''}${Number(outcome.moneyDelta || 0)}
+- 行动后钱包：${walletAfter}
+- 体力变化：${Number(outcome.calDelta || 0)}
+
+要求：
+- 只根据上面的既定结果写这次赌场行动里实际发生了什么。
+- 你不能把赢写成输，也不能把输写成赢。
+- log 要像普通商业街行动记录，有画面、动作和结果，但不要写成固定模板。
+- chat / moment / diary 默认可留空；只有自然出现时才填写。
+- 不要写系统、后台、日志、结算、触发器。
+${styleText ? `- 可轻微参考这段既有语气，但只能参考语气，不能覆盖既定输赢事实：${styleText}` : ''}
+
+严格返回 JSON 对象：
+{
+  "log": "自然的赌场行动记录",
+  "chat": "",
+  "moment": "",
+  "diary": ""
+}`;
+
+        try {
+            const messages = [
+                { role: 'system', content: '你是角色自己的现实行动记录器。你只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
+                { role: 'user', content: prompt }
+            ];
+            recordCityLlmDebug(db, char, 'input', 'city_gambling_outcome_narration', messages, {
+                model: char.model_name,
+                districtId: district.id,
+                didWin: !!outcome.didWin
+            });
+            const reply = await callLLM({
+                endpoint: char.api_endpoint,
+                key: char.api_key,
+                model: char.model_name,
+                messages,
+                maxTokens: 3000,
+                temperature: 0.7,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_gambling_outcome_narration', {
+                    districtId: district.id,
+                    didWin: !!outcome.didWin
+                })
+            });
+            recordCityLlmDebug(db, char, 'output', 'city_gambling_outcome_narration', reply, {
+                model: char.model_name,
+                districtId: district.id,
+                didWin: !!outcome.didWin
+            });
+            const parsed = parseLooseJsonObject(reply);
+            if (parsed && typeof parsed === 'object') {
+                return {
+                    log: String(parsed.log || '').trim() || fallback.log,
+                    chat: String(parsed.chat || '').trim(),
+                    moment: String(parsed.moment || '').trim(),
+                    diary: String(parsed.diary || '').trim()
+                };
+            }
+        } catch (err) {
+            console.warn(`[City] 赌场结果文案生成失败 ${char.name}: ${err.message}`);
+        }
+
+        return fallback;
+    }
+
     async function buildReplyIntentNarrations(char, district, replyText, db) {
         const previousDistrict = char.location ? db.city.getDistrict(char.location) : null;
         const previousDistrictLabel = previousDistrict ? `${previousDistrict.emoji}${previousDistrict.name}` : '当前位置';
         const targetDistrictLabel = `${district.emoji}${district.name}`;
-        const normalizedReply = String(replyText || '').replace(/\[[^\]]+\]/g, ' ').replace(/\s+/g, ' ').trim();
 
         if (!(char.api_endpoint && char.api_key && char.model_name)) {
             return buildReplyIntentNarrationsFallback(char, district, replyText, db);
         }
 
-        const prompt = `你正在把“角色刚在私聊里作出的现实行动决定”转成商业街动作结果。
+        const prompt = `你正在生成一次正常的商业街活动结果。
 
 角色：${char.name}
 角色当前地点：${previousDistrictLabel}
 目标地点：${targetDistrictLabel}
 目标地点类型：${district.type || 'generic'}
-刚才私聊里的原始回复：
-${normalizedReply || '（空）'}
+
+[触发信号]
+- 这次商业街活动已经确认开启。
+- 目标地点已经锁定为 ${targetDistrictLabel}。
+- 信号只负责“确认开启 + 指定去哪”，不是让你续写私聊对白。
 
 要求：
-1. 这次商业街动作必须被理解为“角色自己刚刚决定去做”，不是系统替角色脑补。
-2. 只根据上面这句私聊回复来写，不要额外发明“继续闹/算后账/被催着去”等没有明确说出的心理戏。
-3. log 要像商业街活动记录，1-2句，贴近角色刚才那句私聊的真实语气。
-4. chat / moment / diary 默认可留空；只有当角色刚才那句私聊里已经明显带出这些内容时才填写。
+1. 把这次输出当成一次普通商业街活动记录来写，不要围着私聊原话打转。
+2. 重点参考：当前地点、目标地点、角色当前状态，以及商业街活动本身的连续性。
+3. log 要像自然发生的商业街活动记录，不要写成固定模板。
+4. chat / moment / diary 默认可留空；只有这次行动里真的自然出现时才填写。
 5. 不要写系统、后台、模板、日志、触发器。
 6. 如果目标地点属于吃饭/购物场景，不要提前编造“具体买了/吃了哪件商品”；商品结算会在后续真实发生。
 
 严格返回 JSON 对象：
 {
-  "log": "1-2句商业街活动记录",
+  "log": "自然的商业街活动记录",
   "chat": "",
   "moment": "",
   "diary": ""
@@ -740,8 +830,12 @@ ${normalizedReply || '（空）'}
                 key: char.api_key,
                 model: char.model_name,
                 messages,
-                maxTokens: 260,
-                temperature: 0.35
+                maxTokens: 3000,
+                temperature: 0.35,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_reply_intent_narration', {
+                    from: previousDistrict?.id || '',
+                    to: district.id || ''
+                })
             });
             recordCityLlmDebug(db, char, 'output', 'city_reply_intent_narration', reply, {
                 model: char.model_name,
@@ -796,8 +890,11 @@ ${normalizedReply || '（空）'}
                 key: char.api_key,
                 model: char.model_name,
                 messages,
-                maxTokens: 120,
-                temperature: 0.5
+                maxTokens: 3000,
+                temperature: 0.5,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_private_self_prompt', {
+                    districtId: district.id
+                })
             });
             recordCityLlmDebug(db, char, 'output', 'city_private_self_prompt', reply, { model: char.model_name, districtId: district.id });
             const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').replace(/\s+/g, ' ').trim();
@@ -835,32 +932,37 @@ ${normalizedReply || '（空）'}
         return null;
     }
 
-    async function runPrivateReplyDirectedCityAction(userId, char, district, replyText, db, config, extraPrompt = '') {
+    async function runPrivateReplyDirectedCityAction(userId, char, district, replyText, db, config) {
         const activeEvents = db.city.getActiveEvents();
         const currentCals = char.calories ?? 2000;
         const districts = db.city.getEnabledDistricts();
         const inventory = db.city.getInventory(char.id);
+        const availableDistrictItems = getAvailableDistrictItems(db, district.id);
+        const districtItemsPrompt = availableDistrictItems.length > 0
+            ? `\n[当前目标地点可用商品]\n${district.name} 现在真实可用的商品只有：${formatDistrictItemsForPrompt(availableDistrictItems)}\n- 如果你在 log / diary / moment / chat 里提到具体吃了、买了、拿了什么，只能从上面这些商品里选。\n- 可以不写具体商品；但如果写了，就绝对不要编造清单外的食物或商品。`
+            : '';
         const engineContextWrapper = { getUserDb: context.getUserDb, getMemory: context.getMemory };
         const universalResult = await buildUniversalContext(engineContextWrapper, char, '', false);
-        const basePrompt = buildSurvivalPrompt(districts, { ...char, calories: currentCals }, inventory, activeEvents, universalResult, district);
+        const questContext = buildQuestPromptContext(db.city.getActiveQuests(), db.city.getCharacterActiveQuestClaim?.(char.id));
+        const basePrompt = buildSurvivalPrompt(districts, { ...char, calories: currentCals }, inventory, activeEvents, universalResult, district, questContext);
 
-        const normalizedReply = String(replyText || '').replace(/\[[^\]]+\]/g, ' ').replace(/\s+/g, ' ').trim();
         const directedPrompt = `${basePrompt}
 
-[私聊触发来源]
-你刚在私聊里已经决定要去 ${district.emoji}${district.name}。
-刚才私聊里的原话：${normalizedReply || '（空）'}
-你给自己写的行动规范：${String(extraPrompt || '').trim() || `去 ${district.name} 做刚才自己决定好的事。`}
+[触发信号]
+- 本轮已经确认开启商业街活动。
+- 目标地点已锁定为 ${district.emoji}${district.name}。
+- 信号只负责“确认开启 + 指定去哪”，不是让你续写私聊对白。
 
 [这次商业街行动的额外要求]
-- 这次是“把刚才私聊里的决定真正落地”，不是重新犹豫要不要去。
+- 这次按普通商业街活动生成，只是目的地已经锁定，不需要重新犹豫要不要去。
 - action 必须选择 [${String(district.id || '').toUpperCase()}]。
-- log 要写成这次去 ${district.name} 实际发生了什么，贴近你刚才给自己的行动规范。
-- 如果私聊里的决定带着明显情绪，就让商业街行动延续这个情绪，但不要夸张到失真。`;
+- log 要写成这次去 ${district.name} 实际发生了什么，优先参考当前状态、当前位置、最近商业街连续性和商业街常规输入。
+- 不要复述私聊对白，不要围绕“刚才那句话”做二次改写。
+- 如果当前状态里已经带着明显情绪，就让商业街行动自然延续，但不要夸张到失真。${districtItemsPrompt}`;
 
         if (!(char.api_endpoint && char.api_key && char.model_name)) {
             const fallbackNarrations = await buildReplyIntentNarrations(char, district, replyText, db);
-            applyDecision(district, char, db, userId, currentCals, config, activeEvents, fallbackNarrations);
+            await applyDecision(district, char, db, userId, currentCals, config, activeEvents, fallbackNarrations, { preserveDirectedDistrict: true });
             return { triggered: true, districtId: district.id, mode: 'fallback_no_api' };
         }
 
@@ -872,16 +974,19 @@ ${normalizedReply || '（空）'}
             recordCityLlmDebug(db, char, 'input', 'city_private_reply_directed_action', messages, {
                 model: char.model_name,
                 districtId: district.id,
-                location: char.location || '',
-                selfPrompt: String(extraPrompt || '')
+                location: char.location || ''
             });
             const reply = await callLLM({
                 endpoint: char.api_endpoint,
                 key: char.api_key,
                 model: char.model_name,
                 messages,
-                maxTokens: 900,
-                temperature: 0.75
+                maxTokens: 3000,
+                temperature: 0.75,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_private_reply_directed_action', {
+                    districtId: district.id,
+                    location: char.location || ''
+                })
             });
             recordCityLlmDebug(db, char, 'output', 'city_private_reply_directed_action', reply, {
                 model: char.model_name,
@@ -891,7 +996,7 @@ ${normalizedReply || '（空）'}
 
             const richNarrations = tryParseCityActionReply(reply);
             if (richNarrations && typeof richNarrations === 'object') {
-                applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations);
+                await applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations, { preserveDirectedDistrict: true });
                 return { triggered: true, districtId: district.id, mode: 'directed_city_action' };
             }
         } catch (err) {
@@ -899,7 +1004,7 @@ ${normalizedReply || '（空）'}
         }
 
         const fallbackNarrations = await buildReplyIntentNarrations(char, district, replyText, db);
-        applyDecision(district, char, db, userId, currentCals, config, activeEvents, fallbackNarrations);
+        await applyDecision(district, char, db, userId, currentCals, config, activeEvents, fallbackNarrations, { preserveDirectedDistrict: true });
         return { triggered: true, districtId: district.id, mode: 'directed_fallback' };
     }
 
@@ -929,14 +1034,217 @@ ${normalizedReply || '（空）'}
         return false;
     }
 
+    function buildRecentNarrationAntiRepeatBlock(db, char, district) {
+        try {
+            const recentLogs = db?.city?.getCharacterRecentLogs?.(char.id, 8) || [];
+            const targetLocation = String(district?.id || '').trim();
+            const targetActionTypes = new Set();
+            if (district?.id === 'restaurant') targetActionTypes.add('EAT');
+            if (district?.id === 'convenience') targetActionTypes.add('BUY');
+            if (district?.type === 'food' && targetActionTypes.size === 0) targetActionTypes.add('EAT');
+            if (district?.type === 'shopping' && targetActionTypes.size === 0) targetActionTypes.add('BUY');
+
+            const sameFamilyLogs = recentLogs
+                .filter((log) => {
+                    const logLocation = String(log.location || '').trim();
+                    const logType = String(log.action_type || '').trim().toUpperCase();
+                    if (targetLocation && logLocation === targetLocation) return true;
+                    return targetActionTypes.has(logType);
+                })
+                .map((log) => String(log.message || '').trim())
+                .filter((text) => text && !isCollapsedCityLog(text))
+                .slice(0, 3);
+
+            if (sameFamilyLogs.length === 0) return '';
+            return `\n[最近同类文案，禁止复写句式]\n${sameFamilyLogs.map((text) => `- ${text}`).join('\n')}\n- 不要沿用这些文案的开头、动机句、收尾句或明显措辞。`;
+        } catch (e) {
+            return '';
+        }
+    }
+
+    async function regenerateActionNarrations(char, district, db, baseNarrations = {}, options = {}) {
+        if (!(char?.api_endpoint && char?.api_key && char?.model_name)) {
+            return baseNarrations;
+        }
+
+        const currentLocation = char.location ? db.city.getDistrict(char.location) : null;
+        const currentLocationLabel = currentLocation ? `${currentLocation.emoji}${currentLocation.name}` : (char.location || '当前位置');
+        const districtLabel = `${district.emoji || ''}${district.name || district.id || '未知地点'}`;
+        const state = normalizeSurvivalState(char);
+        const calories = Number(options.currentCals ?? char.calories ?? 2000);
+        const recentAntiRepeat = buildRecentNarrationAntiRepeatBlock(db, char, district);
+        const itemLine = options.item
+            ? `\n[这次实际涉及的物品]\n- ${options.item.emoji || ''}${options.item.name || options.item.id || '物品'}`
+            : '';
+        const draftText = [
+            baseNarrations?.log,
+            baseNarrations?.chat,
+            baseNarrations?.moment,
+            baseNarrations?.diary
+        ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+        const districtSpecificRule = district.id === 'restaurant'
+            ? '- 这是餐厅堂食/现场吃饭，不要写成便利店买完带走。'
+            : district.id === 'convenience'
+                ? '- 这是便利店购买/带走场景，不要写成坐下来正式堂食。'
+                : '';
+
+        const prompt = `你要为一次已经确定发生的商业街行动，重写最终文案。
+
+角色：${char.name}
+当前位置：${currentLocationLabel}
+本次地点：${districtLabel}
+地点类型：${district.type || 'generic'}
+体力：${calories}/4000
+金币：${Number(char.wallet || 0)}
+精力：${state.energy} 睡眠债：${state.sleep_debt} 心情：${state.mood} 压力：${state.stress} 饱腹：${state.satiety} 胃负担：${state.stomach_load}${itemLine}${recentAntiRepeat}
+
+[已有草稿，仅供参考，不得照抄]
+${draftText || '（无）'}
+
+要求：
+- 只重写这次行动本身，不改动作结果，不改地点，不改物品。
+- 最终文案必须像真人刚经历完这件事，不要套固定模板。
+- 不要出现“肚子里空空的”“想先把肚子和整个人安顿好”“从家离开”这类高复用套话。
+- log 要有具体动作、感受或现场细节，但不要写成系统总结。
+- chat / moment / diary 可以留空，只有自然冒出来时才写。
+${districtSpecificRule ? districtSpecificRule + '\n' : ''}严格返回 JSON：
+{
+  "log": "重写后的商业街行动文案",
+  "chat": "",
+  "moment": "",
+  "diary": ""
+}`;
+
+        try {
+            const messages = [
+                { role: 'system', content: '你是角色自己的现实行动记录器。只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
+                { role: 'user', content: prompt }
+            ];
+            recordCityLlmDebug(db, char, 'input', 'city_action_regenerate_narration', messages, {
+                model: char.model_name,
+                districtId: district.id,
+                location: char.location || ''
+            });
+            const reply = await callLLM({
+                endpoint: char.api_endpoint,
+                key: char.api_key,
+                model: char.model_name,
+                messages,
+                maxTokens: 3000,
+                temperature: 0.9,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_action_regenerate_narration', {
+                    districtId: district.id,
+                    location: char.location || ''
+                })
+            });
+            recordCityLlmDebug(db, char, 'output', 'city_action_regenerate_narration', reply, {
+                model: char.model_name,
+                districtId: district.id,
+                location: char.location || ''
+            });
+            const parsed = tryParseCityActionReply(reply);
+            if (parsed && typeof parsed === 'object') {
+                return {
+                    ...baseNarrations,
+                    ...parsed,
+                    log: String(parsed.log || '').trim() || String(baseNarrations?.log || '').trim()
+                };
+            }
+        } catch (err) {
+            console.warn(`[City] 行动文案重写失败 ${char?.name || ''}: ${err.message}`);
+        }
+
+        return baseNarrations;
+    }
+
+    async function buildQuestResolutionNarrations(char, quest, district, db, outcome = 'success') {
+        const fallbackLog = buildCollapsedCityLog(char, outcome === 'success' ? '任务完成文案生成失败' : '任务失败文案生成失败', { district });
+        const fallbackSystemLog = buildCollapsedCityLog(char, outcome === 'success' ? '任务系统播报生成失败' : '任务失效播报生成失败', { district });
+        const fallbackAnnouncement = buildCollapsedCityLog(char, outcome === 'success' ? '任务完成公告生成失败' : '任务失效公告生成失败', { district });
+
+        if (!(char?.api_endpoint && char?.api_key && char?.model_name)) {
+            return {
+                log: fallbackLog,
+                systemLog: fallbackSystemLog,
+                announcement: fallbackAnnouncement
+            };
+        }
+
+        const districtLabel = district ? `${district.emoji || ''}${district.name || district.id || ''}` : (quest?.target_district || '商业街');
+        const prompt = `你要为一次商业街公告任务的最终结算，生成结果文案。
+
+角色：${char.name}
+任务：${quest?.emoji || '📜'} ${quest?.title || '悬赏任务'}
+地点：${districtLabel}
+任务内容：${quest?.description || ''}
+结果：${outcome === 'success' ? '该角色抢先完成并成功交付' : '该角色去交付时发现任务已经被别人抢先完成，自己扑空了'}
+
+要求：
+- log：写成该角色自己的商业街经历，像刚发生过这件事。
+- systemLog：写成系统公开活动记录，简洁一点，但不要写成死板模板。
+- announcement：写成公告区里会出现的一条结果通告。
+- 三段都不要写后台、JSON、触发器、结算器。
+- 如果是失败结果，要体现“晚了一步、没拿到钱”；如果是成功结果，要体现“完成交付、拿到赏金”。
+- 不要使用“白忙了一场”“白跑一趟”“顺利交掉了”这种现成套话。
+
+严格返回 JSON：
+{
+  "log": "角色自己的任务结果文案",
+  "systemLog": "系统活动记录",
+  "announcement": "公告区通告"
+}`;
+
+        try {
+            const messages = [
+                { role: 'system', content: '你是商业街任务结果记录器。只返回合法 JSON 对象，不要输出额外解释或 markdown。' },
+                { role: 'user', content: prompt }
+            ];
+            recordCityLlmDebug(db, char, 'input', 'city_quest_resolution_narration', messages, {
+                model: char.model_name,
+                districtId: district?.id || '',
+                questId: quest?.id || 0,
+                outcome
+            });
+            const reply = await callLLM({
+                endpoint: char.api_endpoint,
+                key: char.api_key,
+                model: char.model_name,
+                messages,
+                maxTokens: 3000,
+                temperature: 0.85,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_quest_resolution_narration', {
+                    districtId: district?.id || '',
+                    questId: quest?.id || 0,
+                    outcome
+                })
+            });
+            recordCityLlmDebug(db, char, 'output', 'city_quest_resolution_narration', reply, {
+                model: char.model_name,
+                districtId: district?.id || '',
+                questId: quest?.id || 0,
+                outcome
+            });
+            const match = String(reply || '').match(/\{[\s\S]*\}/);
+            const parsed = match ? JSON.parse(match[0]) : null;
+            return {
+                log: String(parsed?.log || '').trim() || fallbackLog,
+                systemLog: String(parsed?.systemLog || '').trim() || fallbackSystemLog,
+                announcement: String(parsed?.announcement || '').trim() || fallbackAnnouncement
+            };
+        } catch (err) {
+            console.warn(`[City] 任务结果文案生成失败 ${char?.name || ''}: ${err.message}`);
+            return {
+                log: fallbackLog,
+                systemLog: fallbackSystemLog,
+                announcement: fallbackAnnouncement
+            };
+        }
+    }
+
     function buildBusyPenaltyLog(char, kind, amount, districtName) {
-        if (kind === 'work' && amount > 0) {
-            return `${char.name} 在 ${districtName || '工作地点'} 一边忙一边分神回消息，结果效率受了影响，这次少赚了 ${amount} 金币。`;
-        }
-        if (kind === 'sleep' && amount > 0) {
-            return `${char.name} 本来在补觉，却被聊天打断了好几次，睡眠恢复打了折扣，额外欠下了 ${amount} 点睡眠债。`;
-        }
-        return '';
+        return buildCollapsedCityLog(char, kind === 'work' ? '忙碌惩罚文案生成失败' : '休息惩罚文案生成失败', {
+            locationLabel: districtName || '当前地点'
+        });
     }
 
     async function buildBusyPenaltyNarration(char, kind, amount, districtName, db) {
@@ -977,8 +1285,13 @@ ${normalizedReply || '（空）'}
                 key: char.api_key,
                 model: char.model_name,
                 messages,
-                maxTokens: 180,
-                temperature: 0.55
+                maxTokens: 3000,
+                temperature: 0.55,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_busy_penalty_narration', {
+                    busyKind: kind,
+                    districtName: districtName || '',
+                    amount
+                })
             });
             recordCityLlmDebug(db, char, 'output', 'city_busy_penalty_narration', reply, {
                 model: char.model_name,
@@ -1044,6 +1357,69 @@ ${normalizedReply || '（空）'}
         return null;
     }
 
+    function resolveDistrictFromStructuredSignal(signal, districts, options = {}) {
+        const allowTypeFallback = !!options.allowTypeFallback;
+        if (!signal || !Array.isArray(districts) || districts.length === 0) return null;
+
+        const exactMatchByAlias = (value) => {
+            const normalized = normalizeDistrictText(value);
+            if (!normalized) return null;
+            for (const district of districts) {
+                const aliases = getDistrictAliasValues(district);
+                for (const alias of aliases) {
+                    if (normalizeDistrictText(alias) === normalized) {
+                        return district;
+                    }
+                }
+            }
+            return null;
+        };
+
+        const matchByType = (value) => {
+            const normalized = resolveStructuredTypeAlias(value);
+            if (!normalized || !allowTypeFallback) return null;
+            if (normalized === 'rest' || normalized === 'sleep' || normalized === 'sleeping') {
+                return selectPreferredRestDistrict(districts, false);
+            }
+            if (normalized === 'home') {
+                return selectPreferredRestDistrict(districts, true);
+            }
+            return districts.find(d => normalizeDistrictText(d?.type) === normalized) || null;
+        };
+
+        if (typeof signal === 'string') {
+            return exactMatchByAlias(signal) || matchByType(signal) || null;
+        }
+
+        if (typeof signal !== 'object') return null;
+
+        const directCandidates = [
+            signal.district_id,
+            signal.districtId,
+            signal.district_name,
+            signal.districtName,
+            signal.district,
+            signal.name
+        ];
+        for (const candidate of directCandidates) {
+            const matched = exactMatchByAlias(candidate);
+            if (matched) return matched;
+        }
+
+        const typeCandidates = [
+            signal.district_type,
+            signal.districtType,
+            signal.type,
+            signal.intent
+        ];
+        for (const candidate of typeCandidates) {
+            const matched = matchByType(candidate);
+            if (matched) return matched;
+        }
+
+        return null;
+    }
+
     async function maybeExecuteReplyCityIntent(userId, characterId, intentText, replyText = '') {
         const db = ensureCityDb(context.getUserDb(userId));
         const config = db.city.getConfig();
@@ -1053,29 +1429,20 @@ ${normalizedReply || '（空）'}
         if (!char || char.status !== 'active' || char.sys_survival === 0) return { triggered: false, reason: 'character_inactive' };
 
         const districts = db.city.getEnabledDistricts();
-        const combinedIntentText = [intentText, replyText].filter(Boolean).join(' ');
-        const district = resolveCityIntentDistrict(combinedIntentText || intentText, districts);
+        const district = resolveDistrictFromStructuredSignal(intentText, districts, { allowTypeFallback: true });
         if (!district) return { triggered: false, reason: 'intent_unresolved' };
 
-        const explicitRestToHome = /(home|回家|到家|回住所|回寝室|回宿舍|回公寓|回去睡|在家躺)/i.test(combinedIntentText);
         if (String(char.location || '').toLowerCase() === String(district.id || '').toLowerCase()) {
-            if (district.id === 'home' && !explicitRestToHome) {
-                return { triggered: false, reason: 'same_home_noop' };
-            }
-            if (district.id !== 'home') {
-                return { triggered: false, reason: 'same_location_noop' };
-            }
+            return { triggered: false, reason: district.id === 'home' ? 'same_home_noop' : 'same_location_noop' };
         }
 
-        const selfPromptResult = await buildPrivateReplyCitySelfPrompt(char, district, replyText, db);
         return runPrivateReplyDirectedCityAction(
             userId,
             char,
             district,
             replyText,
             db,
-            config,
-            selfPromptResult?.prompt || ''
+            config
         );
     }
 
@@ -1093,24 +1460,7 @@ ${normalizedReply || '（空）'}
 
         const payload = actionPayload && typeof actionPayload === 'object' ? actionPayload : {};
         const districts = db.city.getEnabledDistricts();
-        const districtHints = [
-            payload.district_id,
-            payload.districtId,
-            payload.district,
-            payload.district_name,
-            payload.districtName,
-            payload.action,
-            replyText
-        ].filter(Boolean).join(' ');
-
-        let district = null;
-        const explicitDistrictId = String(payload.district_id || payload.districtId || '').trim();
-        if (explicitDistrictId) {
-            district = districts.find(d => String(d.id || '').toLowerCase() === explicitDistrictId.toLowerCase()) || null;
-        }
-        if (!district) {
-            district = resolveCityIntentDistrict(districtHints, districts);
-        }
+        const district = resolveDistrictFromStructuredSignal(payload, districts, { allowTypeFallback: true });
         if (!district) {
             return { triggered: false, reason: 'action_unresolved' };
         }
@@ -1123,18 +1473,13 @@ ${normalizedReply || '（空）'}
             payload.diary
         ].map(v => String(v || '').trim()).filter(Boolean);
         const seedPrompt = payloadPromptParts.join(' ');
-        const selfPromptResult = seedPrompt
-            ? { prompt: seedPrompt }
-            : await buildPrivateReplyCitySelfPrompt(char, district, replyText, db);
-
         return runPrivateReplyDirectedCityAction(
             userId,
             char,
             district,
             replyText,
             db,
-            config,
-            selfPromptResult?.prompt || ''
+            config
         );
     }
 
@@ -1303,7 +1648,39 @@ ${normalizedReply || '（空）'}
 
     // LLM prompts
 
-    function buildSurvivalPrompt(districts, char, inventory, activeEvents, universalContext, targetDistrict) {
+    function buildQuestPromptContext(activeQuests = [], activeQuestClaim = null) {
+        const openTasks = Array.isArray(activeQuests) ? activeQuests.slice(0, 6).map((quest) => {
+            const claimText = quest.claim_count > 0 ? `已接单 ${quest.claim_count} 人` : '暂时无人接单';
+            return `- [QUEST_${quest.id}] ${quest.emoji || '📜'} ${quest.title} | 地点=${quest.target_district || 'street'} | 奖励=${Number(quest.reward_gold || 0)}金币${Number(quest.reward_cal || 0) > 0 ? ` ${Number(quest.reward_cal || 0)}体力` : ''} | ${claimText} | ${quest.description || ''}`;
+        }) : [];
+
+        let personalTask = '';
+        if (activeQuestClaim) {
+            const stageMap = {
+                accepted: '你刚决定去接这单，下一步先赶到对应地点。',
+                in_progress: '你已经在处理中，继续按任务要求做事。',
+                ready_to_report: '你已经做完主要内容，下一步该去汇报交付。',
+                reporting: '你正在准备汇报交付。'
+            };
+            personalTask = `\n[你当前手上的公告任务]\n- 任务：${activeQuestClaim.emoji || '📜'} ${activeQuestClaim.title}\n- 目标地点：${activeQuestClaim.target_district || 'street'}\n- 当前阶段：${activeQuestClaim.status}\n- 进度：${activeQuestClaim.progress_count || 0}\n- 说明：${stageMap[activeQuestClaim.status] || '按任务自然推进。'}\n- 任务要求：${activeQuestClaim.description || ''}`;
+        }
+
+        return {
+            openTasks,
+            personalTask
+        };
+    }
+
+    function normalizeQuestIntent(richNarrations = null) {
+        const raw = richNarrations?.quest_intent;
+        if (!raw || typeof raw !== 'object') return null;
+        const questId = Number(raw.quest_id || raw.id || 0);
+        const stage = String(raw.stage || '').trim().toLowerCase();
+        if (!questId || !stage) return null;
+        return { questId, stage };
+    }
+
+    function buildSurvivalPrompt(districts, char, inventory, activeEvents, universalContext, targetDistrict, questContext = null) {
         const energySources = [];
         const resourceGens = [];
         const medicals = [];
@@ -1380,26 +1757,22 @@ ${normalizedReply || '（空）'}
         const wallet = char.wallet ?? 200;
         const state = normalizeSurvivalState(char);
         const physicalCondition = getPhysicalCondition(char, state, cal);
-        let sensation = '';
+        const stateFlags = [];
 
-        if (char.city_status === 'coma') {
-            sensation = '\n[危险状态] 你因为极度饥饿或虚脱已经接近失去意识，行动能力很差。';
-        } else if (cal <= 300) {
-            sensation = '\n[极度虚弱] 你现在头晕眼花、胃里绞痛，血糖很低，连走路都很困难。';
-        } else if (cal <= 1000) {
-            sensation = '\n[轻度饥饿] 你的肚子一直在叫，注意力开始下降，很想尽快吃点东西。';
-        } else if (cal >= 3500) {
-            sensation = '\n[吃得过饱] 你现在胃里发胀，动作有些迟缓，不太适合继续大幅活动。';
-        }
+        if (char.city_status === 'coma') stateFlags.push('危险状态=接近失去意识');
+        else if (cal <= 300) stateFlags.push('饥饿等级=极度虚弱');
+        else if (cal <= 1000) stateFlags.push('饥饿等级=明显饥饿');
+        else if (cal >= 3500) stateFlags.push('饱腹等级=过饱');
 
-        if (wallet <= 10) {
-            sensation += '\n[钱快见底了] 你现在对花钱非常敏感，安全感明显不足。';
-        }
+        if (wallet <= 10) stateFlags.push('钱包状态=极度拮据');
 
         let taskInstruction = '【自由探索】在别饿晕、别破产的前提下，按性格/身体/钱包/最近经历决定下一步去哪。';
         if (targetDistrict) {
-            taskInstruction = `【计划参考】原计划是 [${targetDistrict.id.toUpperCase()}] ${targetDistrict.name}。可以按现实状态改主意；若改，请在 diary 自然写原因。`;
+            taskInstruction = `【既定意愿】你已经决定要去 [${targetDistrict.id.toUpperCase()}] ${targetDistrict.name}。身体状态、情绪和钱包只影响你到了之后的表现、效率和后果，不改变目的地本身。当前位置标签也必须跟随这次真实去到的地点。`;
         }
+        const questOpenBlock = questContext?.openTasks?.length > 0 ? `\n[公告栏悬赏]\n${questContext.openTasks.join('\n')}` : '';
+        const personalQuestBlock = questContext?.personalTask || '';
+        const antiRepeatBlock = buildRecentNarrationAntiRepeatBlock(ensureCityDb(context.getUserDb(char.user_id || 'default')), char, targetDistrict || { type: '', id: '' });
 
         let hardConstraintText = '';
         if (state.energy < 20) {
@@ -1455,28 +1828,38 @@ ${universalContext?.preamble || ''}
 体力=${cal}/4000 | 金币=${wallet}
 精力=${state.energy} 睡眠债=${state.sleep_debt} 心情=${state.mood} 压力=${state.stress}
 社交需求=${state.social_need} 健康=${state.health} 饱腹=${state.satiety} 胃负担=${state.stomach_load}
-身体等级=${physicalCondition.label} | 后果=${physicalCondition.summary}${sensation}${eventInfo}
+身体等级=${physicalCondition.label} | 后果=${physicalCondition.summary}${stateFlags.length > 0 ? `\n状态标签=${stateFlags.join(' / ')}` : ''}${eventInfo}
 ${schoolPromptBlock ? '\n' + schoolPromptBlock : ''}
 
 ${taskInstruction}
+[任务机制补充]
+- 你也会看到公告栏里的悬赏任务，它和普通商业街活动一样是真实世界信息。
+- 如果你想去接某个公告任务，就在输出里额外带上 quest_intent：{"quest_id":任务ID,"stage":"claim"}，并让 action 去往对应地点。
+- 如果你已经在做任务，继续正常生成商业街行动；若是在推进任务，可带 stage="progress"。
+- 如果你准备交付任务、领取赏金，就额外带上 quest_intent：{"quest_id":任务ID,"stage":"report"}。
+- 不要把 quest_intent 当系统说明写进 log，log 仍然必须像普通商业街活动。${questOpenBlock}${personalQuestBlock}
+- 任务推进必须贴合任务内容：采购/配送要写拿货、送达；清理/维修要写动手处理；调查类要写打听、寻找、发现；巡逻/护送要写陪同、盯守、来回查看。
+- 去错地点、只是在附近闲逛、或者文案和任务不匹配，都不会推进任务进度。
 [行动约束]${hardConstraintText}
 
 [输出要求]
 - 只选一个 action
-- log 写 2-4 句，有画面/动作/心理
+- log 自然写出这次行动里真正发生的事，要有画面/动作/心理，但不要写成固定模板
 - 若想联系玩家再填 chat
 - 若值得公开展示再填 moment
 - 若有没说出口的心声再填 diary
 - 想花钱但钱不够时，也要把失败尝试真实写进 log
 - 不要重复 preamble 里刚做过的地点/动作
+- 不要使用高复用套话，不要把“从家离开、肚子里空空的、先把自己安顿好”这类句式当默认开头${antiRepeatBlock ? antiRepeatBlock : ''}
 
 只返回 JSON：
   {
     "action": "[PARK]",
-    "log": "2-4句具体行动描写",
-    "chat": "（可选）发给玩家的一句话",
-    "moment": "（可选）朋友圈动态1-2句",
-    "diary": "（可选）内心独白日记1-2句"
+    "log": "自然的行动描写",
+    "chat": "（可选）发给玩家的话",
+    "moment": "（可选）朋友圈动态",
+    "diary": "（可选）内心独白",
+    "quest_intent": { "quest_id": 12, "stage": "claim|progress|report" }
   }
 
   [可选行动]
@@ -1593,6 +1976,32 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
 }`;
     }
 
+    function buildQuestCompetitionContext(db, occupants, district) {
+        if (!Array.isArray(occupants) || occupants.length < 2) return '';
+        const activeClaims = occupants
+            .map((char) => {
+                const claim = db.city.getCharacterActiveQuestClaim?.(char.id);
+                return claim ? { char, claim } : null;
+            })
+            .filter(Boolean);
+        if (activeClaims.length < 2) return '';
+
+        const grouped = new Map();
+        for (const item of activeClaims) {
+            const key = String(item.claim.quest_id);
+            if (!grouped.has(key)) grouped.set(key, []);
+            grouped.get(key).push(item);
+        }
+
+        const conflict = Array.from(grouped.values()).find((items) => items.length >= 2);
+        if (!conflict) return '';
+        const quest = conflict[0].claim;
+        const names = conflict.map((item) => item.char.name).join('、');
+        const targetDistrict = String(quest.target_district || '');
+        const onSite = targetDistrict === district.id ? '你们现在就在这单的目标地点。' : `这单的目标地点是 ${targetDistrict}。`;
+        return `\n[竞争任务现场]\n${names} 正在竞争同一条公告任务：${quest.emoji || '📜'} ${quest.title}。\n任务内容：${quest.description || ''}\n${onSite}\n这次偶遇请明显体现“彼此知道对方在抢同一单”的紧张感、试探、让步、暗中较劲或嘴上不说破的竞争。`;
+    }
+
     // REST API: logs, characters, districts, config, economy
 
     app.get('/api/city/logs', authMiddleware, (req, res) => {
@@ -1601,6 +2010,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             const requestedLimit = Number.parseInt(req.query.limit, 10);
             const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 1000)) : 300;
             res.json({ success: true, logs: req.db.city.getCityLogs(limit) });
+        }
+        catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
+    app.get('/api/city/announcements', authMiddleware, (req, res) => {
+        try {
+            ensureCityDb(req.db);
+            const requestedLimit = Number.parseInt(req.query.limit, 10);
+            const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 200)) : 50;
+            res.json({ success: true, announcements: req.db.city.getCityAnnouncements(limit) });
         }
         catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -2027,6 +2446,12 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         const config = db.city.getConfig();
                         const cityActivityEnabled = !(config.dlc_enabled === '0' || config.dlc_enabled === 'false');
                         const physiologyPaused = config.city_actions_paused === '1' || config.city_actions_paused === 'true';
+                        if (cityActivityEnabled) {
+                            const mayorAutoResult = await maybeRunMayorAI(db, user.id);
+                            if (mayorAutoResult?.success) {
+                                console.log(`[Mayor AI] 自动决策已执行 (${user.username || user.id})`);
+                            }
+                        }
                         if (!cityActivityEnabled && physiologyPaused) return;
 
                         const districts = db.city.getEnabledDistricts();
@@ -2322,7 +2747,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         // No API -> rule-based fallback
         const activeEvents = db.city.getActiveEvents();
         if (!char.api_endpoint || !char.api_key || !char.model_name) {
-            applyDecision(selectRandomDistrict(districts, char), char, db, userId, currentCals, config, activeEvents);
+            await applyDecision(selectRandomDistrict(districts, char), char, db, userId, currentCals, config, activeEvents);
             return;
         }
 
@@ -2366,6 +2791,14 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             } catch (e) { /* ignore bad schedule */ }
         }
 
+        const activeQuestClaim = db.city.getCharacterActiveQuestClaim?.(char.id);
+        if (activeQuestClaim?.target_district) {
+            const questDistrict = districts.find((entry) => entry.id === activeQuestClaim.target_district);
+            if (questDistrict) {
+                targetDistrict = questDistrict;
+            }
+        }
+
         if (targetDistrict) {
             console.log(`[City] ${char.name} 📅 按日程前往 ${targetDistrict.emoji} ${targetDistrict.name} (准备生成文案)`);
         }
@@ -2374,7 +2807,8 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const inventory = db.city.getInventory(char.id);
         const engineContextWrapper = { getUserDb: context.getUserDb, getMemory: context.getMemory };
         const universalResult = await buildUniversalContext(engineContextWrapper, char, '', false);
-        const prompt = buildSurvivalPrompt(districts, { ...char, calories: currentCals }, inventory, activeEvents, universalResult, targetDistrict);
+        const questContext = buildQuestPromptContext(db.city.getActiveQuests(), db.city.getCharacterActiveQuestClaim?.(char.id));
+        const prompt = buildSurvivalPrompt(districts, { ...char, calories: currentCals }, inventory, activeEvents, universalResult, targetDistrict, questContext);
         try {
             const messages = [
                 { role: 'system', content: '你是一个城市生活模拟角色行动引擎。你必须严格按照用户要求返回完整 JSON 对象，不要输出 JSON 之外的解释、markdown 或额外文本。返回结果必须包含 action、log、chat、moment、diary 五个字段。' },
@@ -2383,7 +2817,11 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             recordCityLlmDebug(db, char, 'input', 'city_action_decision', messages, { model: char.model_name, location: char.location || '', status: currentCityStatus });
             const reply = await callLLM({
                 endpoint: char.api_endpoint, key: char.api_key, model: char.model_name,
-                messages, maxTokens: 2500, temperature: 0.8
+                messages, maxTokens: 3000, temperature: 0.8,
+                debugAttempt: buildCityAttemptRecorder(db, char, 'city_action_decision', {
+                    location: char.location || '',
+                    status: currentCityStatus
+                })
             });
             recordCityLlmDebug(db, char, 'output', 'city_action_decision', reply, { model: char.model_name, location: char.location || '', status: currentCityStatus });
             let codeMatch = null;
@@ -2445,7 +2883,9 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
 
                 if (logText || chatText || momentText || diaryText) {
                     richNarrations = {
-                        log: logText || `${char.name} 决定去 ${codeMatch.toUpperCase()}...`,
+                        log: logText || buildCollapsedCityLog(char, '行动文案字段缺失', {
+                            locationLabel: String(codeMatch || '').toUpperCase()
+                        }),
                         chat: chatText,
                         moment: momentText,
                         diary: diaryText
@@ -2460,7 +2900,14 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         .replace(/,/g, '') // remove commas
                         .trim();
 
-                    richNarrations = { log: safeReply || `${char.name} 去了 ${codeMatch.toUpperCase()}`, chat: '', moment: '', diary: '' };
+                    richNarrations = {
+                        log: safeReply || buildCollapsedCityLog(char, '行动响应解析失败', {
+                            locationLabel: String(codeMatch || '').toUpperCase()
+                        }),
+                        chat: '',
+                        moment: '',
+                        diary: ''
+                    };
                 }
                 console.log(`[City] ${char.name} 非 JSON 回复抢救成功，已提取 Action: ${codeMatch.toUpperCase()}`);
             }
@@ -2492,7 +2939,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         'city_eat_item',
                         `角色主动吃了背包中的 ${food.name}，生理状态和主情绪发生变化。`
                     );
-                    const eatLog = richNarrations?.log || `${char.name} 决定吃背包里的 ${food.emoji}${food.name} (+${food.cal_restore}卡) 🍜`;
+                    const currentDistrict = char.location ? db.city.getDistrict(char.location) : null;
+                    const eatLog = String(richNarrations?.log || '').trim() || buildCollapsedCityLog(char, '背包进食文案生成失败', {
+                        district: currentDistrict || { id: char.location || 'unknown', name: char.location || '当前位置', emoji: '' }
+                    });
                     db.city.logAction(char.id, 'EAT', eatLog, food.cal_restore, 0);
                     broadcastCityEvent(userId, char.id, 'EAT', eatLog);
                     if (richNarrations) broadcastCityToChat(userId, char, eatLog, 'EAT', richNarrations);
@@ -2536,14 +2986,14 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             }
 
             console.log(`[City] ${char.name} -> ${district.emoji} ${district.name}`);
-            applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations);
+            await applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations, { preserveDirectedDistrict: true });
         } catch (e) {
             console.error(`[City] ${char.name} LLM 失败: ${e.message}`);
             const randomDist = selectRandomDistrict(districts, char);
             const errLog = {
                 log: `⚠️ [系统提示] ${char.name} 的大模型无响应（API连接失败）。已强制随机游荡至：${randomDist.emoji}${randomDist.name}。`
             };
-            applyDecision(randomDist, char, db, userId, currentCals, config, activeEvents, errLog);
+            await applyDecision(randomDist, char, db, userId, currentCals, config, activeEvents, errLog);
         }
     }
 
@@ -2608,18 +3058,108 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         return districts[Math.floor(Math.random() * districts.length)];
     }
 
-    function applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations = null) {
+    function getQuestNarrationText(richNarrations = null) {
+        return [
+            richNarrations?.log,
+            richNarrations?.chat,
+            richNarrations?.moment,
+            richNarrations?.diary
+        ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+    }
+
+    function computeQuestProgressIncrement(quest, district, richNarrations = null) {
+        const questType = String(quest?.quest_type || 'errand').toLowerCase();
+        const text = getQuestNarrationText(richNarrations);
+        const atTarget = district.id === (quest?.target_district || '');
+        if (!atTarget) return 0;
+
+        const hasKeywords = (...patterns) => patterns.some((pattern) => pattern.test(text));
+        switch (questType) {
+            case 'delivery':
+                return hasKeywords(/买到|拿到|提着|送去|交给|搬上|跑去|领到/) ? 1 : 0;
+            case 'service':
+                return hasKeywords(/清理|打扫|修|抢修|疏通|搬运|救援|维护|整理/) ? 1 : 0;
+            case 'investigation':
+                return hasKeywords(/查看|调查|打听|问到|发现|找到|搜到|线索/) ? 1 : 0;
+            case 'patrol':
+                return hasKeywords(/巡逻|守着|盯着|护送|陪着|值守/) ? 1 : 0;
+            default:
+                return hasKeywords(/处理|搞定|忙完|跑了|做完|拿到|送到|交给/) ? 1 : 0;
+        }
+    }
+
+    async function handleQuestLifecycleAfterAction(db, char, district, richNarrations = null) {
+        let bonusMoney = 0;
+        let bonusCalories = 0;
+        const textHaystack = getQuestNarrationText(richNarrations);
+        const intent = normalizeQuestIntent(richNarrations);
+
+        if (intent?.stage === 'claim' && intent.questId) {
+            const quest = db.city.getQuestById?.(intent.questId);
+            if (quest && !quest.is_completed) {
+                const claimResult = db.city.claimQuest?.(intent.questId, char.id);
+                if (claimResult?.success) {
+                    db.city.logAction('system', 'QUEST', `📌 ${char.name} 看完公告后接下了「${quest.title}」`, 0, 0, district.id);
+                    db.city.addCityAnnouncement?.('system', '任务状态', `${char.name} 接下了「${quest.title}」，正赶往 ${district.emoji}${district.name}。`, district.id);
+                }
+            }
+        }
+
+        const activeClaim = db.city.getCharacterActiveQuestClaim?.(char.id);
+        if (!activeClaim) return { bonusMoney, bonusCalories };
+        const quest = db.city.getQuestById?.(activeClaim.quest_id);
+        if (!quest) return { bonusMoney, bonusCalories };
+
+        const reportRequested = intent?.stage === 'report' || /汇报|交付|递交|交差|报告任务|送去交单|去交单/.test(textHaystack);
+        if (reportRequested && ['ready_to_report', 'reporting', 'in_progress', 'accepted'].includes(String(activeClaim.status || ''))) {
+            db.city.updateQuestClaimStage?.(activeClaim.quest_id, char.id, 'reporting', 0, '准备汇报交付');
+            const result = db.city.resolveQuestCompletion?.(activeClaim.quest_id, char.id);
+            if (result?.success && result.won) {
+                bonusMoney += Number(result.reward_gold || 0);
+                bonusCalories += Number(result.reward_cal || 0);
+                if (quest.source_announcement_id) db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
+                const resolution = await buildQuestResolutionNarrations(char, quest, district, db, 'success');
+                db.city.logAction(char.id, 'QUEST', resolution.log, 0, 0, district.id);
+                db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, district.id);
+                db.city.addCityAnnouncement?.('system', '任务完成', resolution.announcement, district.id);
+            } else if (result?.success && !result.won) {
+                const resolution = await buildQuestResolutionNarrations(char, quest, district, db, 'failed');
+                db.city.logAction(char.id, 'QUEST', resolution.log, 0, 0, district.id);
+                db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, district.id);
+                db.city.addCityAnnouncement?.('system', '任务失效', resolution.announcement, district.id);
+            }
+            return { bonusMoney, bonusCalories };
+        }
+
+        if (district.id === activeClaim.target_district && ['accepted', 'in_progress'].includes(String(activeClaim.status || ''))) {
+            const progressIncrement = computeQuestProgressIncrement(quest, district, richNarrations);
+            if (progressIncrement <= 0) return { bonusMoney, bonusCalories };
+            const nextClaim = db.city.advanceQuestProgress?.(activeClaim.quest_id, char.id, progressIncrement);
+            if (nextClaim?.status === 'ready_to_report') {
+                db.city.logAction('system', 'QUEST', `📝 ${char.name} 基本处理完了「${quest.title}」，下一步可以去汇报交付。`, 0, 0, district.id);
+            } else if (nextClaim?.status === 'in_progress') {
+                db.city.logAction('system', 'QUEST', `🔧 ${char.name} 正在 ${district.emoji}${district.name} 处理「${quest.title}」`, 0, 0, district.id);
+            }
+        }
+
+        return { bonusMoney, bonusCalories };
+    }
+
+    async function applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations = null, options = {}) {
         const currentState = normalizeSurvivalState(char);
-        if (
-            currentState.energy < 20 &&
-            ['work', 'education', 'gambling', 'leisure', 'wander'].includes(district.type)
-        ) {
-            district = districtsFallbackForExhaustion(char, db) || district;
-        } else if (
-            currentState.energy < 35 &&
-            ['work', 'education', 'gambling'].includes(district.type)
-        ) {
-            district = districtsFallbackForExhaustion(char, db) || district;
+        const preserveDirectedDistrict = !!options.preserveDirectedDistrict;
+        if (!preserveDirectedDistrict) {
+            if (
+                currentState.energy < 20 &&
+                ['work', 'education', 'gambling', 'leisure', 'wander'].includes(district.type)
+            ) {
+                district = districtsFallbackForExhaustion(char, db) || district;
+            } else if (
+                currentState.energy < 35 &&
+                ['work', 'education', 'gambling'].includes(district.type)
+            ) {
+                district = districtsFallbackForExhaustion(char, db) || district;
+            }
         }
 
         const inflation = parseFloat(config.inflation) || 1.0;
@@ -2678,7 +3218,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             ].map(v => String(v || '').trim()).filter(Boolean);
 
             for (const candidate of candidates) {
-                if (!isWeakCityNarration(candidate, char, district)) return candidate;
+                return candidate;
             }
             return defaultString;
         };
@@ -2686,24 +3226,37 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         if (district.type === 'gambling') {
             const winRate = parseFloat(config.gambling_win_rate) || 0.35;
             const payout = parseFloat(config.gambling_payout) || 3.0;
-            if (Math.random() < winRate) {
+            const didWin = Math.random() < winRate;
+            if (didWin) {
                 dMoney = district.money_cost * payout;
                 stateEffects = { ...stateEffects, mood: stateEffects.mood + 10, stress: stateEffects.stress - 6 };
-                const winLog = getLogText(`${char.name} 在 ${district.emoji}${district.name} 赢了一大笔钱 😎`);
+                const gamblingNarrations = await buildGamblingOutcomeNarrations(char, district, db, {
+                    didWin: true,
+                    moneyDelta: dMoney,
+                    calDelta: dCal
+                }, richNarrations);
+                const winLog = String(gamblingNarrations.log || `${char.name} 在 ${district.emoji}${district.name} 赢了一大笔钱 😎`).trim();
                 db.city.logAction(char.id, district.id.toUpperCase(), winLog, dCal, dMoney, district.id);
+                richNarrations = gamblingNarrations;
                 broadcastCityToChat(userId, char, winLog, 'GAMBLING_WIN', richNarrations);
             } else {
                 dMoney = -(district.money_cost || 0) * inflation;
                 stateEffects = { ...stateEffects, mood: stateEffects.mood - 8, stress: stateEffects.stress + 8 };
-                const loseLog = getLogText(`${char.name} 在 ${district.emoji}${district.name} 输光了 😵`);
+                const gamblingNarrations = await buildGamblingOutcomeNarrations(char, district, db, {
+                    didWin: false,
+                    moneyDelta: dMoney,
+                    calDelta: dCal
+                }, richNarrations);
+                const loseLog = String(gamblingNarrations.log || `${char.name} 在 ${district.emoji}${district.name} 输光了 😵`).trim();
                 db.city.logAction(char.id, district.id.toUpperCase(), loseLog, dCal, dMoney, district.id);
+                richNarrations = gamblingNarrations;
                 broadcastCityToChat(userId, char, loseLog, 'GAMBLING_LOSE', richNarrations);
             }
         } else if (district.type === 'food' || district.type === 'shopping') {
             // New: instead of directly restoring calories, buy items first
             const realCost = (district.money_cost || 0) * inflation;
             if (realCost > 0 && (char.wallet || 0) < realCost) {
-                const brokeLog = getLogText(buildBrokeFallbackLog(char, district, realCost));
+                const brokeLog = getLogText(buildCollapsedCityLog(char, '金币不足，文案折叠', { district }));
                 db.city.logAction(char.id, 'BROKE', brokeLog, 0, 0, district.id);
                 return;
             }
@@ -2712,10 +3265,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             shopItems = shopItems.filter(i => i.stock === -1 || i.stock > 0);
 
             if (shopItems.length > 0) {
-                // Pick a random item from this shop
-                const item = shopItems[Math.floor(Math.random() * shopItems.length)];
+                const settledNarratedItem = pickSettledShopItemFromNarrations(shopItems, richNarrations);
+                const item = settledNarratedItem || shopItems[Math.floor(Math.random() * shopItems.length)];
                 const itemCost = item.buy_price * inflation;
                 if ((char.wallet || 0) >= itemCost) {
+                    if (!richNarrations || isWeakCityNarration(richNarrations?.log, char, district)) {
+                        richNarrations = await regenerateActionNarrations(char, district, db, richNarrations || {}, {
+                            item,
+                            currentCals
+                        });
+                    }
                     db.city.decreaseItemStock(item.id, 1);
 
                     if (district.id === 'restaurant') {
@@ -2732,9 +3291,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                             stomach_load: (stateEffects.stomach_load || 0) + loadBoost,
                             sleep_debt: (stateEffects.sleep_debt || 0) + Math.round(loadBoost * 0.6)
                         };
-                        // For itemized restaurant/shop actions, the final log must reflect the
-                        // actual settled item instead of an earlier LLM guess.
-                        const eatLog = getLogText(`${buildActionFallbackLog(char, district, db)} 顺手点了 ${item.emoji}${item.name}，坐下就把这口热乎的先吃进去了。`, { forceDefault: true });
+                        const eatLog = getLogText(buildCollapsedCityLog(char, '进食文案生成失败', { district }), { allowWeak: true });
                         db.city.logAction(char.id, 'EAT', eatLog, dCal, dMoney, district.id);
                         broadcastCityEvent(userId, char.id, 'EAT', eatLog);
                         broadcastCityToChat(userId, char, eatLog, 'EAT', richNarrations);
@@ -2742,7 +3299,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         db.city.addToInventory(char.id, item.id, 1);
                         dMoney = -itemCost;
                         dCal = -(district.cal_cost || 0); // walking there costs calories
-                        const buyLog = getLogText(`${buildActionFallbackLog(char, district, db)} 最后挑了 ${item.emoji}${item.name} 带走。`, { forceDefault: true });
+                        const buyLog = getLogText(buildCollapsedCityLog(char, '购物文案生成失败', { district }), { allowWeak: true });
                         db.city.logAction(char.id, 'BUY', buyLog, dCal, dMoney, district.id);
                         broadcastCityEvent(userId, char.id, 'BUY', buyLog);
                         broadcastCityToChat(userId, char, buyLog, 'BUY', richNarrations);
@@ -2778,16 +3335,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             }
             // Fallback: if no items at this shop, use the old direct-restore logic
             if (realCost > 0 && (char.wallet || 0) < realCost) {
-                const brokeLog = getLogText(buildBrokeFallbackLog(char, district, realCost));
+                const brokeLog = getLogText(buildCollapsedCityLog(char, '金币不足，文案折叠', { district }));
                 db.city.logAction(char.id, 'BROKE', brokeLog, 0, 0, district.id);
                 return;
             }
-            const normalLog = getLogText(buildActionFallbackLog(char, district, db));
+            const normalLog = getLogText(buildCollapsedCityLog(char, '行动文案生成失败', { district }));
             db.city.logAction(char.id, district.id.toUpperCase(), normalLog, dCal, dMoney, district.id);
             if (richNarrations) broadcastCityToChat(userId, char, normalLog, district.id.toUpperCase(), richNarrations);
         } else if (district.type === 'medical') {
             if (district.money_cost > 0 && (char.wallet || 0) < district.money_cost * inflation) {
-                const brokeLog = getLogText(buildBrokeFallbackLog(char, district, district.money_cost * inflation));
+                const brokeLog = getLogText(buildCollapsedCityLog(char, '金币不足，文案折叠', { district }));
                 db.city.logAction(char.id, 'BROKE', brokeLog, 0, 0, district.id);
                 return;
             }
@@ -2795,24 +3352,24 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 // Character is healthy but went to hospital! Enforce punishment according to rules.
                 // The LLM was explicitly instructed in the prompt to write about being scolded.
                 dCal = -(district.cal_cost || 0); // No bonus reward, still pay travel cost
-                const punishLog = getLogText(`${char.name} 没病却跑去 ${district.emoji}${district.name}，被分诊护士赶了出来，白交了挂号费 😰`);
+                const punishLog = getLogText(buildCollapsedCityLog(char, '医疗行动文案折叠', { district }));
                 db.city.logAction(char.id, district.id.toUpperCase(), punishLog, dCal, dMoney, district.id);
                 if (richNarrations) broadcastCityToChat(userId, char, punishLog, district.id.toUpperCase(), richNarrations);
             } else {
                 // Actually sick/starving: admit to hospital and recover every 5 minutes during the stay.
                 dCal = -(district.cal_cost || 0);
                 stateEffects = { energy: 0, sleep_debt: 0, stress: 0, social_need: 0, health: 0, mood: 0, satiety: 0, stomach_load: 0 };
-                const normalLog = getLogText(`${buildActionFallbackLog(char, district, db)} 先办了手续，准备留在医院里慢慢治疗。`, { forceDefault: true });
+                const normalLog = getLogText(buildCollapsedCityLog(char, '医疗行动文案生成失败', { district }), { forceDefault: true });
                 db.city.logAction(char.id, district.id.toUpperCase(), normalLog, dCal, dMoney, district.id);
                 if (richNarrations) broadcastCityToChat(userId, char, normalLog, district.id.toUpperCase(), richNarrations);
             }
         } else {
             if (district.money_cost > 0 && (char.wallet || 0) < district.money_cost * inflation) {
-                const brokeLog = getLogText(buildBrokeFallbackLog(char, district, district.money_cost * inflation));
+                const brokeLog = getLogText(buildCollapsedCityLog(char, '金币不足，文案折叠', { district }));
                 db.city.logAction(char.id, 'BROKE', brokeLog, 0, 0, district.id);
                 return;
             }
-            let normalLog = getLogText(buildActionFallbackLog(char, district, db));
+            let normalLog = getLogText(buildCollapsedCityLog(char, '行动文案生成失败', { district }));
             let hackerIntelPayload = '';
             if (district.type === 'education') {
                 const studyResult = schoolLogic.getSchoolActionEffects(growthDb, char, district, currentState);
@@ -2823,7 +3380,13 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         mood: stateEffects.mood + 2,
                         stress: stateEffects.stress - 1
                     };
-                    normalLog = `${normalLog} 这次主要上了 ${studyResult.course.emoji}${studyResult.course.name}，熟练度 +${studyResult.gain}，现在是 ${studyResult.afterMastery}/100。${schoolLogic.describeSchoolUnlock(studyResult.course.id, studyResult.unlockedTier)}`.trim();
+                    const schoolProgressText = `课程=${studyResult.course.emoji}${studyResult.course.name} | 熟练度=+${studyResult.gain} | 当前=${studyResult.afterMastery}/100`;
+                    const schoolUnlockText = String(schoolLogic.describeSchoolUnlock(studyResult.course.id, studyResult.unlockedTier) || '').trim();
+                    if (isCollapsedCityLog(normalLog)) {
+                        normalLog = [normalLog, schoolProgressText, schoolUnlockText].filter(Boolean).join(' | ');
+                    } else {
+                        normalLog = `${normalLog} 这次主要上了 ${studyResult.course.emoji}${studyResult.course.name}，熟练度 +${studyResult.gain}，现在是 ${studyResult.afterMastery}/100。${schoolUnlockText}`.trim();
+                    }
                 }
             }
             if (isHackerDistrict(district)) {
@@ -2839,8 +3402,11 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             }
         }
 
-        const newCals = Math.min(4000, Math.max(0, currentCals + dCal));
-        const newWallet = Math.max(0, (char.wallet || 0) + dMoney);
+        const questOutcome = await handleQuestLifecycleAfterAction(db, char, district, richNarrations);
+        const totalCalDelta = dCal + Number(questOutcome.bonusCalories || 0);
+        const totalMoneyDelta = dMoney + Number(questOutcome.bonusMoney || 0);
+        const newCals = Math.min(4000, Math.max(0, currentCals + totalCalDelta));
+        const newWallet = Math.max(0, (char.wallet || 0) + totalMoneyDelta);
         const nextState = applyStateEffectsToCharacter(char, stateEffects);
         const newCityStatus = district.type === 'medical' && currentCals < 800
             ? 'medical'
@@ -2955,6 +3521,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
 
         let simulationLogs = [];
         const engineContextWrapper = { getUserDb: context.getUserDb, getMemory: context.getMemory };
+        const questCompetitionContext = buildQuestCompetitionContext(db, occupants, district);
 
         // Phase 1-N: sequential speaking
         for (let i = 0; i < occupants.length; i++) {
@@ -2991,7 +3558,7 @@ ${uniCtx.preamble}
 [当前遭遇场景]
 你是 ${speaker.name} (${persona})。
 在场的其他人有: ${activeTargets.map(t => t.name).join(', ')}。
-${logsContext ? '\n' + logsContext : ''}`;
+${logsContext ? '\n' + logsContext : ''}${questCompetitionContext ? '\n' + questCompetitionContext : ''}`;
 
             if (simulationLogs.length > 0) {
                 prompt += `\n\n【刚才在你面前已经发生的事情】\n${simulationLogs.join('\n')}\n`;
@@ -3009,7 +3576,7 @@ ${logsContext ? '\n' + logsContext : ''}`;
                 recordCityLlmDebug(db, speaker, 'input', 'city_social_encounter', messages, { model: speaker.model_name, location: speaker.location || '' });
                 const reply = await callLLM({
                     endpoint: speaker.api_endpoint, key: speaker.api_key, model: speaker.model_name,
-                    messages, maxTokens: 1500, temperature: 0.85
+                    messages, maxTokens: 3000, temperature: 0.85
                 });
                 recordCityLlmDebug(db, speaker, 'output', 'city_social_encounter', reply, { model: speaker.model_name, location: speaker.location || '' });
                 const cleanReply = reply.replace(/\n+/g, ' ').replace(/"/g, "'").trim();
@@ -3055,6 +3622,11 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
 
 参数提示：只结算这 ${occupants.length} 个在场角色，并且 JSON 的 key 必须严格使用下面给出的角色 ID。
 `;
+        if (questCompetitionContext) {
+            systemPrompt += `\n${questCompetitionContext}\n`;
+            systemPrompt += `- 这次总结里要能看出他们是因为同一单公告任务撞上的。\n`;
+            systemPrompt += `- 如果互动里存在互相试探、抢先、让步、嘴硬或暗暗较劲，请把这种竞争气氛结算进 summary_log、diary 或 impression。\n`;
+        }
         occupants.forEach(c => {
             const inv = db.city.getInventory(c.id).slice(0, 5).map(i => `${i.emoji}${i.name}`).join(',') || '空';
             systemPrompt += `- 姓名: ${c.name}, ID: "${c.id}", 身上携带物品: ${inv}\n`;
@@ -3108,14 +3680,14 @@ systemPrompt += `\n[重要指令] JSON 的 key 必须严格匹配上面给出的
         if (!systemResult || !systemResult.characters) {
             console.warn(`[City/Social] 采用规则系统 fallback 结算遭遇`);
             systemResult = {
-                summary_log: `${occupants.map(c => c.name).join('、')} 在 ${district.emoji}${district.name} 聚在一起待了一会儿。`,
+                summary_log: buildCollapsedCityLog(occupants[0], '社交遭遇文案生成失败', { district }),
                 characters: {}
             };
             for (const c of occupants) {
                 systemResult.characters[c.id] = {
                     chat: '',
                     moment: '',
-                    diary: `今天在街上遇到了 ${occupants.length - 1} 个人。`,
+                    diary: '',
                     affinity_deltas: {}
                 };
                 for (const other of occupants) {
@@ -3235,7 +3807,7 @@ systemPrompt += `\n[重要指令] JSON 的 key 必须严格匹配上面给出的
             recordCityLlmDebug(db, char, 'input', 'city_schedule_generate', messages, { model: char.model_name });
             const reply = await callLLM({
                 endpoint: char.api_endpoint, key: char.api_key, model: char.model_name,
-                messages, maxTokens: 1000, temperature: isGeminiModel ? 0.2 : 0.7
+                messages, maxTokens: 3000, temperature: isGeminiModel ? 0.2 : 0.7
             });
             recordCityLlmDebug(db, char, 'output', 'city_schedule_generate', reply, { model: char.model_name });
             const plan = tryParseScheduleReply(reply);
@@ -3278,6 +3850,7 @@ systemPrompt += `\n[重要指令] JSON 的 key 必须严格匹配上面给出的
     // Mayor AI cron service
 
     let mayorTimer = null;
+    const mayorRunLocks = new Set();
 
     function buildMayorContext(db) {
         const items = db.city.getItems();
@@ -3309,7 +3882,71 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
 `;
     }
 
+    function publishQuestAnnouncement(db, questId, questData = {}) {
+        try {
+            const quest = db.city.getQuestById ? db.city.getQuestById(questId) : null;
+            const targetDistrictId = quest?.target_district || questData.target_district || 'street';
+            const targetDistrict = db.city.getDistrict(targetDistrictId);
+            const locationLabel = targetDistrict ? `${targetDistrict.emoji}${targetDistrict.name}` : targetDistrictId;
+            const rewardText = `${Number(quest?.reward_gold ?? questData.reward_gold ?? 0)}金币${Number(quest?.reward_cal ?? questData.reward_cal ?? 0) > 0 ? ` + ${Number(quest?.reward_cal ?? questData.reward_cal ?? 0)}体力` : ''}`;
+            const content = `${quest?.emoji || questData.emoji || '📜'} ${quest?.title || questData.title || '悬赏任务'}｜前往 ${locationLabel} 处理：${quest?.description || questData.description || '待处理事项'}｜奖励：${rewardText}`;
+            const announcementId = db.city.addCityAnnouncement('system', '悬赏任务', content, targetDistrictId);
+            if (announcementId && typeof db.city.attachQuestAnnouncement === 'function') {
+                db.city.attachQuestAnnouncement(questId, announcementId);
+            }
+            return announcementId;
+        } catch (e) {
+            console.warn('[City Quest] Failed to publish quest announcement:', e.message);
+            return 0;
+        }
+    }
+
+    function markMayorRun(db, timestamp = Date.now()) {
+        try {
+            db.city.setConfig('mayor_last_run_at', String(timestamp));
+        } catch (e) {
+            console.warn('[Mayor AI] Failed to persist last run time:', e.message);
+        }
+    }
+
+    function recordMayorAnnouncement(db, title, content) {
+        if (!content || !String(content).trim()) return;
+        try {
+            if (typeof db.city.addCityAnnouncement === 'function') {
+                db.city.addCityAnnouncement('mayor', title || '市长广播', String(content).trim(), 'street');
+            }
+        } catch (e) {
+            console.warn('[Mayor AI] Failed to write city announcement:', e.message);
+        }
+    }
+
+    function shouldAutoRunMayor(db, now = Date.now()) {
+        const config = db.city.getConfig();
+        const mayorEnabled = config.mayor_enabled === '1' || config.mayor_enabled === 'true';
+        if (!mayorEnabled) return false;
+        const intervalHours = Math.max(1, parseInt(config.mayor_interval_hours, 10) || 6);
+        const lastRunAt = parseInt(config.mayor_last_run_at, 10) || 0;
+        return !lastRunAt || (now - lastRunAt) >= intervalHours * 60 * 60 * 1000;
+    }
+
+    async function maybeRunMayorAI(db, runKey, { force = false } = {}) {
+        const lockKey = String(runKey || 'default');
+        if (mayorRunLocks.has(lockKey)) {
+            return { success: false, skipped: true, reason: 'already_running' };
+        }
+        if (!force && !shouldAutoRunMayor(db)) {
+            return { success: false, skipped: true, reason: 'not_due' };
+        }
+        mayorRunLocks.add(lockKey);
+        try {
+            return await runMayorAI(db);
+        } finally {
+            mayorRunLocks.delete(lockKey);
+        }
+    }
+
     async function runMayorAI(db) {
+        const finishedAt = Date.now();
         try {
             const config = db.city.getConfig();
             const mayorPrompt = config.mayor_prompt || '生成 1 个随机城市事件和 1 个悬赏任务，并用 JSON 回复';
@@ -3335,7 +3972,9 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
             }
             if (!aiChar || !aiChar.api_endpoint || !aiChar.api_key) {
                 console.log('[Mayor AI] 没有可用的 API 配置，跳过。');
-                return { success: false, reason: 'no_api_config' };
+                const result = { success: false, reason: 'no_api_config', canRetry: true };
+                markMayorRun(db, finishedAt);
+                return result;
             }
             console.log(`[Mayor AI] 使用 ${aiChar.name} 的模型 (${aiChar.model_name})`);
 
@@ -3348,22 +3987,38 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
             const reply = await callLLM({
                 endpoint: aiChar.api_endpoint, key: aiChar.api_key, model: aiChar.model_name,
                 messages,
-                maxTokens: 1500, temperature: 0.9
+                maxTokens: 3000, temperature: 0.9
             });
             recordCityLlmDebug(db, aiChar, 'output', 'city_mayor_decision', reply, { model: aiChar.model_name });
 
             // Extract JSON from reply
             const jsonMatch = reply.match(/\{[\s\S]*\}/);
             if (!jsonMatch) {
-                console.log('[Mayor AI] ⚠️ 回复不含 JSON，改用规则生成。');
-                return applyFallbackMayorDecisions(db);
+                console.log('[Mayor AI] ⚠️ 回复不含 JSON，停止本轮，不使用规则兜底。');
+                const result = {
+                    success: false,
+                    reason: 'malformed_output',
+                    error: '市长 AI 返回内容不是合法 JSON。',
+                    canRetry: true
+                };
+                markMayorRun(db, finishedAt);
+                return result;
             }
 
             const decision = JSON.parse(jsonMatch[0]);
-            return applyMayorDecisions(db, decision);
+            const result = applyMayorDecisions(db, decision);
+            markMayorRun(db, finishedAt);
+            return result;
         } catch (e) {
             console.error('[Mayor AI] 决策失败:', e.message);
-            return applyFallbackMayorDecisions(db);
+            const result = {
+                success: false,
+                reason: 'mayor_api_failed',
+                error: e.message,
+                canRetry: true
+            };
+            markMayorRun(db, finishedAt);
+            return result;
         }
     }
 
@@ -3401,11 +4056,12 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
         if (Array.isArray(decision.quests)) {
             for (const q of decision.quests) {
                 if (q.title) {
-                    db.city.createQuest({
+                    const questId = db.city.createQuest({
                         title: q.title, emoji: q.emoji || '📐', description: q.description || '',
                         reward_gold: q.reward_gold ?? 50, reward_cal: q.reward_cal ?? 0,
                         difficulty: q.difficulty || 'normal'
                     });
+                    publishQuestAnnouncement(db, questId, q);
                     db.city.logAction('system', 'QUEST', `📐 新悬赏任务: ${q.title} (${q.difficulty || 'normal'}) - 奖励 ${q.reward_gold ?? 50} 金币`, 0, 0);
                     results.quests++;
                 }
@@ -3415,7 +4071,19 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
         // Announcement
         if (decision.announcement) {
             db.city.logAction('system', 'ANNOUNCE', `📙 城市广播: ${decision.announcement}`, 0, 0);
+            recordMayorAnnouncement(db, '市长广播', decision.announcement);
             results.announcement = decision.announcement;
+        } else {
+            const summaryParts = [];
+            if (results.price_changes > 0) summaryParts.push(`今日调整了 ${results.price_changes} 项物价`);
+            if (results.events > 0) summaryParts.push(`新增了 ${results.events} 项城市事件`);
+            if (results.quests > 0) summaryParts.push(`发布了 ${results.quests} 项悬赏任务`);
+            if (summaryParts.length > 0) {
+                const summary = `市政简报：${summaryParts.join('，')}。请市民留意公告栏与街头变化。`;
+                db.city.logAction('system', 'ANNOUNCE', `📙 城市广播: ${summary}`, 0, 0);
+                recordMayorAnnouncement(db, '市政简报', summary);
+                results.announcement = summary;
+            }
         }
 
         console.log(`[Mayor AI] 执行完成: ${results.price_changes} 个调价, ${results.events} 个事件, ${results.quests} 个任务`);
@@ -3464,12 +4132,21 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
 
         const q = quests[Math.floor(Math.random() * quests.length)];
         try {
-            db.city.createQuest({ title: q.title, emoji: q.emoji, description: q.desc, reward_gold: q.gold, difficulty: q.diff });
+            const questId = db.city.createQuest({ title: q.title, emoji: q.emoji, description: q.desc, reward_gold: q.gold, difficulty: q.diff });
+            publishQuestAnnouncement(db, questId, { title: q.title, emoji: q.emoji, description: q.desc, reward_gold: q.gold, difficulty: q.diff });
             db.city.logAction('system', 'QUEST', `📐 新悬赏: ${q.title} - 奖励 ${q.gold} 金币`, 0, 0);
         } catch (e) { console.error('[Mayor fallback] Quest error:', e.message); }
 
+        const fallbackAnnouncement = `城市广播：今日天气为${w.title}，布告栏新增任务“${q.title}”。请市民按需安排行程。`;
+        try {
+            db.city.logAction('system', 'ANNOUNCE', `📙 ${fallbackAnnouncement}`, 0, 0);
+            recordMayorAnnouncement(db, '市长广播', fallbackAnnouncement);
+        } catch (e) {
+            console.error('[Mayor fallback] Announcement error:', e.message);
+        }
+
         console.log('[Mayor AI] 使用规则生成: ' + w.title + ' + ' + q.title);
-        return { success: true, results: { price_changes: 0, events: 1, quests: 1, announcement: '' }, fallback: true };
+        return { success: true, results: { price_changes: 0, events: 1, quests: 1, announcement: fallbackAnnouncement }, fallback: true };
     }
 
     // Events & quests REST APIs
@@ -3511,14 +4188,72 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
         try {
             ensureCityDb(req.db);
             if (!req.body.title) return res.status(400).json({ error: '缺少 title' });
-            req.db.city.createQuest(req.body);
+            const questId = req.db.city.createQuest(req.body);
+            publishQuestAnnouncement(req.db, questId, req.body);
+            res.json({ success: true, questId });
+        } catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
+    app.post('/api/city/quests/:id/claim', authMiddleware, (req, res) => {
+        try {
+            ensureCityDb(req.db);
+            const questId = req.params.id;
+            const charId = String(req.body?.characterId || '').trim();
+            if (!charId) return res.status(400).json({ error: '缺少 characterId' });
+            const quest = req.db.city.getAllQuests(1000).find((item) => String(item.id) === String(questId));
+            if (!quest) return res.status(404).json({ error: '任务不存在' });
+            const char = req.db.getCharacter(charId);
+            if (!char) return res.status(404).json({ error: '角色不存在' });
+            if (quest.is_completed) return res.status(400).json({ error: '任务已完成' });
+            const claimResult = req.db.city.claimQuest(questId, charId);
+            if (!claimResult?.success) return res.status(400).json({ error: '任务领取失败' });
+            req.db.city.logAction('system', 'QUEST', `📌 ${char.name} 领取了悬赏任务「${quest.title}」`, 0, 0);
+            if (typeof req.db.city.addCityAnnouncement === 'function') {
+                req.db.city.addCityAnnouncement('system', '任务状态', `${char.name} 已领取悬赏任务「${quest.title}」`, 'street');
+            }
             res.json({ success: true });
+        } catch (e) { res.status(500).json({ error: e.message }); }
+    });
+
+    app.post('/api/city/quests/:id/complete', authMiddleware, async (req, res) => {
+        try {
+            ensureCityDb(req.db);
+            const questId = req.params.id;
+            const charId = String(req.body?.characterId || '').trim();
+            if (!charId) return res.status(400).json({ error: '缺少 characterId' });
+            const quest = req.db.city.getAllQuests(1000).find((item) => String(item.id) === String(questId));
+            if (!quest) return res.status(404).json({ error: '任务不存在' });
+            const claimant = req.db.getCharacter(charId);
+            if (!claimant) return res.status(404).json({ error: '角色不存在' });
+            const completion = req.db.city.resolveQuestCompletion(questId, charId);
+            if (!completion?.success) return res.status(400).json({ error: '任务完成失败' });
+
+            if (completion.won) {
+                const wallet = Number(claimant.wallet || 0) + Number(completion.reward_gold || 0);
+                const calories = Number(claimant.calories || 0) + Number(completion.reward_cal || 0);
+                req.db.updateCharacter(claimant.id, { wallet, calories });
+                const resolution = await buildQuestResolutionNarrations(claimant, quest, req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' }, req.db, 'success');
+                req.db.city.logAction(claimant.id, 'QUEST', resolution.log, 0, 0, quest.target_district || 'street');
+                req.db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, quest.target_district || 'street');
+                if (quest.source_announcement_id) req.db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
+                req.db.city.addCityAnnouncement?.('system', '任务完成', resolution.announcement, 'street');
+                res.json({ success: true, won: true });
+                return;
+            }
+
+            const resolution = await buildQuestResolutionNarrations(claimant, quest, req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' }, req.db, 'failed');
+            req.db.city.logAction(claimant.id, 'QUEST', resolution.log, 0, 0, quest.target_district || 'street');
+            req.db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, quest.target_district || 'street');
+            req.db.city.addCityAnnouncement?.('system', '任务失效', resolution.announcement, 'street');
+            res.json({ success: true, won: false, reason: completion.reason || 'already_completed' });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
     app.delete('/api/city/quests/:id', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
+            const quest = req.db.city.getQuestById?.(req.params.id);
+            if (quest?.source_announcement_id) req.db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
             req.db.city.deleteQuest(req.params.id);
             res.json({ success: true });
         } catch (e) { res.status(500).json({ error: e.message }); }
@@ -3566,8 +4301,8 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
     app.post('/api/city/mayor/run', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
-            const result = await runMayorAI(req.db);
-            res.json({ success: true, ...result });
+            const result = await maybeRunMayorAI(req.db, req.user?.id || 'manual', { force: true });
+            res.json(result);
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
@@ -3803,7 +4538,7 @@ ${missedTaskText}
                 recordCityLlmDebug(db, char, 'input', 'city_timeskip_backfill', messages, { model: char.model_name });
                 const reply = await callLLM({
                     endpoint: char.api_endpoint, key: char.api_key, model: char.model_name,
-                    messages, maxTokens: 1500, temperature: 0.95
+                    messages, maxTokens: 3000, temperature: 0.95
                 });
                 recordCityLlmDebug(db, char, 'output', 'city_timeskip_backfill', reply, { model: char.model_name });
 
@@ -3819,39 +4554,15 @@ ${missedTaskText}
                 fallbackToOrdinary = true;
             }
 
-            // Fallback Generation
+            // Failure folding
             if (fallbackToOrdinary) {
-                const fallbacks = [
-                    {
-                        summary: `${char.name} 在这段时间里过得相当惬意，享受着难得的平静。`,
-                        moment: `微风不燥，阳光正好。在过去的 ${skippedHoursDelta} 个小时里，享受了一段完全属于自己的悠闲时光。`,
-                        diary: `其实有时候，什么宏伟计划都不做，就这样静静让时间流过去，也是一种治愈。`
-                    },
-                    {
-                        summary: `${char.name} 似乎卷入了一些鸡毛蒜皮的琐事，忙忙碌碌地度过了这段时间。`,
-                        moment: `刚过去的这 ${skippedHoursDelta} 个小时简直像打仗一样，总算把手头的琐事全处理完了。`,
-                        diary: `生活就是由无数琐碎小事拼出来的。虽然没按计划行事，但至少现在能松一口气了。`
-                    },
-                    {
-                        summary: `${char.name} 找了个舒服的角落摸鱼，成功避开了一切麻烦。`,
-                        moment: `堂堂正正度过了 ${skippedHoursDelta} 个小时的摸鱼时光。这才是生活的真谛。`,
-                        diary: `我发誓我原本是打算做点正事的，但坐下来的那一刻，重力战胜了意志。这绝对不是我的错。`
-                    },
-                    {
-                        summary: `${char.name} 去街头漫无目的地转了一圈，心情似乎还不错。`,
-                        moment: `漫步在城市街头，这 ${skippedHoursDelta} 个小时里的沿途风景都挺好看。偶尔偏离一下生活轨道也不错。`,
-                        diary: `原来这座城市还有这么多我没认真看过的细节。虽然错过了原定行程，但换来了一份好心情。`
-                    }
-                ];
-                const FB = fallbacks[Math.floor(Math.random() * fallbacks.length)];
-
                 result = {
-                    summary: FB.summary,
-                    tasks_completed: missedTasks.map(t => Number(t.hour)), // Assume they did it automatically
-                    tasks_missed: [],
+                    summary: buildCollapsedCityLog(char, '时间跳过总结生成失败', { locationLabel: `${skippedHoursDelta}小时` }),
+                    tasks_completed: [],
+                    tasks_missed: missedTasks.map(t => Number(t.hour)),
                     chat: "",
-                    moment: FB.moment,
-                    diary: FB.diary
+                    moment: "",
+                    diary: ""
                 };
             }
 

@@ -87,19 +87,21 @@ function RagHeaderProgress({ progress, lang }) {
         setDisplayStep(progress.currentStep || 0);
     }, [progress?.runId, progress?.currentStep, progress]);
 
-    const totalSteps = progress?.totalSteps || 7;
+    const totalSteps = progress?.totalSteps || 8;
     const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
     const labels = [
         lang === 'en' ? '1 Summary' : '1 摘要',
-        lang === 'en' ? '2 Route' : '2 路由',
-        lang === 'en' ? '3 Topics' : '3 主题',
-        lang === 'en' ? '4 Decide' : '4 决策',
-        lang === 'en' ? '5 Rewrite' : '5 改写',
-        lang === 'en' ? '6 Retrieve' : '6 召回',
-        lang === 'en' ? '7 Output' : '7 输出'
+        lang === 'en' ? '2 Switch' : '2 切题',
+        lang === 'en' ? '3 Route' : '3 路由',
+        lang === 'en' ? '4 Topics' : '4 主题',
+        lang === 'en' ? '5 Decide' : '5 决策',
+        lang === 'en' ? '6 Rewrite' : '6 改写',
+        lang === 'en' ? '7 Retrieve' : '7 召回',
+        lang === 'en' ? '8 Output' : '8 输出'
     ];
     const currentLabelMap = {
         summary: lang === 'en' ? 'Summary cache update' : '摘要缓存更新',
+        switch: lang === 'en' ? 'Topic switch gate' : '切题判断',
         route: lang === 'en' ? 'Module routing' : '模块路由',
         topics: lang === 'en' ? 'Topic expansion' : '主题展开',
         decision: lang === 'en' ? 'RAG decision' : 'RAG 决策',
@@ -200,7 +202,7 @@ function ChatWindow({
     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
     const ragProgress = engineState?.[contact?.id]?.ragProgress || {
         runId: null,
-        totalSteps: 7,
+        totalSteps: 8,
         currentStep: 0,
         currentKey: 'summary',
         status: 'idle',
