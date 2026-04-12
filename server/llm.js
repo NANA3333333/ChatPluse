@@ -2,6 +2,19 @@
 const crypto = require('crypto');
 const { getTokenCount } = require('./utils/tokenizer');
 
+const PRE_INPUT_CHAIN_CACHE_TYPES = new Set([
+    'context_module_router',
+    'semantic_city_intent',
+    'chat_topic_switch',
+    'chat_intent_topics',
+    'chat_intent_decision',
+    'chat_intent_rewrite',
+    'chat_intent_browse_summarize'
+]);
+const relayPlannerRateState = new Map();
+const DEFAULT_PRE_INPUT_MIN_INTERVAL_MS = Math.max(0, Number(process.env.CP_PRE_INPUT_MIN_INTERVAL_MS || 1200) || 1200);
+const LEARNED_RATE_LIMIT_TTL_MS = 15 * 60 * 1000;
+
 function normalizeMessages(messages = []) {
     return messages.map(msg => ({
         role: String(msg?.role || ''),
@@ -189,6 +202,74 @@ function buildRequestBody({ model, messages, maxTokens, temperature, presencePen
     };
 }
 
+function getRelayBucketKey(endpoint, key) {
+    const normalizedEndpoint = String(endpoint || '').trim().replace(/\/+$/, '');
+    const keyHash = crypto.createHash('sha1').update(String(key || '')).digest('hex').slice(0, 12);
+    return `${normalizedEndpoint}::${keyHash}`;
+}
+
+function getRelayPlannerMinIntervalMs(bucketKey, cacheType) {
+    if (!PRE_INPUT_CHAIN_CACHE_TYPES.has(String(cacheType || '').trim())) return 0;
+    const state = relayPlannerRateState.get(bucketKey);
+    const now = Date.now();
+    const learned = state && state.learnedUntilAt > now
+        ? Math.max(0, Number(state.learnedMinIntervalMs || 0) || 0)
+        : 0;
+    return Math.max(DEFAULT_PRE_INPUT_MIN_INTERVAL_MS, learned);
+}
+
+async function acquireRelayPlannerSlot({ endpoint, key, cacheType }) {
+    const normalizedCacheType = String(cacheType || '').trim();
+    if (!PRE_INPUT_CHAIN_CACHE_TYPES.has(normalizedCacheType)) return;
+
+    const bucketKey = getRelayBucketKey(endpoint, key);
+    const previous = relayPlannerRateState.get(bucketKey) || {};
+    const state = {
+        nextAllowedAt: Number(previous.nextAllowedAt || 0) || 0,
+        learnedMinIntervalMs: Number(previous.learnedMinIntervalMs || 0) || 0,
+        learnedUntilAt: Number(previous.learnedUntilAt || 0) || 0,
+        queue: previous.queue || Promise.resolve()
+    };
+
+    let releaseQueue = null;
+    const ready = new Promise(resolve => { releaseQueue = resolve; });
+    state.queue = state.queue
+        .catch(() => {})
+        .then(async () => {
+            const minIntervalMs = getRelayPlannerMinIntervalMs(bucketKey, normalizedCacheType);
+            const waitMs = Math.max(0, state.nextAllowedAt - Date.now());
+            if (waitMs > 0) {
+                await new Promise(resolve => setTimeout(resolve, waitMs));
+            }
+            state.nextAllowedAt = Date.now() + minIntervalMs;
+            relayPlannerRateState.set(bucketKey, state);
+            releaseQueue();
+        });
+
+    relayPlannerRateState.set(bucketKey, state);
+    await ready;
+}
+
+function learnRelayPlannerRateLimit({ endpoint, key, cacheType, errorText }) {
+    const normalizedCacheType = String(cacheType || '').trim();
+    if (!PRE_INPUT_CHAIN_CACHE_TYPES.has(normalizedCacheType)) return;
+
+    const text = String(errorText || '');
+    const perMinuteMatch = text.match(/最多请求\s*(\d+)\s*次/);
+    const limitPerMinute = Number(perMinuteMatch?.[1] || 0) || 0;
+    if (limitPerMinute <= 0) return;
+
+    const bucketKey = getRelayBucketKey(endpoint, key);
+    const previous = relayPlannerRateState.get(bucketKey) || {};
+    const learnedMinIntervalMs = Math.ceil(60000 / limitPerMinute) + 500;
+    relayPlannerRateState.set(bucketKey, {
+        ...previous,
+        learnedMinIntervalMs,
+        learnedUntilAt: Date.now() + LEARNED_RATE_LIMIT_TTL_MS,
+        nextAllowedAt: Math.max(Number(previous.nextAllowedAt || 0) || 0, Date.now() + learnedMinIntervalMs)
+    });
+}
+
 /**
  * Universal adapter for making calls to OpenAI-compatible LLM endpoints.
  * @param {Object} options
@@ -353,6 +434,12 @@ async function callLLM({
                     console.warn('[LLM Debug] Failed to record attempt start:', e.message);
                 }
 
+                await acquireRelayPlannerSlot({
+                    endpoint,
+                    key,
+                    cacheType
+                });
+
                 const response = await fetch(url, {
                     method: 'POST',
                     headers: {
@@ -365,6 +452,14 @@ async function callLLM({
 
                 if (!response.ok) {
                     const errorText = await response.text();
+                    if (response.status === 429) {
+                        learnRelayPlannerRateLimit({
+                            endpoint,
+                            key,
+                            cacheType,
+                            errorText
+                        });
+                    }
                     lastVariantError = new Error(`API Error ${response.status}: ${errorText}`);
                     try {
                         if (typeof debugAttempt === 'function') {

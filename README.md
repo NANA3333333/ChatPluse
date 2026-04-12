@@ -236,6 +236,11 @@ This update focused on topic switching, date recall stability, and cleaning up s
 - Hardened the date-recall path with date-browse routing, chunked day summaries, context partitioning, and better cache invalidation for polluted strong-topic lines.
 - Prevented malformed / truncated outputs from pre-planner stages (`topic switch`, `topics`, `decision`, and `temporal browse summarize`) from being reused from cache.
 - Changed the topic-switch gate to fail closed: if that layer breaks, the turn now stops immediately and returns an error instead of silently falling back to `continue current topic`.
+- Raised output-token budgets across the pre-input planner chain and router layers to reduce false truncation on upstream relays that burn excessive reasoning tokens.
+- Added request pacing for pre-input planner calls so relay services with strict per-minute limits are less likely to trip repeated `429` failures.
+- Changed city autonomous-action API failures to stop the action and emit a folded error record instead of randomly forcing the character to wander somewhere unrelated.
+- Reworked proactive city-to-private-chat prompts so “initiative” favors event-driven updates, current state, and concrete incidents rather than repetitive openers like “what are you doing?”.
+- Strengthened time-of-day guidance so daytime replies are less likely to inherit late-night inertia such as repeatedly urging the user to sleep.
 - Updated this README to remove stale wording that still described `vectra` as part of the current real-time retrieval architecture.
 
 ### Stack

@@ -17,6 +17,7 @@ function getDefaultGuidelines() {
 1. Stay fully in persona. Mobile chat only. Keep replies short, casual, conversational. Never act like an AI assistant.
 2. Treat body state, hunger, fatigue, work, money pressure, city/life activities, and scene context as in-world reality, never as backend/UI/log/prompt mechanics. If the user uses meta words like token/cache/prompt/AI/system/backend/testing, reinterpret them inside the relationship and scene.
 3. Mention time-of-day or what you are doing only when it fits. Vary response moves; do not lock into one habitual opener, pacing, or emotional pattern.
+3.5. Current time-of-day outranks conversational inertia. If it is daytime / morning / noon / afternoon, do not keep talking as if it were late-night by habit, and do not casually urge the user to sleep unless the live scene clearly supports it.
 4. Output rule: never output only tags. Always include at least one sentence of dialogue.
 5. Hidden tag protocol:
    - timer: [TIMER:min]
@@ -1403,7 +1404,7 @@ function getEngine(userId) {
                 key: ragPlannerConfig.key,
                 model: ragPlannerConfig.model,
                 messages: gateMessages,
-                maxTokens: 120,
+                maxTokens: 3000,
                 temperature: 0,
                 enableCache: true,
                 cacheDb: db,
@@ -1411,7 +1412,7 @@ function getEngine(userId) {
                 cacheScope: `character:${character?.id || ''}`,
                 cacheCharacterId: character?.id || '',
                 cacheKeyMode: 'exact',
-                cacheKeyExtra: 'v1',
+                cacheKeyExtra: 'v3',
                 returnUsage: true,
                 validateCachedContent: (cachedText, cachedMeta) => isValidTopicSwitchPayload(cachedText, cachedMeta),
                 shouldCacheResult: (resultText, resultMeta) => isValidTopicSwitchPayload(resultText, resultMeta)
@@ -1821,7 +1822,7 @@ ${dynamicPromptBase}`;
                 key: ragPlannerConfig.key,
                 model: ragPlannerConfig.model,
                 messages: decisionPlannerMessages,
-                maxTokens: 2048,
+                maxTokens: 3000,
                 temperature: 0,
                 enableCache: true,
                 cacheDb: db,
@@ -1978,7 +1979,7 @@ ${dynamicPromptBase}`;
                             key: ragPlannerConfig.key,
                             model: ragPlannerConfig.model,
                             messages: browseSummaryMessages,
-                            maxTokens: 2000,
+                            maxTokens: 3000,
                             temperature: 0,
                             enableCache: true,
                             cacheDb: db,

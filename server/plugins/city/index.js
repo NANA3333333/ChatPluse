@@ -1846,6 +1846,10 @@ ${taskInstruction}
 - 只选一个 action
 - log 自然写出这次行动里真正发生的事，要有画面/动作/心理，但不要写成固定模板
 - 若想联系玩家再填 chat
+- chat 的“主动”优先体现为你主动汇报刚发生的事、自己现在的状态、情绪、处境、发现或决定，而不是默认用寒暄或查岗来拉人回应
+- 不要把“你在干嘛 / 你在做什么 / 你在哪 / 忙吗 / 在吗”这种追问当作默认开头，除非这次事件本身真的需要立刻确认用户位置、安危或回应
+- 比起泛泛追问，更优先写“我刚刚怎么了 / 我现在什么状态 / 我准备做什么 / 我为什么突然想给你发消息”
+- 如果要提问，也要让问题强依附于这次商业街事件本身，而不是空泛地确认用户在不在
 - 若值得公开展示再填 moment
 - 若有没说出口的心声再填 diary
 - 想花钱但钱不够时，也要把失败尝试真实写进 log
@@ -2989,11 +2993,23 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             await applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations, { preserveDirectedDistrict: true });
         } catch (e) {
             console.error(`[City] ${char.name} LLM 失败: ${e.message}`);
-            const randomDist = selectRandomDistrict(districts, char);
-            const errLog = {
-                log: `⚠️ [系统提示] ${char.name} 的大模型无响应（API连接失败）。已强制随机游荡至：${randomDist.emoji}${randomDist.name}。`
-            };
-            await applyDecision(randomDist, char, db, userId, currentCals, config, activeEvents, errLog);
+            const currentDistrict = (char.location && db.city.getDistrict(char.location))
+                || districts.find(d => d.id === char.location)
+                || null;
+            const collapsedErrorLog = buildCollapsedCityLog(char, 'API连接失败，本轮商业街行动已取消', {
+                district: currentDistrict,
+                locationLabel: currentDistrict ? '' : (char.location || '原地')
+            });
+            db.city.logAction(
+                char.id,
+                'ERROR',
+                collapsedErrorLog,
+                0,
+                0,
+                currentDistrict?.id || char.location || 'unknown'
+            );
+            broadcastCityEvent(userId, char.id, 'ERROR', collapsedErrorLog);
+            return;
         }
     }
 

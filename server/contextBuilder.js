@@ -112,7 +112,7 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
                 { role: 'system', content: judgePrompt },
                 { role: 'user', content: text }
             ],
-            maxTokens: 5,
+            maxTokens: 3000,
             temperature: 0,
             enableCache: true,
             cacheDb: db,
@@ -120,7 +120,7 @@ async function didUserAskAboutCity(db, character, recentInput = '') {
             cacheTtlMs: 12 * 60 * 60 * 1000,
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
-            cacheKeyExtra: 'v4',
+            cacheKeyExtra: 'v5',
             cacheKeyMode: 'exact',
             returnUsage: true
         });
@@ -336,7 +336,7 @@ async function routeContextModules(db, character, recentInput = '') {
                     ].filter(Boolean).join('\n\n')
                 }
             ],
-            maxTokens: 120,
+            maxTokens: 3000,
             temperature: 0,
             enableCache: true,
             cacheDb: db,
@@ -344,7 +344,7 @@ async function routeContextModules(db, character, recentInput = '') {
             cacheTtlMs: 12 * 60 * 60 * 1000,
             cacheScope: `character:${character?.id || ''}`,
             cacheCharacterId: character?.id || '',
-            cacheKeyExtra: 'v6',
+            cacheKeyExtra: 'v7',
             cacheKeyMode: 'exact',
             validateCachedContent: (cachedText) => isValidModuleRoutePayload(cachedText),
             shouldCacheResult: (resultText) => isValidModuleRoutePayload(resultText),
@@ -573,10 +573,13 @@ function buildTimeBehaviorGuidance(timeOfDay, isWeekend, character, isGroupConte
         lines.push('- 除非情绪或剧情强推，否则不要长篇高能输出。');
     } else if (timeOfDay === '早上') {
         lines.push('- 早上语气可带一点刚醒、未完全进入状态的感觉。');
+        lines.push('- 早上默认不是“该去睡觉”的语境，不要因为上一轮聊到困、累、床或休息，就机械延续成催用户去睡。');
     } else if (timeOfDay === '中午') {
         lines.push('- 中午整体更自然稳定，不必额外强调困倦。');
+        lines.push('- 中午和白天更适合日常交流、吃饭、工作、出门、生活推进，不要无缘无故把话题拖回睡觉。');
     } else if (timeOfDay === '下午') {
         lines.push('- 下午默认是日常交流节奏，表达比深夜更顺。');
+        lines.push('- 下午如果没有明确的疲惫、熬夜后果或补觉场景，不要顺着惯性继续催用户去睡。');
     } else if (timeOfDay === '晚上') {
         lines.push('- 晚上可以更松、更私密，但不要默认进入极困状态。');
     }
@@ -595,6 +598,7 @@ function buildTimeBehaviorGuidance(timeOfDay, isWeekend, character, isGroupConte
 
     if (!isGroupContext) {
         lines.push('- 私聊里时间感应优先影响语气、句长、耐心和亲密表达节奏。');
+        lines.push('- 当前时间比旧话题惯性更重要：如果现在是白天，就先按白天语境回应，不要因为前面聊过困、床、睡觉，就把这轮也说成深夜。');
     } else {
         lines.push('- 群聊里时间感应优先影响出场意愿、发言长度和参与热度。');
     }
