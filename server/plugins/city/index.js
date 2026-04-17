@@ -68,6 +68,25 @@ module.exports = function initCityPlugin(app, context) {
         if (entry) db.addEmotionLog(entry);
     }
 
+    function buildGrantReplyDirective(grantKind, details = {}, userName = '用户') {
+        const amount = Number(details.amount || 0);
+        const itemName = String(details.itemName || '').trim();
+        const itemEmoji = String(details.itemEmoji || '').trim();
+        const quantity = Number(details.quantity || 1) || 1;
+
+        const eventSummary = grantKind === 'gold'
+            ? `${userName}刚刚给了你 ${amount} 金币。`
+            : grantKind === 'calories'
+                ? `${userName}刚刚给你补了 ${amount} 点体力/热量。`
+                : `${userName}刚刚给了你 ${itemEmoji}${itemName} x${quantity}。`;
+
+        return [
+            '[系统提示：这是一次收到用户赠与后的回复。]',
+            `最新事件：${eventSummary}`,
+            '请先回应这次收到的东西本身。'
+        ].join('\n');
+    }
+
     async function triggerAdminGrantChat(userId, char, grantKind, details = {}) {
         if (!char?.id) return null;
         const db = ensureCityDb(getUserDb(userId));
@@ -87,6 +106,7 @@ module.exports = function initCityPlugin(app, context) {
             : grantKind === 'calories'
                 ? `${userName}刚给你补了 ${amount} 点体力/热量。`
                 : `${userName}刚给了你 ${itemEmoji}${itemName} x${quantity}。`;
+        const extraSystemDirective = buildGrantReplyDirective(grantKind, details, userName);
 
         const { id: msgId, timestamp: msgTs } = db.addMessage(char.id, 'system', noticeContent);
         const newMessage = {
@@ -99,7 +119,10 @@ module.exports = function initCityPlugin(app, context) {
         };
         engine?.broadcastNewMessage?.(wsClients, newMessage);
         engine?.broadcastEvent?.(wsClients, { type: 'refresh_contacts' });
-        await engine.triggerImmediateUserReply(char.id, wsClients, { propagateError: true });
+        await engine.triggerImmediateUserReply(char.id, wsClients, {
+            propagateError: true,
+            extraSystemDirective
+        });
         return newMessage;
     }
 

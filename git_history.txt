@@ -1,0 +1,313 @@
+﻿commit 0b0a4a15023bc1d416788fd03204f4dc750c12a2
+Author: nana <quexi411@gmail.com>
+Date:   Sun Apr 12 11:33:04 2026 +0800
+
+    Update topic-switch pipeline and refresh README
+
+diff --git a/client/src/components/ChatWindow.jsx b/client/src/components/ChatWindow.jsx
+index a761b61..d8414b2 100644
+--- a/client/src/components/ChatWindow.jsx
++++ b/client/src/components/ChatWindow.jsx
+@@ -87,19 +87,21 @@ function RagHeaderProgress({ progress, lang }) {
+         setDisplayStep(progress.currentStep || 0);
+     }, [progress?.runId, progress?.currentStep, progress]);
+ 
+-    const totalSteps = progress?.totalSteps || 7;
++    const totalSteps = progress?.totalSteps || 8;
+     const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
+     const labels = [
+         lang === 'en' ? '1 Summary' : '1 鎽樿',
+-        lang === 'en' ? '2 Route' : '2 璺敱',
+-        lang === 'en' ? '3 Topics' : '3 涓婚',
+-        lang === 'en' ? '4 Decide' : '4 鍐崇瓥',
+-        lang === 'en' ? '5 Rewrite' : '5 鏀瑰啓',
+-        lang === 'en' ? '6 Retrieve' : '6 鍙洖',
+-        lang === 'en' ? '7 Output' : '7 杈撳嚭'
++        lang === 'en' ? '2 Switch' : '2 鍒囬',
++        lang === 'en' ? '3 Route' : '3 璺敱',
++        lang === 'en' ? '4 Topics' : '4 涓婚',
++        lang === 'en' ? '5 Decide' : '5 鍐崇瓥',
++        lang === 'en' ? '6 Rewrite' : '6 鏀瑰啓',
++        lang === 'en' ? '7 Retrieve' : '7 鍙洖',
++        lang === 'en' ? '8 Output' : '8 杈撳嚭'
+     ];
+     const currentLabelMap = {
+         summary: lang === 'en' ? 'Summary cache update' : '鎽樿缂撳瓨鏇存柊',
++        switch: lang === 'en' ? 'Topic switch gate' : '鍒囬鍒ゆ柇',
+         route: lang === 'en' ? 'Module routing' : '妯″潡璺敱',
+         topics: lang === 'en' ? 'Topic expansion' : '涓婚灞曞紑',
+         decision: lang === 'en' ? 'RAG decision' : 'RAG 鍐崇瓥',
+@@ -200,7 +202,7 @@ function ChatWindow({
+     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
+     const ragProgress = engineState?.[contact?.id]?.ragProgress || {
+         runId: null,
+-        totalSteps: 7,
++        totalSteps: 8,
+         currentStep: 0,
+         currentKey: 'summary',
+         status: 'idle',
+
+commit 47b955ddda9fab48f62ebb0b50a1a140ae050da0
+Author: nana <quexi411@gmail.com>
+Date:   Sun Apr 5 22:46:11 2026 +0800
+
+    Fix Claude RAG retrieval and chat UX
+
+diff --git a/client/src/components/ChatWindow.jsx b/client/src/components/ChatWindow.jsx
+index 2857dbe..a761b61 100644
+--- a/client/src/components/ChatWindow.jsx
++++ b/client/src/components/ChatWindow.jsx
+@@ -1,4 +1,4 @@
+-import React, { useState, useEffect, useRef } from 'react';
++import React, { useState, useEffect, useRef, useMemo } from 'react';
+ import MessageBubble from './MessageBubble';
+ import InputBar from './InputBar';
+ import TransferModal from './TransferModal';
+@@ -27,6 +27,32 @@ function normalizeMessages(list = []) {
+         .map(({ __fallbackIndex, ...msg }) => msg);
+ }
+ 
++function collapseRepeatedApiErrors(list = []) {
++    const collapsed = [];
++    for (const msg of Array.isArray(list) ? list : []) {
++        const prev = collapsed[collapsed.length - 1];
++        const isApiError = msg?.role === 'system' && String(msg?.content || '').includes('API Error');
++        const sameAsPrev = prev
++            && prev.role === 'system'
++            && String(prev.content || '') === String(msg?.content || '')
++            && String(prev._mergeType || '') === 'api_error';
++        if (isApiError && sameAsPrev) {
++            prev._mergedIds = Array.isArray(prev._mergedIds) ? [...prev._mergedIds, msg.id] : [prev.id, msg.id];
++            prev._mergedCount = Number(prev._mergedCount || 1) + 1;
++            prev.id = msg.id;
++            prev.timestamp = msg.timestamp;
++            continue;
++        }
++        collapsed.push(isApiError ? {
++            ...msg,
++            _mergeType: 'api_error',
++            _mergedCount: 1,
++            _mergedIds: [msg.id]
++        } : msg);
++    }
++    return collapsed;
++}
++
+ 
+ 
+ function SystemMessage({ text }) {
+@@ -61,18 +87,20 @@ function RagHeaderProgress({ progress, lang }) {
+         setDisplayStep(progress.currentStep || 0);
+     }, [progress?.runId, progress?.currentStep, progress]);
+ 
+-    const totalSteps = progress?.totalSteps || 6;
++    const totalSteps = progress?.totalSteps || 7;
+     const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
+     const labels = [
+         lang === 'en' ? '1 Summary' : '1 鎽樿',
+-        lang === 'en' ? '2 Topics' : '2 涓婚',
+-        lang === 'en' ? '3 Decide' : '3 鍐崇瓥',
+-        lang === 'en' ? '4 Rewrite' : '4 鏀瑰啓',
+-        lang === 'en' ? '5 Retrieve' : '5 鍙洖',
+-        lang === 'en' ? '6 Output' : '6 杈撳嚭'
++        lang === 'en' ? '2 Route' : '2 璺敱',
++        lang === 'en' ? '3 Topics' : '3 涓婚',
++        lang === 'en' ? '4 Decide' : '4 鍐崇瓥',
++        lang === 'en' ? '5 Rewrite' : '5 鏀瑰啓',
++        lang === 'en' ? '6 Retrieve' : '6 鍙洖',
++        lang === 'en' ? '7 Output' : '7 杈撳嚭'
+     ];
+     const currentLabelMap = {
+         summary: lang === 'en' ? 'Summary cache update' : '鎽樿缂撳瓨鏇存柊',
++        route: lang === 'en' ? 'Module routing' : '妯″潡璺敱',
+         topics: lang === 'en' ? 'Topic expansion' : '涓婚灞曞紑',
+         decision: lang === 'en' ? 'RAG decision' : 'RAG 鍐崇瓥',
+         rewrite: lang === 'en' ? 'Query rewrite' : '鏌ヨ鏀瑰啓',
+@@ -172,13 +200,14 @@ function ChatWindow({
+     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
+     const ragProgress = engineState?.[contact?.id]?.ragProgress || {
+         runId: null,
+-        totalSteps: 6,
++        totalSteps: 7,
+         currentStep: 0,
+         currentKey: 'summary',
+         status: 'idle',
+         skipped: false
+     };
+     const emotion = deriveEmotion(contact || {});
++    const displayMessages = useMemo(() => collapseRepeatedApiErrors(messages), [messages]);
+ 
+     // Fetch most recent messages when contact changes
+     useEffect(() => {
+@@ -417,11 +446,9 @@ function ChatWindow({
+                         </button>
+                     </div>
+                 )}
+-                {messages.map((msg, idx) => {
+-                    if (idx > 0 && messages[idx - 1].id === msg.id) return null;
+-
++                {displayMessages.map((msg, idx) => {
+                     const currentLimit = contact?.context_msg_limit || 60;
+-                    const isBoundary = idx === Math.max(0, messages.length - currentLimit) && messages.length > currentLimit;
++                    const isBoundary = idx === Math.max(0, displayMessages.length - currentLimit) && displayMessages.length > currentLimit;
+                     const boundaryElement = isBoundary ? (
+                         <div key={`boundary-${msg.id}`} style={{ textAlign: 'center', margin: '30px 0', position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                             <div style={{ borderBottom: '1px dashed #ccc', position: 'absolute', top: '20px', left: '10%', right: '10%' }}></div>
+
+commit 55224145b73a1074c59e4d8389ae437a7d6812a4
+Author: nana <quexi411@gmail.com>
+Date:   Wed Apr 1 16:49:01 2026 +0800
+
+    Improve RAG recall and API compatibility
+
+diff --git a/client/src/components/ChatWindow.jsx b/client/src/components/ChatWindow.jsx
+index 4c9f2c9..2857dbe 100644
+--- a/client/src/components/ChatWindow.jsx
++++ b/client/src/components/ChatWindow.jsx
+@@ -39,6 +39,115 @@ function SystemMessage({ text }) {
+     );
+ }
+ 
++function RagHeaderProgress({ progress, lang }) {
++    const [displayStep, setDisplayStep] = useState(progress?.currentStep || 0);
++    const prevRunRef = useRef(progress?.runId || null);
++
++    useEffect(() => {
++        if (!progress) {
++            setDisplayStep(0);
++            prevRunRef.current = null;
++            return;
++        }
++
++        if (progress.runId && prevRunRef.current && progress.runId !== prevRunRef.current) {
++            setDisplayStep(0);
++            const timer = setTimeout(() => setDisplayStep(progress.currentStep || 0), 80);
++            prevRunRef.current = progress.runId;
++            return () => clearTimeout(timer);
++        }
++
++        prevRunRef.current = progress.runId || null;
++        setDisplayStep(progress.currentStep || 0);
++    }, [progress?.runId, progress?.currentStep, progress]);
++
++    const totalSteps = progress?.totalSteps || 6;
++    const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
++    const labels = [
++        lang === 'en' ? '1 Summary' : '1 鎽樿',
++        lang === 'en' ? '2 Topics' : '2 涓婚',
++        lang === 'en' ? '3 Decide' : '3 鍐崇瓥',
++        lang === 'en' ? '4 Rewrite' : '4 鏀瑰啓',
++        lang === 'en' ? '5 Retrieve' : '5 鍙洖',
++        lang === 'en' ? '6 Output' : '6 杈撳嚭'
++    ];
++    const currentLabelMap = {
++        summary: lang === 'en' ? 'Summary cache update' : '鎽樿缂撳瓨鏇存柊',
++        topics: lang === 'en' ? 'Topic expansion' : '涓婚灞曞紑',
++        decision: lang === 'en' ? 'RAG decision' : 'RAG 鍐崇瓥',
++        rewrite: lang === 'en' ? 'Query rewrite' : '鏌ヨ鏀瑰啓',
++        retrieve: lang === 'en' ? 'Vector retrieval' : '鍚戦噺鍙洖',
++        answer: lang === 'en' ? 'Main model output' : '涓绘ā鍨嬭緭鍑?
++    };
++    const statusText = progress?.status === 'completed'
++        ? (lang === 'en' ? 'Completed' : '宸插畬鎴?)
++        : progress?.status === 'error'
++            ? (lang === 'en' ? 'Failed' : '澶辫触')
++            : progress?.skipped
++                ? (lang === 'en' ? 'Skipped to answer' : '宸茶烦杩囧埌鍥炵瓟')
++                : (currentLabelMap[progress?.currentKey] || (lang === 'en' ? 'Idle' : '寰呭懡'));
++
++    return (
++        <div style={{
++            flex: 1,
++            minWidth: 0,
++            padding: '2px 0 0'
++        }}>
++            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', marginBottom: '7px' }}>
++                <span style={{ fontSize: '11px', fontWeight: '700', color: '#55627e', letterSpacing: '0.02em' }}>
++                    {lang === 'en' ? 'RAG Pipeline' : 'RAG 娴佺▼'}
++                </span>
++                <span style={{ fontSize: '11px', color: '#8a90a6', whiteSpace: 'nowrap' }}>{percent}% 路 {statusText}</span>
++            </div>
++            <div style={{
++                position: 'relative',
++                height: '12px',
++                borderRadius: '999px',
++                background: 'rgba(255,255,255,0.88)',
++                border: '1px solid rgba(123,159,224,0.16)',
++                boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.03)',
++                overflow: 'hidden'
++            }}>
++                <div style={{
++                    position: 'absolute',
++                    inset: 0,
++                    width: `${percent}%`,
++                    borderRadius: percent >= 100 ? '999px' : '0 999px 999px 0',
++                    background: 'linear-gradient(90deg, rgba(198,223,247,0.98) 0%, rgba(166,200,241,0.96) 35%, rgba(123,159,224,0.92) 100%)',
++                    boxShadow: displayStep > 0 ? '0 0 14px rgba(123,159,224,0.20)' : 'none',
++                    animation: displayStep > 0 && progress?.status !== 'completed' ? 'ragPulse 1.8s ease-in-out infinite' : 'none',
++                    transition: 'width 260ms ease'
++                }} />
++            </div>
++            <div style={{
++                display: 'grid',
++                gridTemplateColumns: `repeat(${totalSteps}, minmax(0, 1fr))`,
++                gap: '6px',
++                marginTop: '8px'
++            }}>
++                {labels.map((label, index) => {
++                    const isDone = displayStep > index + 1 || (progress?.status === 'completed' && displayStep >= index + 1);
++                    const isCurrent = displayStep === index + 1 && progress?.status !== 'completed';
++                    return (
++                        <div key={label} style={{
++                            fontSize: '10px',
++                            lineHeight: '1.25',
++                            color: isDone || isCurrent ? '#5c6784' : '#a8adbc',
++                            fontWeight: isCurrent ? '700' : '500',
++                            whiteSpace: 'nowrap',
++                            textAlign: 'center',
++                            overflow: 'hidden',
++                            textOverflow: 'clip'
++                        }}>
++                            {label}
++                        </div>
++                    );
++                })}
++            </div>
++        </div>
++    );
++}
++
+ function ChatWindow({
+     contact, allContacts, apiUrl, incomingMessageQueue, engineState,
+     onToggleMemo, onToggleDiary, onToggleSettings, userAvatar, onBack,
+@@ -61,6 +170,14 @@ function ChatWindow({
+     useEffect(() => { contactRef.current = contact; }, [contact]);
+ 
+     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
++    const ragProgress = engineState?.[contact?.id]?.ragProgress || {
++        runId: null,
++        totalSteps: 6,
++        currentStep: 0,
++        currentKey: 'summary',
++        status: 'idle',
++        skipped: false
++    };
+     const emotion = deriveEmotion(contact || {});
+ 
+     // Fetch most recent messages when contact changes
+@@ -251,10 +368,11 @@ function ChatWindow({
+                         alt={contact.name}
+                         style={{ width: '32px', height: '32px', borderRadius: '50%', objectFit: 'cover' }}
+                     />
+-                    <span style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+-                        <span>{contact.name}</span>
+-                        <span style={{ fontSize: '12px', color: emotion.color, fontWeight: '600' }}>{emotion.emoji} {emotion.label}</span>
+-                    </span>
++                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
++                        <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{contact.name}</span>
++                        <span style={{ fontSize: '12px', color: emotion.color, fontWeight: '600', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{emotion.emoji} {emotion.label}</span>
++                        <RagHeaderProgress progress={ragProgress} lang={lang} />
++                    </div>
+                     {engineState?.[contact.id]?.isBlocked === 1 && <span style={{ color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold' }}>(Blocked) 馃毇</span>}
+                 </div>
+                 <div className="chat-header-actions">

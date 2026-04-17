@@ -26,16 +26,19 @@ function InputBar({ onSend, onTransfer }) {
         setShowEmojiPicker(false);
     };
 
-    const handleSend = () => {
+    const handleSend = async () => {
         if (!text.trim()) return;
-        onSend(text);
-        setText('');
+        const currentText = text;
+        const success = await onSend(currentText);
+        if (success !== false) {
+            setText('');
+        }
     };
 
-    const handleKeyDown = (e) => {
+    const handleKeyDown = async (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            handleSend();
+            await handleSend();
         }
     };
 
@@ -136,7 +139,7 @@ function InputBar({ onSend, onTransfer }) {
                 />
             </div>
             <div className="input-actions">
-                <button type="button" className="send-button" onClick={handleSend}>
+                <button type="button" className="send-button" onClick={() => { void handleSend(); }}>
                     {t('Send')}
                 </button>
             </div>

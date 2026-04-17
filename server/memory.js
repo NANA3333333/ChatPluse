@@ -1525,8 +1525,8 @@ function getMemory(userId) {
         }
     }
 
-    function normalizeMemorySearchRequest(queryInput, limit = 5) {
-        const requestedLimit = Math.max(1, Math.min(12, Number(limit || 5) || 5));
+function normalizeMemorySearchRequest(queryInput, limit = 5) {
+        const requestedLimit = Math.max(1, Math.min(20, Number(limit || 5) || 5));
         if (queryInput && typeof queryInput === 'object' && !Array.isArray(queryInput)) {
             const explicitQueries = Array.isArray(queryInput.queries)
                 ? queryInput.queries.map(item => String(item || '').trim()).filter(Boolean).slice(0, 12)
@@ -1554,7 +1554,7 @@ function getMemory(userId) {
                     ...(Number.isFinite(absoluteStart) && absoluteStart > 0 ? { absolute_start: absoluteStart } : {}),
                     ...(Number.isFinite(absoluteEnd) && absoluteEnd > 0 ? { absolute_end: absoluteEnd } : {})
                 },
-                limit: Math.max(1, Math.min(12, Number(queryInput.limit || requestedLimit) || requestedLimit))
+                limit: Math.max(1, Math.min(20, Number(queryInput.limit || requestedLimit) || requestedLimit))
             };
         }
         const primaryText = String(queryInput || '').trim();

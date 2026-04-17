@@ -3,6 +3,30 @@ import { X, Trash2, Settings, RefreshCw } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
+function parseJsonSafely(value, fallback = null) {
+    if (value == null || value === '') return fallback;
+    if (typeof value !== 'string') return value;
+    try {
+        return JSON.parse(value);
+    } catch (_) {
+        return fallback;
+    }
+}
+
+function formatLlmDebugPayload(payload) {
+    if (payload == null || payload === '') return '';
+    if (typeof payload === 'string') {
+        const trimmed = payload.trim();
+        const parsed = parseJsonSafely(trimmed, null);
+        return parsed ? JSON.stringify(parsed, null, 2) : trimmed;
+    }
+    try {
+        return JSON.stringify(payload, null, 2);
+    } catch (_) {
+        return String(payload);
+    }
+}
+
 function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGeneratingSchedule, messagesHideStateCount }) {
     const { t, lang } = useLanguage();
     const [relationships, setRelationships] = useState([]);
@@ -19,6 +43,8 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
     const [contextStats, setContextStats] = useState(null);
     const [emotionLogs, setEmotionLogs] = useState([]);
     const [isLoadingEmotionLogs, setIsLoadingEmotionLogs] = useState(false);
+    const [llmDebugLogs, setLlmDebugLogs] = useState([]);
+    const [isLoadingLlmDebugLogs, setIsLoadingLlmDebugLogs] = useState(false);
     const [isScheduled, setIsScheduled] = useState(contact?.is_scheduled !== 0);
     const [todaySchedule, setTodaySchedule] = useState([]);
     const [isSavingSchedule, setIsSavingSchedule] = useState(false);
@@ -97,6 +123,40 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
             clearInterval(interval);
             window.removeEventListener('refresh_contacts', handleRefresh);
             window.removeEventListener('city_update', handleRefresh);
+        };
+    }, [contact?.id, apiUrl]);
+
+    useEffect(() => {
+        if (!contact) return;
+
+        let cancelled = false;
+        const fetchLlmDebugLogs = async () => {
+            setIsLoadingLlmDebugLogs(true);
+            try {
+                const r = await fetch(`${apiUrl}/characters/${contact.id}/llm-debug-logs?limit=12`, { headers: authHeaders });
+                const data = await r.json();
+                if (!cancelled) {
+                    setLlmDebugLogs(data.success ? (data.logs || []) : []);
+                }
+            } catch (err) {
+                if (!cancelled) {
+                    console.error('Failed to load LLM debug logs', err);
+                    setLlmDebugLogs([]);
+                }
+            } finally {
+                if (!cancelled) setIsLoadingLlmDebugLogs(false);
+            }
+        };
+
+        const handleRefresh = () => fetchLlmDebugLogs();
+        fetchLlmDebugLogs();
+        const interval = setInterval(fetchLlmDebugLogs, 5000);
+        window.addEventListener('refresh_contacts', handleRefresh);
+
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+            window.removeEventListener('refresh_contacts', handleRefresh);
         };
     }, [contact?.id, apiUrl]);
 
@@ -385,6 +445,14 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         if (before === after) return null;
         return `${label} ${before ?? '-'}→${after ?? '-'}`;
     };
+
+    const recentConversationDebugLogs = llmDebugLogs
+        .filter(log => ['private_reply', 'proactive', 'timer_wakeup'].includes(String(log.context_type || '')))
+        .map(log => ({
+            ...log,
+            metaObj: parseJsonSafely(log.meta, {}),
+            formattedPayload: formatLlmDebugPayload(log.payload)
+        }));
 
     return (
         <div className="memory-drawer" style={{ width: '320px', backgroundColor: '#f7f7f7' }}>
@@ -771,6 +839,65 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                                     </div>
                                 );
                             })}
+                        </div>
+                    )}
+                </div>
+
+                <div style={{ marginTop: '10px', backgroundColor: '#fff', padding: '15px', borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#333' }}>
+                            {lang === 'en' ? 'Recent LLM Input / Output' : '最近 LLM 输入输出'}
+                        </div>
+                        <div style={{ fontSize: '11px', color: '#999' }}>
+                            {isLoadingLlmDebugLogs ? (lang === 'en' ? 'Loading...' : '加载中...') : (lang === 'en' ? 'Auto refresh 5s' : '5秒自动刷新')}
+                        </div>
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px', lineHeight: '1.5' }}>
+                        {lang === 'en'
+                            ? 'Shows the latest private reply / proactive prompt payloads so we can see what the model just received and produced.'
+                            : '这里会显示私聊回复和主动发消息的最近 prompt / 输出，方便直接核对模型刚刚看到了什么、回了什么。'}
+                    </div>
+                    {recentConversationDebugLogs.length === 0 ? (
+                        <div style={{ fontSize: '12px', color: '#999', textAlign: 'center', padding: '10px 0', background: '#f8f9fa', borderRadius: '6px' }}>
+                            {isLoadingLlmDebugLogs
+                                ? (lang === 'en' ? 'Loading LLM logs...' : '正在读取 LLM 日志...')
+                                : (lang === 'en' ? 'No recent LLM logs for this character.' : '这个角色最近还没有可显示的 LLM 日志。')}
+                        </div>
+                    ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', maxHeight: '420px', overflowY: 'auto', paddingRight: '2px' }}>
+                            {recentConversationDebugLogs.map(log => (
+                                <div key={log.id} style={{ background: '#f8f9fa', borderRadius: '8px', padding: '10px', borderLeft: `3px solid ${log.direction === 'input' ? '#4f86f7' : '#f39c12'}` }}>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px', marginBottom: '6px', alignItems: 'center' }}>
+                                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                                            <span style={{ fontSize: '11px', fontWeight: '700', color: log.direction === 'input' ? '#2f74d0' : '#d68910', textTransform: 'uppercase' }}>
+                                                {log.direction}
+                                            </span>
+                                            <span style={{ fontSize: '10px', color: '#7b8397', background: '#eef2f8', borderRadius: '999px', padding: '2px 8px' }}>
+                                                {log.context_type}
+                                            </span>
+                                            {log.metaObj?.model && (
+                                                <span style={{ fontSize: '10px', color: '#7b8397', background: '#f3f5f9', borderRadius: '999px', padding: '2px 8px' }}>
+                                                    {log.metaObj.model}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <div style={{ fontSize: '11px', color: '#999', whiteSpace: 'nowrap' }}>
+                                            {log.timestamp ? new Date(log.timestamp).toLocaleString() : '-'}
+                                        </div>
+                                    </div>
+                                    {(log.metaObj?.finishReason || log.metaObj?.isUserReply != null || log.metaObj?.isTimerWakeup != null) && (
+                                        <div style={{ fontSize: '11px', color: '#7a7f8f', marginBottom: '6px', lineHeight: '1.5' }}>
+                                            {log.metaObj?.finishReason ? `finish=${log.metaObj.finishReason}` : ''}
+                                            {log.metaObj?.finishReason && log.metaObj?.isUserReply != null ? ' · ' : ''}
+                                            {log.metaObj?.isUserReply != null ? `userReply=${log.metaObj.isUserReply ? 'yes' : 'no'}` : ''}
+                                            {log.metaObj?.isTimerWakeup != null ? ` · timerWakeup=${log.metaObj.isTimerWakeup ? 'yes' : 'no'}` : ''}
+                                        </div>
+                                    )}
+                                    <pre style={{ margin: 0, whiteSpace: 'pre-wrap', wordBreak: 'break-word', fontSize: '11px', lineHeight: '1.5', color: '#3d4354', background: '#fff', borderRadius: '6px', padding: '10px', border: '1px solid #e9edf3', maxHeight: '220px', overflowY: 'auto' }}>
+                                        {log.formattedPayload || (lang === 'en' ? '(empty)' : '（空）')}
+                                    </pre>
+                                </div>
+                            ))}
                         </div>
                     )}
                 </div>

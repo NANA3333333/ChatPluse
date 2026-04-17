@@ -640,7 +640,7 @@ function enforceStructuredRagQueryConstraints(request, constraints = {}) {
         ...(normalizedRequest?.temporal_hint && typeof normalizedRequest.temporal_hint === 'object'
             ? { temporal_hint: normalizedRequest.temporal_hint }
             : {}),
-        limit: Math.max(1, Math.min(8, Number(normalizedRequest.limit || 3) || 3))
+        limit: Math.max(1, Math.min(20, Number(normalizedRequest.limit || 5) || 5))
     };
 }
 
@@ -673,7 +673,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
             queries: slot.queries.slice(0, 4),
             filters: slot.filters || {},
             temporal_hint: slot.temporal_hint || retrievalRequest?.temporal_hint || {},
-            limit: Math.max(1, Math.min(4, Number(slot.limit || 2) || 2))
+            limit: Math.max(1, Math.min(12, Number(slot.limit || 4) || 4))
         });
     };
 
@@ -693,7 +693,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
                 memory_focus: ['user_profile'],
                 memory_tier: ['core', 'active']
             },
-            limit: 2
+            limit: 6
         });
     }
 
@@ -708,7 +708,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
                 memory_focus: ['user_current_arc', 'user_profile'],
                 memory_tier: ['core', 'active']
             },
-            limit: 3
+            limit: 8
         });
     }
 
@@ -723,7 +723,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
                 memory_focus: ['user_profile', 'user_current_arc'],
                 memory_tier: ['core', 'active', 'ambient']
             },
-            limit: 2
+            limit: 4
         });
     }
 
@@ -738,7 +738,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
                 memory_focus: ['relationship'],
                 memory_tier: ['core', 'active', 'ambient']
             },
-            limit: 2
+            limit: 4
         });
     }
 
@@ -748,7 +748,7 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
             queries: buildSlotQueries(baseQueries, [retrievalLabel || latestUserMessage || '用户近况']),
             filters: retrievalRequest?.filters || {},
             temporal_hint: retrievalRequest?.temporal_hint || {},
-            limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
+            limit: Math.max(1, Math.min(12, Number(retrievalRequest?.limit || 5) || 5))
         });
     }
 
@@ -794,7 +794,7 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
             queries: Array.isArray(retrievalRequest?.queries) ? retrievalRequest.queries : [],
             filters: retrievalRequest?.filters || {},
             temporal_hint: retrievalRequest?.temporal_hint || {},
-            limit: Math.max(1, Math.min(4, Number(retrievalRequest?.limit || 3) || 3))
+            limit: Math.max(1, Math.min(12, Number(retrievalRequest?.limit || 5) || 5))
         }];
 
     const slotResults = [];
@@ -807,19 +807,19 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
                 queries: Array.isArray(slot.queries) ? slot.queries : [],
                 filters: slot.filters || {},
                 temporal_hint: slot.temporal_hint || {},
-                limit: slot.limit || 2
+                limit: slot.limit || 4
             });
         }
         const request = {
             queries: Array.isArray(slot.queries) ? slot.queries : [],
             filters: slot.filters || {},
             temporal_hint: slot.temporal_hint || {},
-            limit: slot.limit || 2
+            limit: slot.limit || 4
         };
         const memories = await memory.searchMemories(
             characterId,
             request,
-            request.limit || 2,
+            request.limit || 4,
             async (trace) => {
                 if (typeof onProgress === 'function') {
                     await onProgress({
@@ -873,8 +873,8 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
     }
 
     const finalLimit = Math.max(
-        Number(retrievalRequest?.limit || 3) || 3,
-        Math.min(10, slots.length * 2)
+        Number(retrievalRequest?.limit || 5) || 5,
+        Math.min(20, slots.length * 4)
     );
 
     const finalMemories = Array.from(aggregate.values())
@@ -995,7 +995,9 @@ function getCachedHistoryWindow(db, characterId, windowType, windowSize, message
 
 function compileHistoryMessages(db, messages) {
     return (Array.isArray(messages) ? messages : []).map(m => ({
-        role: m.role === 'character' ? 'assistant' : 'user',
+        role: m.role === 'character'
+            ? 'assistant'
+            : (m.role === 'user' ? 'user' : 'system'),
         content: formatMessageForLLM(db, m.content)
     }));
 }
@@ -1776,20 +1778,23 @@ ${dynamicPromptBase}`;
             'Now decide whether retrieval is needed before replying.',
             '',
             '[Core Principle]',
-            '- Retrieve whenever older memory would make the reply more accurate, more continuous, more personal, or less likely to forget established facts.',
-            '- Do NOT use the standard "I can answer superficially from recent chat" test. If memory would materially improve continuity, prefer retrieval.',
+            '- Judge retrieval by whether it would materially improve this reply\'s quality: factual accuracy, continuity, personalization, emotional coherence, specificity, or confidence.',
+            '- Do NOT use the weak standard "I can answer something from recent chat, so skip retrieval".',
+            '- If retrieval would make the answer noticeably better, richer, safer, or less forgetful, prefer retrieval.',
             '- If the user is clearly asking what happened on a specific day or time window, prefer routing to direct date browse instead of semantic vector search.',
             '',
             '[Retrieval Is Extra Important]',
             '- If the topics point to user_profile, user_current_arc, or relationship, strongly prefer retrieval.',
             '- If the user is asking what you know about them, how you see them, whether you remember them, or asking for a summary of them, strongly prefer retrieval.',
             '- If the user is touching earlier relationship nodes, repeated affection, or long-running life threads, strongly prefer retrieval.',
+            '- If retrieval would help recover older facts, prior decisions, older wording, earlier promises, interview/job history, or stable user background, strongly prefer retrieval.',
             '- If the user includes a clear time anchor, date, duration, amount, count, ranking, or sequence constraint, strongly prefer retrieval because recent chat alone often loses those details.',
             '- Questions like "昨天发生了什么", "三天前发生了什么", "上周那天怎么了" should usually trigger direct date browse, not vector rewrite.',
             '- Questions like "三天前你说了什么", "上周", "第2次", "50块", "几点", "多久" should usually trigger memory retrieval or date browse unless the answer is plainly present in the latest visible turns.',
             '',
             '[When ENOUGH_CONTEXT Is Allowed]',
-            '- Only output ENOUGH_CONTEXT when the recent chat alone is enough and older memory would add almost nothing to factual accuracy, emotional continuity, or personalization.',
+            '- Only output ENOUGH_CONTEXT when retrieval would add almost no meaningful quality gain.',
+            '- Recent chat alone must already be enough for a high-quality answer, not just a minimally acceptable answer.',
             '- If answering correctly depends on remembering an exact time, number, amount, count, or ordering detail, ENOUGH_CONTEXT is usually NOT allowed.',
             '- If you are on the fence, prefer SEARCH_MEMORY.',
             '',
@@ -2140,7 +2145,7 @@ ${dynamicPromptBase}`;
             '- "temporal_hint" is optional. Use it only when the user message contains a meaningful time constraint.',
             '- "temporal_hint.relative_text" should preserve the original natural-language time phrase when possible, such as "三天前", "昨天", "上周三".',
             '- "temporal_hint.absolute_start" and "temporal_hint.absolute_end" are optional Unix milliseconds when you can infer a likely absolute time range. If unsure, omit them rather than guessing wildly.',
-            '- "limit" should be 2 to 6.',
+            '- "limit" should be 4 to 20.',
             '- Prefer narrow, user-centered retrieval rather than broad generic search.',
             '- Be highly sensitive to time expressions, dates, durations, numbers, amounts, counts, and order words.',
             '- Preserve those constraints inside the queries whenever they matter. Do not rewrite "昨天/三天前/上周/第2次/50元/两次/几点/多久" into weaker wording like "最近/之前/一些/那次".',
@@ -2413,14 +2418,20 @@ ${dynamicPromptBase}`;
             return;
         }
 
-        const shouldResumeRag = !!(generationOptions && generationOptions.resumeRagState && isUserReply && !extraSystemDirective);
+        const shouldResumeRag = !!(generationOptions && generationOptions.resumeRagState && isUserReply);
+        const initialProgress = isUserReply
+            ? (() => {
+                const progress = createRagProgress(
+                    shouldResumeRag ? (generationOptions.resumeRagState.failedAt || 'summary') : 'summary'
+                );
+                return progress;
+            })()
+            : null;
         timers.set(character.id, {
             timerId: null,
             targetTime: Date.now(),
             isThinking: true,
-            ragProgress: (isUserReply && !extraSystemDirective)
-                ? createRagProgress(shouldResumeRag ? (generationOptions.resumeRagState.failedAt || 'summary') : 'summary')
-                : null
+            ragProgress: initialProgress
         });
         broadcastEngineState(wsClients);
 
@@ -2465,6 +2476,7 @@ ${dynamicPromptBase}`;
         }
 
         let customDelayMs = null;
+        let latestUserInputForFailure = '';
         try {
             const {
                 contextHistory,
@@ -2476,29 +2488,32 @@ ${dynamicPromptBase}`;
                 db,
                 memory,
                 character: charCheck,
-                refreshDigest: !!(isUserReply && !extraSystemDirective)
+                refreshDigest: !!isUserReply
             });
+            const effectiveRecentInputString = String(extraSystemDirective || recentInputString || '').trim();
+            latestUserInputForFailure = effectiveRecentInputString;
 
-            if (isUserReply && !extraSystemDirective) {
+            if (isUserReply) {
                 updateRagProgress(character.id, wsClients, { currentKey: 'switch' });
             }
 
-            const topicSwitchState = (isUserReply && !extraSystemDirective)
+            const topicSwitchState = isUserReply
                 ? await (async () => {
                     try {
                         return await runTopicSwitchGate({
                             character: charCheck,
                             transformedHistory,
                             conversationDigest,
-                            recentInputString
+                            recentInputString: effectiveRecentInputString
                         });
                     } catch (switchErr) {
                         const rawMessage = String(switchErr?.message || 'Unknown topic switch gate error');
                         console.error('[Engine] Topic switch gate failed:', rawMessage);
                         setRagFailureState(character.id, {
                             characterId: character.id,
-                            latestUserMessage: recentInputString,
-                            ...(switchErr?.ragResume || { failedAt: 'switch', latestUserMessage: recentInputString })
+                            latestUserMessage: effectiveRecentInputString,
+                            ...(extraSystemDirective ? { extraSystemDirective } : {}),
+                            ...(switchErr?.ragResume || { failedAt: 'switch', latestUserMessage: effectiveRecentInputString })
                         });
                         updateRagProgress(character.id, wsClients, {
                             currentKey: 'answer',
@@ -2509,7 +2524,7 @@ ${dynamicPromptBase}`;
                 })()
                 : null;
 
-            if (isUserReply && !extraSystemDirective) {
+            if (isUserReply) {
                 updateRagProgress(character.id, wsClients, { currentKey: 'route' });
             }
 
@@ -2524,10 +2539,10 @@ ${dynamicPromptBase}`;
             } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
                 conversationDigest,
                 antiRepeatMessages: contextHistory,
-                recentInputString,
+                recentInputString: effectiveRecentInputString,
                 topicSwitchState
             });
-            if (isUserReply && !extraSystemDirective) {
+            if (isUserReply) {
                 updateRagProgress(character.id, wsClients, { currentKey: 'topics' });
             }
             const apiMessages = [
@@ -2547,15 +2562,18 @@ ${dynamicPromptBase}`;
             } else if (!isUserReply && apiMessages.length > 0 && apiMessages[apiMessages.length - 1].role === 'assistant') {
                 // Prevent third-party AI API proxies from auto-injecting "继续" (Continue)
                 // by explicitly providing a system-level user message.
-                apiMessages.push({ role: 'user', content: '[系统提示：请根据当前语境继续上一话题，或者自然开启一个新话题。]' });
+                apiMessages.push({
+                    role: 'user',
+                    content: '[系统提示：上面 history 里 role=assistant 的内容，都是你这个角色自己之前说过的话；role=user 的内容，才是用户 Nana 说的话；role=system 是系统事件。现在请你以 assistant 身份，基于当前语境主动给 Nana 发一条新消息。不要把 assistant 历史误认成 user 说的话。]'
+                });
             }
 
-            if (isUserReply && !extraSystemDirective) {
+            if (isUserReply) {
                 try {
                     msgMetadata = await runStructuredRagPipeline({
                         character,
                         transformedHistory,
-                        recentInputString,
+                        recentInputString: effectiveRecentInputString,
                         conversationDigest,
                         topicSwitchState,
                         wsClients,
@@ -2569,7 +2587,8 @@ ${dynamicPromptBase}`;
                     console.error(`[Engine] RAG planner failed:`, rawMessage);
                     setRagFailureState(character.id, {
                         characterId: character.id,
-                        latestUserMessage: recentInputString,
+                        latestUserMessage: effectiveRecentInputString,
+                        ...(extraSystemDirective ? { extraSystemDirective } : {}),
                         ...(intentErr?.ragResume || {})
                     });
                     updateRagProgress(character.id, wsClients, {
@@ -2583,7 +2602,7 @@ ${dynamicPromptBase}`;
                 }
             }
 
-            if (isUserReply && !extraSystemDirective) {
+            if (isUserReply) {
                 updateRagProgress(character.id, wsClients, { currentKey: 'answer' });
             }
 
@@ -2591,7 +2610,9 @@ ${dynamicPromptBase}`;
             const estimatedHistoryTokens = estimateMessageTokens(transformedHistory);
             const estimatedFullHistoryTokens = estimateMessageTokens(
                 (Array.isArray(contextHistory) ? contextHistory : []).map(m => ({
-                    role: m?.role === 'character' ? 'assistant' : 'user',
+                    role: m?.role === 'character'
+                        ? 'assistant'
+                        : (m?.role === 'user' ? 'user' : 'system'),
                     content: String(m?.content || '')
                 }))
             );
@@ -2642,7 +2663,9 @@ ${dynamicPromptBase}`;
                     { role: 'system', content: stablePromptBlock || promptWithoutDigest || systemPrompt },
                     ...(dynamicPromptWithoutDigest ? [{ role: 'system', content: dynamicPromptWithoutDigest }] : []),
                     ...(Array.isArray(contextHistory) ? contextHistory : []).map(m => ({
-                        role: m?.role === 'character' ? 'assistant' : 'user',
+                        role: m?.role === 'character'
+                            ? 'assistant'
+                            : (m?.role === 'user' ? 'user' : 'system'),
                         content: String(m?.content || '')
                     }))
                 ]
@@ -3122,11 +3145,15 @@ ${dynamicPromptBase}`;
                         broadcastNewMessage(wsClients, newMessage);
                     }
 
-                    if (isUserReply && !extraSystemDirective) {
+                    if (isUserReply) {
                         updateRagProgress(character.id, wsClients, {
                             currentKey: 'answer',
-                            status: 'completed'
+                            status: 'completed',
+                            skipped: false
                         });
+                    }
+                    if (isUserReply) {
+                        setRagFailureState(character.id, null);
                     }
 
                     // Trigger memory extraction in background based on recent context + new full message
@@ -3139,10 +3166,21 @@ ${dynamicPromptBase}`;
 
         } catch (e) {
             console.error(`[Engine] Failed to trigger message for ${character.id}:`, e.message);
-            if (isUserReply && !extraSystemDirective) {
+            if (isUserReply) {
+                const resumeState = generationOptions?.resumeRagState || null;
+                setRagFailureState(character.id, {
+                    ...(resumeState && typeof resumeState === 'object' ? resumeState : {}),
+                    characterId: character.id,
+                    latestUserMessage: latestUserInputForFailure || String(resumeState?.latestUserMessage || '').trim(),
+                    failedAt: String(resumeState?.failedAt || (extraSystemDirective ? 'event_reply' : 'answer')).trim() || 'answer',
+                    ...(extraSystemDirective ? { extraSystemDirective } : {})
+                });
+            }
+            if (isUserReply) {
                 updateRagProgress(character.id, wsClients, {
                     currentKey: 'answer',
-                    status: 'error'
+                    status: 'error',
+                    skipped: false
                 });
             }
             // Show the error visibly in the chat so the user knows what went wrong
@@ -3331,9 +3369,10 @@ ${dynamicPromptBase}`;
             const freshChar = db.getCharacter(characterId);
             if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) return;
             const resumeRagState = options?.useRetryResume ? getRagFailureState(characterId) : null;
+            const resumedExtraSystemDirective = String(resumeRagState?.extraSystemDirective || '').trim() || null;
             // Trigger a reply. We leave pressure AND jealousy as-is for this reply so it generates the Return Reaction
             // Jealousy is NOT zeroed out 鈥?the AI decides via [JEALOUSY:N] tag when to forgive
-            triggerMessage(freshChar, wsClients, true, false, null, { resumeRagState }).finally(() => {
+            triggerMessage(freshChar, wsClients, true, false, resumedExtraSystemDirective, { resumeRagState }).finally(() => {
                 // The model must explicitly relax via [PRESSURE]/[JEALOUSY] tags.
                 const cleanupPatch = {};
                 if (hadPendingCityReply) {

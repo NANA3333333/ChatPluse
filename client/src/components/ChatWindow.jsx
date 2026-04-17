@@ -53,6 +53,16 @@ function collapseRepeatedApiErrors(list = []) {
     return collapsed;
 }
 
+function createSystemErrorMessage(message, characterId) {
+    return {
+        id: `system-error-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        character_id: characterId,
+        role: 'system',
+        content: `[System] API Error: ${message}`,
+        timestamp: Date.now()
+    };
+}
+
 
 
 function SystemMessage({ text }) {
@@ -90,32 +100,32 @@ function RagHeaderProgress({ progress, lang }) {
     const totalSteps = progress?.totalSteps || 8;
     const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
     const labels = [
-        lang === 'en' ? '1 Summary' : '1 摘要',
-        lang === 'en' ? '2 Switch' : '2 切题',
-        lang === 'en' ? '3 Route' : '3 路由',
-        lang === 'en' ? '4 Topics' : '4 主题',
-        lang === 'en' ? '5 Decide' : '5 决策',
-        lang === 'en' ? '6 Rewrite' : '6 改写',
-        lang === 'en' ? '7 Retrieve' : '7 召回',
-        lang === 'en' ? '8 Output' : '8 输出'
+        lang === 'en' ? '1 Summary' : '1 \u6458\u8981',
+        lang === 'en' ? '2 Switch' : '2 \u5207\u9898',
+        lang === 'en' ? '3 Route' : '3 \u8DEF\u7531',
+        lang === 'en' ? '4 Topics' : '4 \u4E3B\u9898',
+        lang === 'en' ? '5 Decide' : '5 \u51B3\u7B56',
+        lang === 'en' ? '6 Rewrite' : '6 \u6539\u5199',
+        lang === 'en' ? '7 Retrieve' : '7 \u53EC\u56DE',
+        lang === 'en' ? '8 Output' : '8 \u8F93\u51FA'
     ];
     const currentLabelMap = {
-        summary: lang === 'en' ? 'Summary cache update' : '摘要缓存更新',
-        switch: lang === 'en' ? 'Topic switch gate' : '切题判断',
-        route: lang === 'en' ? 'Module routing' : '模块路由',
-        topics: lang === 'en' ? 'Topic expansion' : '主题展开',
-        decision: lang === 'en' ? 'RAG decision' : 'RAG 决策',
-        rewrite: lang === 'en' ? 'Query rewrite' : '查询改写',
-        retrieve: lang === 'en' ? 'Vector retrieval' : '向量召回',
-        answer: lang === 'en' ? 'Main model output' : '主模型输出'
+        summary: lang === 'en' ? 'Summary cache update' : '\u6458\u8981\u7F13\u5B58\u66F4\u65B0',
+        switch: lang === 'en' ? 'Topic switch gate' : '\u5207\u9898\u5224\u65AD',
+        route: lang === 'en' ? 'Module routing' : '\u6A21\u5757\u8DEF\u7531',
+        topics: lang === 'en' ? 'Topic expansion' : '\u4E3B\u9898\u6269\u5C55',
+        decision: lang === 'en' ? 'RAG decision' : 'RAG \u51B3\u7B56',
+        rewrite: lang === 'en' ? 'Query rewrite' : '\u67E5\u8BE2\u6539\u5199',
+        retrieve: lang === 'en' ? 'Vector retrieval' : '\u5411\u91CF\u53EC\u56DE',
+        answer: lang === 'en' ? 'Main model output' : '\u4E3B\u6A21\u578B\u8F93\u51FA'
     };
     const statusText = progress?.status === 'completed'
-        ? (lang === 'en' ? 'Completed' : '已完成')
+        ? (lang === 'en' ? 'Completed' : '\u5DF2\u5B8C\u6210')
         : progress?.status === 'error'
-            ? (lang === 'en' ? 'Failed' : '失败')
+            ? (lang === 'en' ? 'Failed' : '\u5931\u8D25')
             : progress?.skipped
-                ? (lang === 'en' ? 'Skipped to answer' : '已跳过到回答')
-                : (currentLabelMap[progress?.currentKey] || (lang === 'en' ? 'Idle' : '待命'));
+                ? (lang === 'en' ? 'Skipped to answer' : '\u8DF3\u8FC7\u524D\u7F6E\u9636\u6BB5')
+                : (currentLabelMap[progress?.currentKey] || (lang === 'en' ? 'Idle' : '\u7A7A\u95F2')); 
 
     return (
         <div style={{
@@ -125,9 +135,9 @@ function RagHeaderProgress({ progress, lang }) {
         }}>
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', marginBottom: '7px' }}>
                 <span style={{ fontSize: '11px', fontWeight: '700', color: '#55627e', letterSpacing: '0.02em' }}>
-                    {lang === 'en' ? 'RAG Pipeline' : 'RAG 流程'}
+                    {lang === 'en' ? 'RAG Pipeline' : 'RAG \u6D41\u7A0B'}
                 </span>
-                <span style={{ fontSize: '11px', color: '#8a90a6', whiteSpace: 'nowrap' }}>{percent}% · {statusText}</span>
+                <span style={{ fontSize: '11px', color: '#8a90a6', whiteSpace: 'nowrap' }}>{percent}% - {statusText}</span>
             </div>
             <div style={{
                 position: 'relative',
@@ -277,7 +287,7 @@ function ChatWindow({
                 id: `block - event - ${Date.now()} `,
                 character_id: contact?.id,
                 role: 'system',
-                content: `[System] ${contact?.name} 将你拉黑了。`,
+                content: `[System] ${contact?.name} \u5DF2\u5C06\u4F60\u62C9\u9ED1\u3002`,
                 timestamp: Date.now()
             }]));
         }
@@ -294,9 +304,17 @@ function ChatWindow({
 
     const handleSend = async (text) => {
         const currentContactId = contactRef.current?.id;
-        if (!currentContactId) return;
+        if (!currentContactId) return false;
+        const optimisticId = `temp-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        const optimisticMessage = {
+            id: optimisticId,
+            character_id: currentContactId,
+            role: 'user',
+            content: text,
+            timestamp: Date.now()
+        };
 
-
+        setMessages(prev => normalizeMessages([...prev, optimisticMessage]));
 
         try {
             const res = await fetch(`${apiUrl}/messages`, {
@@ -304,14 +322,41 @@ function ChatWindow({
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
                 body: JSON.stringify({ characterId: currentContactId, content: text })
             });
-            const data = await res.json();
+            const data = await res.json().catch(() => ({}));
             // Only update state if we're still looking at the same contact
-            if (contactRef.current?.id !== currentContactId) return;
-            if (data.blocked && data.message) {
-                setMessages(prev => normalizeMessages([...prev, { ...data.message, isBlocked: true }]));
+            if (contactRef.current?.id !== currentContactId) return false;
+            if (!res.ok) {
+                const errorText = String(data?.error || data?.message || `HTTP ${res.status}`);
+                setMessages(prev => normalizeMessages([
+                    ...prev.filter(msg => msg.id !== optimisticId),
+                    createSystemErrorMessage(errorText, currentContactId)
+                ]));
+                return false;
             }
+            const savedMessage = data.blocked && data.message
+                ? { ...data.message, isBlocked: true }
+                : data.message;
+            if (savedMessage) {
+                setMessages(prev => normalizeMessages([
+                    ...prev.filter(msg => msg.id !== optimisticId),
+                    savedMessage
+                ]));
+            } else {
+                setMessages(prev => prev.filter(msg => msg.id !== optimisticId));
+            }
+            if (data.blocked && data.message) {
+                return true;
+            }
+            return true;
         } catch (e) {
             console.error('Failed to send:', e);
+            if (contactRef.current?.id === currentContactId) {
+                setMessages(prev => normalizeMessages([
+                    ...prev.filter(msg => msg.id !== optimisticId),
+                    createSystemErrorMessage(e?.message || 'Network error', currentContactId)
+                ]));
+            }
+            return false;
         }
     };
 
@@ -403,8 +448,9 @@ function ChatWindow({
                         <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{contact.name}</span>
                         <span style={{ fontSize: '12px', color: emotion.color, fontWeight: '600', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{emotion.emoji} {emotion.label}</span>
                         <RagHeaderProgress progress={ragProgress} lang={lang} />
+                        {engineState?.[contact.id]?.isBlocked === 1 && <span style={{ color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold' }}>(Blocked) [X]</span>}
                     </div>
-                    {engineState?.[contact.id]?.isBlocked === 1 && <span style={{ color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold' }}>(Blocked) 🚫</span>}
+
                 </div>
                 <div className="chat-header-actions">
                     <button onClick={() => { setSelectMode(m => !m); setSelectedIds(new Set()); }} title={lang === 'en' ? 'Select Messages' : '选择消息'}
@@ -455,10 +501,10 @@ function ChatWindow({
                         <div key={`boundary-${msg.id}`} style={{ textAlign: 'center', margin: '30px 0', position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                             <div style={{ borderBottom: '1px dashed #ccc', position: 'absolute', top: '20px', left: '10%', right: '10%' }}></div>
                             <span style={{ background: '#f5f5f5', padding: '0 15px', color: '#888', fontSize: '12px', fontWeight: 'bold', position: 'relative', zIndex: 1, textTransform: 'uppercase', letterSpacing: '1px' }}>
-                                👀 {lang === 'en' ? 'AI Vision Boundary' : 'AI 视界边界'} 👀
+                                [AI] {lang === 'en' ? 'AI Vision Boundary' : 'AI \u89C6\u754C\u8FB9\u754C'} [AI]
                             </span>
                             <div style={{ fontSize: '11px', color: '#aaa', marginTop: '4px', position: 'relative', zIndex: 1, backgroundColor: '#f5f5f5', padding: '0 10px' }}>
-                                {lang === 'en' ? 'AI can only "see" messages below this line' : '模型只能感知此线以下的消息'}
+                                {lang === 'en' ? 'AI can only "see" messages below this line' : '\u6A21\u578B\u53EA\u80FD\u611F\u77E5\u6B64\u7EBF\u4EE5\u4E0B\u7684\u6D88\u606F'}
                             </div>
                         </div>
                     ) : null;
@@ -492,7 +538,7 @@ function ChatWindow({
                                         display: 'flex', alignItems: 'center', justifyContent: 'center',
                                         transition: 'all 0.15s ease'
                                     }}>
-                                        {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>✓</span>}
+                                        {isSelected && <span style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold' }}>\u2713</span>}
                                     </div>
                                 </div>
                             )}
@@ -546,10 +592,10 @@ function ChatWindow({
                             }}
                             style={{ fontSize: '13px', color: 'var(--accent-color, #4a90e2)', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0' }}
                         >
-                            {selectedIds.size === messages.length ? (lang === 'en' ? 'Deselect All' : '取消全选') : (lang === 'en' ? 'Select All' : '全选')}
+                            {selectedIds.size === messages.length ? (lang === 'en' ? 'Deselect All' : '\u53D6\u6D88\u5168\u9009') : (lang === 'en' ? 'Select All' : '\u5168\u9009')}
                         </button>
                         <span style={{ fontSize: '13px', color: '#888' }}>
-                            {lang === 'en' ? `${selectedIds.size} selected` : `已选 ${selectedIds.size} 条`}
+                            {lang === 'en' ? `${selectedIds.size} selected` : `\u5DF2\u9009\u62E9 ${selectedIds.size} \u6761`}
                         </span>
                     </div>
                     <div style={{ display: 'flex', gap: '8px' }}>
@@ -557,7 +603,7 @@ function ChatWindow({
                             onClick={() => { setSelectMode(false); setSelectedIds(new Set()); }}
                             style={{ padding: '6px 16px', fontSize: '13px', background: '#f5f5f5', border: '1px solid #ddd', borderRadius: '8px', cursor: 'pointer', color: '#666' }}
                         >
-                            {lang === 'en' ? 'Cancel' : '取消'}
+                            {lang === 'en' ? 'Cancel' : '\u53D6\u6D88'}
                         </button>
                         <button
                             disabled={selectedIds.size === 0}
@@ -565,7 +611,7 @@ function ChatWindow({
                                 if (selectedIds.size === 0) return;
                                 const confirmMsg = lang === 'en'
                                     ? `Permanently delete ${selectedIds.size} message(s)?`
-                                    : `确定永久删除 ${selectedIds.size} 条消息？`;
+                                    : `\u786E\u5B9A\u6C38\u4E45\u5220\u9664 ${selectedIds.size} \u6761\u6D88\u606F\u5417\uFF1F`; 
                                 if (!confirm(confirmMsg)) return;
                                 try {
                                     const res = await fetch(`${apiUrl}/messages/batch-delete`, {
@@ -591,7 +637,7 @@ function ChatWindow({
                             }}
                         >
                             <Trash size={14} style={{ verticalAlign: 'middle', marginRight: '4px' }} />
-                            {lang === 'en' ? 'Delete' : '删除'}
+                            {lang === 'en' ? 'Delete' : '\u5220\u9664'}
                         </button>
                     </div>
                 </div>
