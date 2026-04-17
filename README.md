@@ -76,7 +76,7 @@ ChatPulse 是一个本地优先的 AI 社交模拟应用，前端使用 React，
 
 ```bash
 git clone https://github.com/NANA3333333/ChatPluse.git
-cd ChatPulse
+cd ChatPluse
 ```
 
 初始化：
@@ -301,6 +301,15 @@ Start the app:
 ```bash
 npm run dev
 ```
+
+Production-style local serving:
+
+```bash
+npm --prefix client run build
+npm --prefix server run start
+```
+
+`npm run dev` starts the Vite dev server plus the backend. If you want the backend to serve the built frontend from `client/dist`, build the client first on that machine.
 
 Windows helper scripts:
 
