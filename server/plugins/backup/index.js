@@ -8,9 +8,50 @@ const unzipper = require('unzipper');
 module.exports = function (app, pluginContext) {
     const { getMemory, getUserDb, getEngine, getWsClients, authMiddleware, JWT_SECRET } = pluginContext;
     const { clearMemoryCache } = require('../../memory');
+    const { closeSchedulerDb } = require('../scheduler/db');
 
     // Resolve path to the shared uploads directory (server/public/uploads)
     const uploadsDir = path.join(__dirname, '..', '..', 'public', 'uploads');
+    const tempUploadsDir = path.join(uploadsDir, 'temp');
+
+    const toUploadRelativePath = (value) => {
+        const raw = String(value || '').trim();
+        if (!raw) return null;
+        const marker = '/uploads/';
+        const markerIdx = raw.indexOf(marker);
+        if (markerIdx >= 0) {
+            return raw.slice(markerIdx + 1).replaceAll('/', path.sep);
+        }
+        if (raw.startsWith('uploads/')) {
+            return raw.replaceAll('/', path.sep);
+        }
+        return null;
+    };
+
+    const collectUploadReferences = (userDb, sql, mapper = (row) => Object.values(row || {})) => {
+        const refs = new Set();
+        try {
+            const rows = userDb.prepare(sql).all();
+            for (const row of rows) {
+                for (const value of mapper(row)) {
+                    const relPath = toUploadRelativePath(value);
+                    if (relPath) refs.add(relPath);
+                }
+            }
+        } catch (e) { }
+        return refs;
+    };
+
+    const getReferencedUploadsForUser = (dbInstance) => {
+        const rawDb = typeof dbInstance?.getRawDb === 'function' ? dbInstance.getRawDb() : null;
+        if (!rawDb) return [];
+        return Array.from(new Set([
+            ...collectUploadReferences(rawDb, 'SELECT avatar, banner FROM user_profile'),
+            ...collectUploadReferences(rawDb, 'SELECT avatar FROM characters'),
+            ...collectUploadReferences(rawDb, 'SELECT avatar FROM group_chats'),
+            ...collectUploadReferences(rawDb, 'SELECT image_url FROM moments'),
+        ]));
+    };
 
     // ─── PRIVATE MULTER CONFIG FOR BACKUP UPLOADS ─────────────────────────
     const storage = multer.diskStorage({
@@ -95,15 +136,11 @@ module.exports = function (app, pluginContext) {
             // Add the database backup file
             archive.file(backupPath, { name: 'chatpulse.db' });
 
-            // Add all upload files (avatars, images, etc.)
-            if (fs.existsSync(uploadsDir)) {
-                archive.directory(uploadsDir, 'uploads', (entry) => {
-                    // Skip the temp/ subdirectory
-                    if (entry.name.startsWith('temp/') || entry.name.startsWith('temp\\')) {
-                        return false;
-                    }
-                    return entry;
-                });
+            // Add only the current user's referenced upload files.
+            for (const relPath of getReferencedUploadsForUser(db)) {
+                const fullPath = path.join(__dirname, '..', '..', 'public', relPath);
+                if (!fs.existsSync(fullPath)) continue;
+                archive.file(fullPath, { name: relPath.replaceAll(path.sep, '/') });
             }
 
             await archive.finalize();
@@ -156,6 +193,8 @@ module.exports = function (app, pluginContext) {
             const memory = getMemory(userId);
             const isZip = req.file.originalname.toLowerCase().endsWith('.zip') ||
                 req.file.mimetype === 'application/zip';
+            const { userDbCache } = require('../../db');
+            const { engineCache } = require('../../engine');
 
             let dbFilePath = uploadedPath; // For raw .db, use directly
             let extractedDir = null;
@@ -196,6 +235,8 @@ module.exports = function (app, pluginContext) {
                 return res.status(400).json({ error: 'Uploaded file is not a valid SQLite Database.' });
             }
 
+            const currentUploadRefs = getReferencedUploadsForUser(req.db);
+
             // Wipe existing memory indexes
             const characters = req.db.getCharacters();
             for (const c of characters) {
@@ -204,12 +245,20 @@ module.exports = function (app, pluginContext) {
 
             const dbPath = req.db.getDbPath();
 
+            // Stop all live workers touching this user's DB before overwriting it.
+            closeSchedulerDb(userId);
+            const oldEngine = engineCache.get(userId);
+            if (oldEngine && typeof oldEngine.stopAllTimers === 'function') {
+                oldEngine.stopAllTimers();
+            }
+
             // Checkpoint and close current DB
             try {
                 await req.db.backup(dbPath + '.tmp');
             } catch (e) { }
 
             req.db.close();
+            userDbCache.delete(userId);
 
             // Delete existing WAL and SHM files
             if (fs.existsSync(dbPath + '-wal')) fs.unlinkSync(dbPath + '-wal');
@@ -218,36 +267,35 @@ module.exports = function (app, pluginContext) {
             // Overwrite the database
             fs.copyFileSync(dbFilePath, dbPath);
 
-            // Restore uploads (avatars) from zip if present
+            // Restore uploads from zip if present. Keep the shared temp dir untouched.
             if (isZip && extractedDir) {
                 const extractedUploads = path.join(extractedDir, 'uploads');
                 if (fs.existsSync(extractedUploads)) {
-                    // Ensure target uploads dir exists
-                    if (!fs.existsSync(uploadsDir)) {
-                        fs.mkdirSync(uploadsDir, { recursive: true });
-                    }
-                    // Copy all files from extracted uploads to the real uploads dir
+                    removeReferencedUploads(currentUploadRefs);
                     copyDirRecursive(extractedUploads, uploadsDir);
                     console.log('[Backup] Restored upload files (avatars, images) from backup.');
                 }
             }
 
-            // Clean up temp files
-            cleanupTemp(uploadedPath, extractedDir);
-
-            const { userDbCache } = require('../../db');
-            userDbCache.delete(userId);
             clearMemoryCache(userId);
-
-            // Also clear engine cache so stale DB references are purged
-            const { engineCache } = require('../../engine');
-            const oldEngine = engineCache.get(userId);
-            if (oldEngine && typeof oldEngine.stopAllTimers === 'function') {
-                oldEngine.stopAllTimers();
-            }
             engineCache.delete(userId);
 
-            res.json({ success: true });
+            // Re-open the restored database and rebuild memory search indices so restore is usable immediately.
+            const restoredDb = getUserDb(userId);
+            const restoredMemory = getMemory(userId);
+            const restoredCharacters = restoredDb.getCharacters();
+            for (const character of restoredCharacters) {
+                await restoredMemory.rebuildIndex(character.id);
+            }
+
+            // Clean up temp files only after rebuild finishes.
+            cleanupTemp(uploadedPath, extractedDir);
+
+            res.json({
+                success: true,
+                restoredCharacters: restoredCharacters.length,
+                rebuiltMemoryIndexes: restoredCharacters.length
+            });
         } catch (e) {
             console.error('[Backup] Import error:', e);
             res.status(500).json({ error: e.message });
@@ -260,7 +308,26 @@ module.exports = function (app, pluginContext) {
         try { if (dirPath && fs.existsSync(dirPath)) fs.rmSync(dirPath, { recursive: true, force: true }); } catch (e) { }
     }
 
+    function removeReferencedUploads(relPaths = []) {
+        for (const relPath of relPaths) {
+            if (!relPath) continue;
+            const fullPath = path.join(__dirname, '..', '..', 'public', relPath);
+            try {
+                if (fs.existsSync(fullPath) && fullPath !== tempUploadsDir && !fullPath.startsWith(tempUploadsDir + path.sep)) {
+                    fs.rmSync(fullPath, { recursive: true, force: true });
+                }
+            } catch (e) { }
+        }
+        if (!fs.existsSync(uploadsDir)) {
+            fs.mkdirSync(uploadsDir, { recursive: true });
+        }
+        if (!fs.existsSync(tempUploadsDir)) {
+            fs.mkdirSync(tempUploadsDir, { recursive: true });
+        }
+    }
+
     function copyDirRecursive(src, dest) {
+        if (!fs.existsSync(dest)) fs.mkdirSync(dest, { recursive: true });
         const entries = fs.readdirSync(src, { withFileTypes: true });
         for (const entry of entries) {
             const srcPath = path.join(src, entry.name);

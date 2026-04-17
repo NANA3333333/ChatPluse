@@ -775,7 +775,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const handleImportDatabase = async (event) => {
         const file = event.target.files[0];
         if (!file) return;
-        if (!window.confirm(lang === 'en' ? "Warning! This will overwrite all your current characters and chats. The server will restart. Continue?" : "警告：这将覆盖你当前所有的聊天记录和角色数据，并且服务器会自动重启。是否继续？")) {
+        if (!window.confirm(lang === 'en' ? "Warning! This will overwrite your current account archive, including characters, chats, memories, and uploaded assets. Continue?" : "警告：这将覆盖你当前账号的整套存档，包括角色、聊天、记忆和上传资源。是否继续？")) {
             event.target.value = null;
             return;
         }
@@ -791,7 +791,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             });
             const data = await res.json();
             if (data.success) {
-                alert(lang === 'en' ? 'Database restored! Please refresh the page in a few seconds.' : '存档恢复成功，服务正在重启，请几秒后刷新页面。');
+                alert(lang === 'en' ? 'Backup restored and memory indexes rebuilt. The page will refresh in a few seconds.' : '存档恢复完成，记忆索引也已重建。页面将在几秒后自动刷新。');
                 setTimeout(() => window.location.reload(), 3000);
             } else {
                 alert("Failed to restore: " + data.error);
@@ -799,6 +799,8 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         } catch (e) {
             console.error('Import Error:', e);
             alert('Upload failed.');
+        } finally {
+            event.target.value = null;
         }
     };
 
@@ -1604,15 +1606,15 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                         <Save size={20} /> {lang === 'en' ? 'Data Backup & Restore' : '数据备份与恢复'}
                     </h2>
                     <p style={{ fontSize: '13px', color: '#666', marginBottom: '15px', lineHeight: 1.5 }}>
-                        {lang === 'en' ? 'Backup your entire ChatPulse database (chats, memories, settings) as a single SQLite file, or restore from a previous backup.' : '将整个 ChatPulse 数据库（聊天、记忆、设置）备份为单个 SQLite 文件，或从之前的备份中恢复。'}
+                        {lang === 'en' ? 'Download a full account backup as a ZIP package containing the latest database snapshot plus referenced uploaded assets, or restore from a previous ZIP/DB backup.' : '下载当前账号的完整 ZIP 备份，内含最新数据库快照和被引用的上传资源；也可以从之前的 ZIP / DB 备份恢复。'}
                     </p>
                     <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap', alignItems: 'center' }}>
-                        <a href={`${apiUrl}/system/export?token=${localStorage.getItem('cp_token') || ''}`} download="chatpulse.db" style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: 'var(--accent-color)', color: '#fff', textDecoration: 'none', borderRadius: '6px', fontSize: '14px', fontWeight: 'bold' }}>
-                            <Download size={18} /> {lang === 'en' ? 'Download Full Backup (.db)' : '下载完整备份（.db）'}
+                        <a href={`${apiUrl}/system/export?token=${localStorage.getItem('cp_token') || ''}`} download="chatpulse_backup.zip" style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: 'var(--accent-color)', color: '#fff', textDecoration: 'none', borderRadius: '6px', fontSize: '14px', fontWeight: 'bold' }}>
+                            <Download size={18} /> {lang === 'en' ? 'Download Full Backup (.zip)' : '下载完整备份（.zip）'}
                         </a>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: '#f0f0f0', color: '#333', border: '1px solid #ddd', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
                             <Upload size={18} /> {lang === 'en' ? 'Restore from Backup' : '上传并恢复存档'}
-                            <input type="file" accept=".db,application/x-sqlite3,application/octet-stream" style={{ display: 'none' }} onChange={handleImportDatabase} />
+                            <input type="file" accept=".zip,.db,application/zip,application/x-sqlite3,application/octet-stream" style={{ display: 'none' }} onChange={handleImportDatabase} />
                         </label>
                         <div style={{ width: '1px', height: '24px', backgroundColor: '#ddd', margin: '0 5px' }}></div>
                         <button onClick={handleSystemWipe} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: '#fff', color: 'var(--danger)', border: '1px solid var(--danger)', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
