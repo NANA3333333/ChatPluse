@@ -26,10 +26,27 @@ client/node_modules/
 changed_files.txt
 full_history.log
 git_log_full.txt
+git_history.txt
 nul.css
 client/nul.css
 server/public/uploads/
 chatpulse_logo.png
+
+# Debug exports / local reports / local screenshots
+debug_exports/
+client/*lint*.txt
+client/*lint*.json
+client/*report*.txt
+client/*report*.json
+client/build_error.txt
+client/dom_output.txt
+client/*debug*.png
+client/playwright-*.png
+
+# Local docs / workflow exports
+agent_workflow.*
+ARCHITECTURE_GUIDE*.md
+科普介绍_缓存RAG与向量记忆.md
 
 # Test and seed files
 test*.js
