@@ -212,6 +212,118 @@ scripts/
   migrate-memories-to-qdrant.js
 ```
 
+### City 模块结构说明
+
+`server/plugins/city` 现在不再只是一个“所有逻辑都堆在 `index.js`”里的单文件插件，而是逐步拆成了“入口编排 + 数据层 + service 层”。
+
+当前目录结构：
+
+```text
+server/plugins/city/
+  index.js
+  cityDb.js
+  services/
+    actionService.js
+    mayorService.js
+    mayorRuntimeService.js
+    questService.js
+    socialService.js
+```
+
+职责划分：
+
+- `index.js`
+  仍然是 city DLC 的入口文件。
+  负责：
+  - 挂载 `/api/city/*` 路由
+  - 初始化依赖和上下文
+  - 组装各个 service
+  - 保留插件入口和外部调用形状
+
+- `cityDb.js`
+  是 city 的数据访问层。
+  负责：
+  - `city_*` 相关表结构
+  - 任务、公告、日志、库存、地点、配置等读写
+  - 给上层 service 提供稳定的数据操作接口
+
+- `services/actionService.js`
+  是“商业街行动执行器”。
+  负责：
+  - 角色到某个地点后这次行动怎么结算
+  - 体力、金币、状态变化
+  - 赌博、购物、进食、医疗、学习等分支行为
+  - 行动后的广播、任务推进、钱包同步
+
+- `services/questService.js`
+  是“公告任务推进与结算器”。
+  负责：
+  - 领取任务后的推进
+  - 汇报 / 交付阶段判断
+  - 任务完成与失败结算
+  - 任务结果文案生成
+
+- `services/mayorService.js`
+  是“市长 AI 业务能力层”。
+  负责：
+  - 市长模型选择
+  - 市长 JSON 输出解析
+  - 任务难度评分
+  - 任务推进评分
+  - 市长决策结果落库
+
+- `services/mayorRuntimeService.js`
+  是“市长 AI 运行时编排层”。
+  负责：
+  - 是否到达自动执行时间
+  - 本轮市长 AI 是否允许执行
+  - 调用市长模型生成事件/任务/广播
+  - fallback 决策和运行锁
+
+- `services/socialService.js`
+  是“同地点社交遭遇结算器”。
+  负责：
+  - 角色同地点碰撞检测
+  - 社交冷却
+  - 多角色顺序发言模拟
+  - 社交结果总结
+  - 好感 / 印象 / 私聊 / 朋友圈 / 日记更新
+
+为什么这样拆：
+
+- 原先 `city/index.js` 同时承担了：
+  - 路由
+  - 运行时调度
+  - 市长 AI
+  - 公告任务
+  - 商业街行动
+  - 社交遭遇
+  - 文案生成
+- 这种结构在功能变多后很容易让一个需求改动牵动整块文件。
+- 现在的拆分目标不是“一次性大重构”，而是先把最重、最容易继续膨胀的业务块独立出来，让 `index.js` 更像编排层。
+
+当前推荐理解方式：
+
+1. `index.js` 是 city 插件入口。
+2. `cityDb.js` 是 city 的持久化层。
+3. `services/*` 是真正的业务层。
+4. 新功能如果属于某个明确领域，优先继续放进对应 service，而不是再直接堆回 `index.js`。
+
+后续继续拆分时，推荐顺序：
+
+- `routes/`
+  把 `/api/city/*` 路由从 `index.js` 拆成独立路由文件
+- `scheduleService`
+  把日程生成和时段计划逻辑单独抽出
+- 更细的 action 子模块
+  例如把购物 / 医疗 / 赌博拆成 `actionService` 内部子文件
+
+目前这套结构的目标不是“绝对完美”，而是：
+
+- 保持现有功能继续可用
+- 让新增需求不再持续把 `index.js` 养成单文件巨兽
+- 让独立开发时也能靠模块边界维持可读性
+
 ### 许可证
 
 本项目采用 **CC BY-NC-ND 4.0** 许可。
@@ -409,6 +521,79 @@ npm run doctor
 npm run migrate:qdrant
 npm run cleanup:city-memories
 ```
+
+### City Module Structure
+
+The `server/plugins/city` plugin is no longer treated as a single giant file. It is now being split into three layers: entry orchestration, persistence, and domain services.
+
+Current layout:
+
+```text
+server/plugins/city/
+  index.js
+  cityDb.js
+  services/
+    actionService.js
+    mayorService.js
+    mayorRuntimeService.js
+    questService.js
+    socialService.js
+```
+
+Responsibilities:
+
+- `index.js`
+  The DLC/plugin entry.
+  It wires dependencies, mounts `/api/city/*` routes, and orchestrates services.
+
+- `cityDb.js`
+  The persistence layer for city-specific data.
+  It owns `city_*` tables plus CRUD for districts, logs, quests, inventory, announcements, and config.
+
+- `services/actionService.js`
+  The city action executor.
+  It resolves what happens when a character performs an in-city action: stamina, money, state updates, shopping, food, medical, study, logging, and post-action sync.
+
+- `services/questService.js`
+  The quest lifecycle layer.
+  It owns claim/progress/report/resolve flow and quest result narration.
+
+- `services/mayorService.js`
+  The mayor AI domain layer.
+  It handles mayor model selection, JSON parsing, quest difficulty scoring, quest progress scoring, and applying mayor decisions.
+
+- `services/mayorRuntimeService.js`
+  The mayor AI runtime/orchestration layer.
+  It decides when the mayor should run, prevents duplicate concurrent runs, executes the mayor prompt, and handles fallback generation.
+
+- `services/socialService.js`
+  The social encounter layer.
+  It detects same-location collisions, enforces cooldowns, simulates multi-character encounters, and applies affinity / impression / outreach results.
+
+Why this split exists:
+
+- `city/index.js` originally mixed routes, scheduling, action execution, mayor logic, quests, social encounters, prompt assembly, and runtime guards in one place.
+- That made the file hard to reason about and increased regression risk whenever a new feature touched the city system.
+- The current goal is not a one-shot rewrite. It is an incremental extraction of the heaviest business areas so `index.js` becomes an orchestrator instead of the implementation of every feature.
+
+Recommended mental model:
+
+1. `index.js` is the plugin entry and composition root.
+2. `cityDb.js` is the persistence boundary.
+3. `services/*` hold the actual business logic.
+4. New city features should prefer extending an existing service or adding a new service, instead of growing `index.js` again.
+
+Recommended next extraction steps:
+
+- `routes/`
+  Move `/api/city/*` handlers out of `index.js`
+- `scheduleService`
+  Isolate schedule generation and daily plan logic
+- Smaller action submodules
+  Split shopping / medical / gambling branches out of `actionService` if that file grows too fast
+
+The point of the current structure is not “perfect architecture”.
+It is to keep the project shippable while preventing `city/index.js` from becoming a permanent single-file bottleneck.
 
 ### License
 

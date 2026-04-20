@@ -21,6 +21,7 @@ const text = {
   nextAd: '下次广告',
   lastFailure: '上次失败',
   noAds: '还没有广告记录。',
+  published: '已公告',
   manual: '手动',
   auto: '自动',
   agencyFailed: '中介所 AI 执行失败：',
@@ -273,15 +274,7 @@ export default function HousingSocialPanel() {
   const beginEditHome = (item) => { setEditingHomeId(String(item.id)); setHomeForm({ ...emptyHome, ...item }); setShowCustomHomeEditor(true); };
   const applyAgencyTemplate = (key) => { setAgencyTemplateKey(key); const preset = promptStyles.find((item) => item.key === key); if (preset) setAgencyForm((prev) => ({ ...prev, persona_prompt: preset.prompt })); };
 
-  const visibleAgencyAds = useMemo(() => {
-    const publicKeys = new Set(
-      (publicAgencyAnnouncements || []).map((item) => `${String(item.title || '').trim()}\n${String(item.content || '').trim()}`).filter(Boolean)
-    );
-    return (agencyAds || []).filter((ad) => {
-      const key = `${String(ad.title || '').trim()}\n${String(ad.content || '').trim()}`;
-      return !publicKeys.has(key);
-    });
-  }, [agencyAds, publicAgencyAnnouncements]);
+  const visibleAgencyAds = useMemo(() => agencyAds || [], [agencyAds]);
 
   if (loading) return <div style={{ padding: 24, color: '#64748b' }}>{text.loading}</div>;
 
@@ -327,6 +320,7 @@ export default function HousingSocialPanel() {
                     <div style={{ fontWeight: 800, color: '#2563eb', fontSize: 15 }}>{ad.title || text.noAds}</div>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                       <Pill bg={ad.trigger_type === 'auto' ? '#eff6ff' : '#f8fafc'} color={ad.trigger_type === 'auto' ? '#1d4ed8' : '#475569'}>{ad.trigger_type === 'auto' ? text.auto : text.manual}</Pill>
+                      {Number(ad.is_published ? 1 : 0) === 1 ? <Pill bg="#dcfce7" color="#166534">{text.published}</Pill> : null}
                       <button style={{ ...shell.btn, ...tones.redBtn, padding: '7px 10px', fontSize: 12 }} onClick={() => deleteAgencyAd(ad.id).catch((e) => alert(e.message))}>{text.removeAd}</button>
                     </div>
                   </div>

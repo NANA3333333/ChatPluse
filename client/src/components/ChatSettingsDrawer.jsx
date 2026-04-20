@@ -130,18 +130,22 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         if (!contact) return;
 
         let cancelled = false;
+        setLlmDebugLogs([]);
         const fetchLlmDebugLogs = async () => {
             setIsLoadingLlmDebugLogs(true);
             try {
-                const r = await fetch(`${apiUrl}/characters/${contact.id}/llm-debug-logs?limit=12`, { headers: authHeaders });
+                const r = await fetch(`${apiUrl}/characters/${contact.id}/llm-debug-logs?limit=60`, { headers: authHeaders });
                 const data = await r.json();
                 if (!cancelled) {
-                    setLlmDebugLogs(data.success ? (data.logs || []) : []);
+                    const nextLogs = data.success ? (data.logs || []) : [];
+                    setLlmDebugLogs(prevLogs => {
+                        if (nextLogs.length > 0) return nextLogs;
+                        return prevLogs;
+                    });
                 }
             } catch (err) {
                 if (!cancelled) {
                     console.error('Failed to load LLM debug logs', err);
-                    setLlmDebugLogs([]);
                 }
             } finally {
                 if (!cancelled) setIsLoadingLlmDebugLogs(false);
@@ -152,11 +156,13 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         fetchLlmDebugLogs();
         const interval = setInterval(fetchLlmDebugLogs, 5000);
         window.addEventListener('refresh_contacts', handleRefresh);
+        window.addEventListener('city_update', handleRefresh);
 
         return () => {
             cancelled = true;
             clearInterval(interval);
             window.removeEventListener('refresh_contacts', handleRefresh);
+            window.removeEventListener('city_update', handleRefresh);
         };
     }, [contact?.id, apiUrl]);
 
@@ -447,7 +453,18 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
     };
 
     const recentConversationDebugLogs = llmDebugLogs
-        .filter(log => ['private_reply', 'proactive', 'timer_wakeup'].includes(String(log.context_type || '')))
+        .filter(log => {
+            const contextType = String(log.context_type || '').trim();
+            return [
+                'private_reply',
+                'proactive',
+                'timer_wakeup',
+                'city_private_reply_directed_action',
+                'city_private_self_prompt',
+                'hacker_intel_reply'
+            ].includes(contextType);
+        })
+        .slice(0, 12)
         .map(log => ({
             ...log,
             metaObj: parseJsonSafely(log.meta, {}),

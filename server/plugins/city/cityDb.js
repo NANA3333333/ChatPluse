@@ -37,6 +37,7 @@ module.exports = function initCityDb(db) {
     try { db.exec("ALTER TABLE city_quests ADD COLUMN completion_target INTEGER DEFAULT 2;"); } catch (e) { }
     try { db.exec("ALTER TABLE city_quests ADD COLUMN status TEXT DEFAULT 'open';"); } catch (e) { }
     try { db.exec("ALTER TABLE city_quests ADD COLUMN completed_by TEXT DEFAULT '';"); } catch (e) { }
+    try { db.exec("ALTER TABLE city_quests ADD COLUMN difficulty_reason TEXT DEFAULT '';"); } catch (e) { }
     db.exec(`
         CREATE TABLE IF NOT EXISTS city_quest_claims (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -48,6 +49,27 @@ module.exports = function initCityDb(db) {
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             UNIQUE(quest_id, character_id)
+        );
+    `);
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS city_quest_progress_reviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            quest_id INTEGER NOT NULL,
+            claim_id INTEGER DEFAULT 0,
+            log_id INTEGER NOT NULL,
+            character_id TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            progress_delta INTEGER DEFAULT 0,
+            progress_after INTEGER DEFAULT 0,
+            target_score INTEGER DEFAULT 0,
+            is_completed INTEGER DEFAULT 0,
+            comment TEXT DEFAULT '',
+            short_label TEXT DEFAULT '',
+            error_message TEXT DEFAULT '',
+            raw_response TEXT DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE(log_id)
         );
     `);
     try { db.exec("ALTER TABLE city_logs ADD COLUMN location TEXT DEFAULT '';"); } catch (e) { }
@@ -205,6 +227,7 @@ module.exports = function initCityDb(db) {
             completion_target INTEGER DEFAULT 2,
             status TEXT DEFAULT 'open',
             completed_by TEXT DEFAULT '',
+            difficulty_reason TEXT DEFAULT '',
             is_completed INTEGER DEFAULT 0,
             created_at INTEGER NOT NULL,
             expires_at INTEGER NOT NULL
@@ -442,15 +465,107 @@ module.exports = function initCityDb(db) {
                 const sameContent = recentContent === normalizedContent;
                 const sameLocation = String(recent.location || '') === String(loc || '');
                 if (withinShortWindow && sameContent && sameLocation) {
-                    return;
+                    return Number(recent.id || 0);
                 }
             }
         }
 
-        db.prepare(`
+        const info = db.prepare(`
             INSERT INTO city_logs (character_id, action_type, content, delta_calories, delta_money, location, timestamp)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         `).run(charId, actionType, content, dCal, dMoney, loc, now);
+        return Number(info.lastInsertRowid || 0);
+    }
+
+    function getQuestProgressReviewsByLogIds(logIds = []) {
+        const ids = Array.from(new Set((Array.isArray(logIds) ? logIds : []).map((value) => Number(value || 0)).filter((value) => value > 0)));
+        if (ids.length === 0) return new Map();
+        const placeholders = ids.map(() => '?').join(', ');
+        const rows = db.prepare(`
+            SELECT *
+            FROM city_quest_progress_reviews
+            WHERE log_id IN (${placeholders})
+        `).all(...ids);
+        return new Map(rows.map((row) => [Number(row.log_id || 0), row]));
+    }
+
+    function getQuestProgressReviewByLogId(logId) {
+        const safeLogId = Number(logId || 0);
+        if (!safeLogId) return null;
+        return db.prepare(`
+            SELECT *
+            FROM city_quest_progress_reviews
+            WHERE log_id = ?
+            LIMIT 1
+        `).get(safeLogId) || null;
+    }
+
+    function upsertQuestProgressReview(data = {}) {
+        const now = Date.now();
+        const logId = Number(data.log_id || 0);
+        if (!logId) return null;
+        const existing = getQuestProgressReviewByLogId(logId);
+        const payload = {
+            quest_id: Number(data.quest_id || existing?.quest_id || 0),
+            claim_id: Number(data.claim_id || existing?.claim_id || 0),
+            log_id: logId,
+            character_id: String(data.character_id || existing?.character_id || '').trim(),
+            status: String(data.status || existing?.status || 'pending').trim() || 'pending',
+            progress_delta: Number(data.progress_delta ?? existing?.progress_delta ?? 0),
+            progress_after: Number(data.progress_after ?? existing?.progress_after ?? 0),
+            target_score: Number(data.target_score ?? existing?.target_score ?? 0),
+            is_completed: Number(data.is_completed ?? existing?.is_completed ?? 0) ? 1 : 0,
+            comment: String(data.comment ?? existing?.comment ?? '').trim(),
+            short_label: String(data.short_label ?? existing?.short_label ?? '').trim(),
+            error_message: String(data.error_message ?? existing?.error_message ?? '').trim(),
+            raw_response: String(data.raw_response ?? existing?.raw_response ?? '').trim()
+        };
+        if (existing) {
+            db.prepare(`
+                UPDATE city_quest_progress_reviews
+                SET quest_id = ?, claim_id = ?, character_id = ?, status = ?, progress_delta = ?, progress_after = ?,
+                    target_score = ?, is_completed = ?, comment = ?, short_label = ?, error_message = ?, raw_response = ?, updated_at = ?
+                WHERE log_id = ?
+            `).run(
+                payload.quest_id,
+                payload.claim_id,
+                payload.character_id,
+                payload.status,
+                payload.progress_delta,
+                payload.progress_after,
+                payload.target_score,
+                payload.is_completed,
+                payload.comment,
+                payload.short_label,
+                payload.error_message,
+                payload.raw_response,
+                now,
+                logId
+            );
+        } else {
+            db.prepare(`
+                INSERT INTO city_quest_progress_reviews
+                (quest_id, claim_id, log_id, character_id, status, progress_delta, progress_after, target_score, is_completed, comment, short_label, error_message, raw_response, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                payload.quest_id,
+                payload.claim_id,
+                payload.log_id,
+                payload.character_id,
+                payload.status,
+                payload.progress_delta,
+                payload.progress_after,
+                payload.target_score,
+                payload.is_completed,
+                payload.comment,
+                payload.short_label,
+                payload.error_message,
+                payload.raw_response,
+                now,
+                now
+            );
+        }
+        return getQuestProgressReviewByLogId(logId);
     }
 
     function getCityLogs(arg1 = 100, arg2 = null) {
@@ -474,7 +589,12 @@ module.exports = function initCityDb(db) {
                 ORDER BY l.timestamp DESC 
                 LIMIT ?
             `).all(limit);
-        return rows.map(decorateCityLogForUser);
+        const reviewByLogId = getQuestProgressReviewsByLogIds(rows.map((row) => row.id));
+        return rows.map((row) => {
+            const decorated = decorateCityLogForUser(row);
+            const review = reviewByLogId.get(Number(row.id || 0)) || null;
+            return review ? { ...decorated, quest_review: review } : decorated;
+        });
     }
 
     function addCityAnnouncement(sourceType = 'system', title = '', content = '', location = 'street') {
@@ -516,6 +636,34 @@ module.exports = function initCityDb(db) {
             .replace(/^\s*\[(?:中介所广告|市长广播)\]\s*/u, '')
             .replace(/\s+/g, ' ')
             .trim();
+        const parseFallbackAnnouncement = (item = {}) => {
+            const sourceType = String(item.source_type || '').trim();
+            const rawTitle = String(item.title || '').trim();
+            const rawContent = String(item.content || '').trim();
+            if (sourceType !== 'agency') {
+                return {
+                    ...item,
+                    title: rawTitle,
+                    content: rawContent
+                };
+            }
+
+            const normalized = rawContent.replace(/^\s*\[中介所广告\]\s*/u, '').trim();
+            const splitIndex = normalized.indexOf('|');
+            if (splitIndex < 0) {
+                return {
+                    ...item,
+                    title: rawTitle,
+                    content: normalized
+                };
+            }
+
+            return {
+                ...item,
+                title: normalized.slice(0, splitIndex).trim(),
+                content: normalized.slice(splitIndex + 1).trim()
+            };
+        };
         const rows = db.prepare(`
             SELECT id, source_type, title, content, location, timestamp
             FROM city_announcements
@@ -548,7 +696,7 @@ module.exports = function initCityDb(db) {
             WHERE action_type IN ('ANNOUNCE', 'MAYOR', 'EVENT')
             ORDER BY timestamp DESC
             LIMIT ?
-        `).all(safeLimit * 2);
+        `).all(safeLimit * 2).map(parseFallbackAnnouncement);
 
         const normalizedPrimaryKeys = new Set(
             rows.map((item) => {
@@ -975,11 +1123,11 @@ module.exports = function initCityDb(db) {
         const targetDistrict = inferQuestTargetDistrict(data);
         const questType = inferQuestType(data);
         const completionTarget = inferQuestCompletionTarget(questType, data);
-        const info = db.prepare(`INSERT INTO city_quests (title, emoji, description, reward_gold, reward_cal, reward_item_id, difficulty, claimed_by, target_district, source_announcement_id, quest_type, completion_target, status, completed_by, created_at, expires_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        const info = db.prepare(`INSERT INTO city_quests (title, emoji, description, reward_gold, reward_cal, reward_item_id, difficulty, claimed_by, target_district, source_announcement_id, quest_type, completion_target, status, completed_by, difficulty_reason, created_at, expires_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
             data.title, data.emoji || '馃摐', data.description || '',
             data.reward_gold ?? 50, data.reward_cal ?? 0, data.reward_item_id || '',
-            data.difficulty || 'normal', '', targetDistrict, Number(data.source_announcement_id || 0), questType, completionTarget, data.status || 'open', '',
+            data.difficulty || 'normal', '', targetDistrict, Number(data.source_announcement_id || 0), questType, completionTarget, data.status || 'open', '', String(data.difficulty_reason || '').trim(),
             now, expires
         );
         return Number(info.lastInsertRowid || 0);
@@ -989,7 +1137,7 @@ module.exports = function initCityDb(db) {
     }
     function getCharacterActiveQuestClaim(charId) {
         return db.prepare(`
-            SELECT qc.*, q.title, q.description, q.emoji, q.reward_gold, q.reward_cal, q.target_district, q.status AS quest_status, q.is_completed, q.completed_by, q.source_announcement_id
+            SELECT qc.*, q.title, q.description, q.emoji, q.reward_gold, q.reward_cal, q.target_district, q.completion_target, q.difficulty_reason, q.status AS quest_status, q.is_completed, q.completed_by, q.source_announcement_id
             FROM city_quest_claims qc
             JOIN city_quests q ON q.id = qc.quest_id
             WHERE qc.character_id = ?
@@ -1105,6 +1253,7 @@ module.exports = function initCityDb(db) {
         // ★ Events & Quests
         getActiveEvents, getAllEvents, createEvent, expireEvents, deleteEvent,
         getActiveQuests, getAllQuests, createQuest, attachQuestAnnouncement, getQuestById, getQuestClaims, getCharacterActiveQuestClaim, claimQuest, updateQuestClaimStage, advanceQuestProgress, resolveQuestCompletion, completeQuest, deleteQuest,
+        getQuestProgressReviewByLogId, upsertQuestProgressReview,
         db: db // Exposed to allow direct query access to City tables
     };
 };

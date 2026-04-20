@@ -216,6 +216,27 @@ function splitAnnouncementParagraphs(item) {
         .filter(Boolean);
 }
 
+function normalizeAnnouncementIdentity(item) {
+    const sourceType = String(item?.source_type || '').trim().toLowerCase();
+    const rawTitle = String(item?.title || '').trim();
+    const rawContent = String(item?.content || '').trim();
+    let title = rawTitle;
+    let content = rawContent;
+
+    if (sourceType === 'agency' && !rawTitle) {
+        const normalized = rawContent.replace(/^\s*\[中介所广告\]\s*/u, '').trim();
+        const splitIndex = normalized.indexOf('|');
+        if (splitIndex >= 0) {
+            title = normalized.slice(0, splitIndex).trim();
+            content = normalized.slice(splitIndex + 1).trim();
+        } else {
+            content = normalized;
+        }
+    }
+
+    return `${sourceType}|${title.replace(/\s+/g, ' ').trim()}|${content.replace(/\s+/g, ' ').trim()}`;
+}
+
 function splitHackerIntelContent(value) {
     const raw = String(value || '').trim();
     if (!raw) return { visible: '', hasIntel: false };
@@ -237,6 +258,7 @@ export default function CityLog({ apiUrl, userProfile }) {
     const [expandedBag, setExpandedBag] = useState(null);
     const [collapsedDates, setCollapsedDates] = useState({});
     const [expandedHiddenLogs, setExpandedHiddenLogs] = useState({});
+    const [retryingQuestReviewId, setRetryingQuestReviewId] = useState(null);
     const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
     const refreshTimerRef = React.useRef(null);
     const token = localStorage.getItem('token');
@@ -268,6 +290,31 @@ export default function CityLog({ apiUrl, userProfile }) {
             console.error('CityLog error:', e);
         } finally {
             setLoading(false);
+        }
+    };
+
+    const retryQuestReview = async (logId) => {
+        if (!logId || retryingQuestReviewId) return;
+        setRetryingQuestReviewId(logId);
+        try {
+            const headers = {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+            };
+            const response = await fetch(`${apiUrl}/city/logs/${logId}/retry-quest-score`, {
+                method: 'POST',
+                headers,
+            });
+            const data = await response.json();
+            if (!response.ok || !data.success) {
+                throw new Error(data.error || '市长评分重试失败');
+            }
+            await fetchData();
+            window.dispatchEvent(new Event('city_update'));
+        } catch (error) {
+            window.alert(error.message || '市长评分重试失败');
+        } finally {
+            setRetryingQuestReviewId(null);
         }
     };
 
@@ -318,8 +365,11 @@ export default function CityLog({ apiUrl, userProfile }) {
     const currentWeather = getCurrentWeather(events);
     const weatherVisual = currentWeather ? getWeatherVisual(currentWeather) : null;
     const visibleAnnouncements = announcements.filter((item, index) => {
-        if (!isWeatherAnnouncement(item)) return true;
-        return announcements.findIndex((candidate) => isWeatherAnnouncement(candidate)) === index;
+        if (isWeatherAnnouncement(item)) {
+            return announcements.findIndex((candidate) => isWeatherAnnouncement(candidate)) === index;
+        }
+        const identity = normalizeAnnouncementIdentity(item);
+        return announcements.findIndex((candidate) => normalizeAnnouncementIdentity(candidate) === identity) === index;
     });
 
     const isCollapsed = (tag) => {
@@ -695,6 +745,70 @@ export default function CityLog({ apiUrl, userProfile }) {
                                                                                         {log.delta_money > 0 ? '+' : ''}
                                                                                         {Number(log.delta_money).toFixed(0)} 金币
                                                                                     </span>
+                                                                                )}
+                                                                            </div>
+                                                                        )}
+                                                                        {log.quest_review && (
+                                                                            <div
+                                                                                style={{
+                                                                                    marginTop: '8px',
+                                                                                    padding: isMobile ? '8px' : '9px 10px',
+                                                                                    borderRadius: '8px',
+                                                                                    background: String(log.quest_review.status || '') === 'error' ? '#fff1f0' : '#fff7e8',
+                                                                                    border: `1px solid ${String(log.quest_review.status || '') === 'error' ? '#ffccc7' : '#ffd591'}`,
+                                                                                }}
+                                                                            >
+                                                                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
+                                                                                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                                                                        <span style={{ fontSize: '11px', fontWeight: 700, color: String(log.quest_review.status || '') === 'error' ? '#cf1322' : '#ad6800' }}>
+                                                                                            {String(log.quest_review.status || '') === 'error' ? '任务评分失败' : '任务推进评分'}
+                                                                                        </span>
+                                                                                        {String(log.quest_review.status || '') !== 'error' && (
+                                                                                            <span style={{ fontSize: '11px', color: '#d46b08', fontWeight: 700 }}>
+                                                                                                +{Number(log.quest_review.progress_delta || 0)} 分
+                                                                                            </span>
+                                                                                        )}
+                                                                                        {String(log.quest_review.short_label || '').trim() && String(log.quest_review.status || '') !== 'error' && (
+                                                                                            <span style={{ fontSize: '10px', color: '#ad6800', background: '#fff1b8', borderRadius: '999px', padding: '2px 6px' }}>
+                                                                                                {log.quest_review.short_label}
+                                                                                            </span>
+                                                                                        )}
+                                                                                    </div>
+                                                                                    {String(log.quest_review.status || '') !== 'error' && (
+                                                                                        <span style={{ fontSize: '11px', color: '#ad6800', fontWeight: 600 }}>
+                                                                                            {Number(log.quest_review.progress_after || 0)}/{Number(log.quest_review.target_score || 0)}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+                                                                                {String(log.quest_review.status || '') === 'error' ? (
+                                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                                                                        <div style={{ fontSize: isMobile ? '11px' : '12px', color: '#a8071a', lineHeight: 1.6 }}>
+                                                                                            {log.quest_review.error_message || '任务评分失败，请重试。'}
+                                                                                        </div>
+                                                                                        <div>
+                                                                                            <button
+                                                                                                type="button"
+                                                                                                onClick={() => retryQuestReview(log.id)}
+                                                                                                disabled={retryingQuestReviewId === log.id}
+                                                                                                style={{
+                                                                                                    border: 'none',
+                                                                                                    borderRadius: '999px',
+                                                                                                    padding: '5px 10px',
+                                                                                                    background: retryingQuestReviewId === log.id ? '#ffd8bf' : '#ff7a45',
+                                                                                                    color: '#fff',
+                                                                                                    cursor: retryingQuestReviewId === log.id ? 'not-allowed' : 'pointer',
+                                                                                                    fontSize: '11px',
+                                                                                                    fontWeight: 700,
+                                                                                                }}
+                                                                                            >
+                                                                                                {retryingQuestReviewId === log.id ? '重试中...' : '只重试评分'}
+                                                                                            </button>
+                                                                                        </div>
+                                                                                    </div>
+                                                                                ) : (
+                                                                                    <div style={{ fontSize: isMobile ? '11px' : '12px', color: '#8c5a12', lineHeight: 1.65 }}>
+                                                                                        {log.quest_review.comment || '这次行动已由市长裁判完成评分。'}
+                                                                                    </div>
                                                                                 )}
                                                                             </div>
                                                                         )}

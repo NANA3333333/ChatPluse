@@ -255,10 +255,110 @@ function parseRagTopics(text) {
 function parseRagDecision(text) {
     const raw = unwrapStructuredPlannerText(text);
     if (!raw) {
-        return { shouldSearch: false, stop: true, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true };
+        return { shouldSearch: false, stop: true, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true, decisionPlan: null };
+    }
+    if (/^\s*\{[\s\S]*\}\s*$/.test(raw)) {
+        try {
+            const parsed = JSON.parse(raw);
+            const allowedSlots = new Set(['profile', 'life_arc', 'preference', 'relationship', 'general']);
+            const allowedFocus = new Set(['user_profile', 'user_current_arc', 'relationship', 'general']);
+            const allowedTiers = new Set(['core', 'active', 'ambient']);
+            const route = String(parsed?.route || '').trim().toLowerCase();
+            const temporalHint = String(parsed?.temporal_hint || parsed?.temporalHint || '').trim();
+            const retrievalLabel = String(parsed?.retrieval_label || parsed?.retrievalLabel || '').trim();
+            const ragNeeded = parsed?.rag_needed === true || parsed?.should_search === true || parsed?.shouldSearch === true;
+            const plans = Array.isArray(parsed?.plans)
+                ? parsed.plans.map((plan, index) => {
+                    const slot = String(plan?.slot || plan?.name || `plan_${index + 1}`).trim().toLowerCase();
+                    const memoryFocus = Array.isArray(plan?.memory_focus)
+                        ? plan.memory_focus.map(v => String(v || '').trim()).filter(v => allowedFocus.has(v)).slice(0, 4)
+                        : [];
+                    const memoryTier = Array.isArray(plan?.memory_tier)
+                        ? plan.memory_tier.map(v => String(v || '').trim()).filter(v => allowedTiers.has(v)).slice(0, 3)
+                        : [];
+                    const queryHints = Array.isArray(plan?.query_hints)
+                        ? plan.query_hints.map(v => String(v || '').trim()).filter(Boolean).slice(0, 6)
+                        : [];
+                    const limit = Math.max(1, Math.min(12, Number(plan?.limit || 4) || 4));
+                    if (!allowedSlots.has(slot)) return null;
+                    if (memoryFocus.length === 0 && memoryTier.length === 0 && queryHints.length === 0) return null;
+                    return {
+                        slot,
+                        memory_focus: memoryFocus,
+                        memory_tier: memoryTier,
+                        query_hints: queryHints,
+                        reason: String(plan?.reason || '').trim(),
+                        limit
+                    };
+                }).filter(Boolean)
+                : [];
+            const normalizedRoute = route === 'temporal_browse'
+                ? 'temporal_browse'
+                : ((route === 'semantic_rag' || plans.length > 0 || ragNeeded) ? 'semantic_rag' : 'none');
+            if (normalizedRoute === 'temporal_browse') {
+                if (!temporalHint) {
+                    return { shouldSearch: false, stop: false, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true, decisionPlan: null };
+                }
+                return {
+                    shouldSearch: false,
+                    stop: false,
+                    retrievalLabel: '',
+                    route: 'temporal_browse',
+                    temporalHint,
+                    malformed: false,
+                    decisionPlan: {
+                        rag_needed: false,
+                        route: 'temporal_browse',
+                        temporal_hint: temporalHint,
+                        retrieval_label: '',
+                        plans: []
+                    }
+                };
+            }
+            if (normalizedRoute === 'semantic_rag') {
+                const fallbackLabel = retrievalLabel
+                    || plans.flatMap(plan => Array.isArray(plan.query_hints) ? plan.query_hints : []).find(Boolean)
+                    || '';
+                if (!fallbackLabel && plans.length === 0) {
+                    return { shouldSearch: false, stop: false, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true, decisionPlan: null };
+                }
+                return {
+                    shouldSearch: true,
+                    stop: false,
+                    retrievalLabel: fallbackLabel,
+                    route: 'semantic_rag',
+                    temporalHint: '',
+                    malformed: false,
+                    decisionPlan: {
+                        rag_needed: true,
+                        route: 'semantic_rag',
+                        temporal_hint: '',
+                        retrieval_label: fallbackLabel,
+                        plans
+                    }
+                };
+            }
+            return {
+                shouldSearch: false,
+                stop: true,
+                retrievalLabel: '',
+                route: 'none',
+                temporalHint: '',
+                malformed: false,
+                decisionPlan: {
+                    rag_needed: false,
+                    route: 'none',
+                    temporal_hint: '',
+                    retrieval_label: '',
+                    plans: []
+                }
+            };
+        } catch (_) {
+            return { shouldSearch: false, stop: false, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true, decisionPlan: null };
+        }
     }
     if (/^ENOUGH_CONTEXT$/i.test(raw)) {
-        return { shouldSearch: false, stop: true, retrievalLabel: '', route: 'none', temporalHint: '', malformed: false };
+        return { shouldSearch: false, stop: true, retrievalLabel: '', route: 'none', temporalHint: '', malformed: false, decisionPlan: null };
     }
     const browseMatch = raw.match(/BROWSE_DATE:\s*\[?([^\]]+)\]?/i);
     if (browseMatch && browseMatch[1] && !raw.toUpperCase().includes('ENOUGH_CONTEXT')) {
@@ -268,7 +368,8 @@ function parseRagDecision(text) {
             retrievalLabel: '',
             route: 'temporal_browse',
             temporalHint: browseMatch[1].trim(),
-            malformed: false
+            malformed: false,
+            decisionPlan: null
         };
     }
     const searchMatch = raw.match(/SEARCH_MEMORY:\s*\[?([^\]]+)\]?/i);
@@ -279,10 +380,11 @@ function parseRagDecision(text) {
             retrievalLabel: searchMatch[1].trim(),
             route: 'semantic_rag',
             temporalHint: '',
-            malformed: false
+            malformed: false,
+            decisionPlan: null
         };
     }
-    return { shouldSearch: false, stop: false, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true };
+    return { shouldSearch: false, stop: false, retrievalLabel: '', route: 'none', temporalHint: '', malformed: true, decisionPlan: null };
 }
 
 function getDefaultTopicSwitchState() {
@@ -581,7 +683,7 @@ function parseStructuredRagQuery(text, fallbackKeyword = '', fallbackTopics = []
     }
 }
 
-function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', latestUserMessage = '' } = {}) {
+function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', latestUserMessage = '', decisionPlan = null } = {}) {
     const topicList = Array.isArray(plannerTopics)
         ? plannerTopics.map(topic => String(topic || '').trim()).filter(Boolean)
         : [];
@@ -589,6 +691,26 @@ function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', 
     const requiredFocuses = new Set();
     const requiredQueries = new Set();
     const requiredTiers = new Set(['core', 'active']);
+    const preferredSlots = new Set();
+
+    if (decisionPlan && Array.isArray(decisionPlan.plans)) {
+        for (const plan of decisionPlan.plans) {
+            const slotName = String(plan?.slot || '').trim();
+            if (slotName) preferredSlots.add(slotName);
+            (Array.isArray(plan?.memory_focus) ? plan.memory_focus : []).forEach(focus => {
+                const normalized = String(focus || '').trim();
+                if (normalized) requiredFocuses.add(normalized);
+            });
+            (Array.isArray(plan?.memory_tier) ? plan.memory_tier : []).forEach(tier => {
+                const normalized = String(tier || '').trim();
+                if (normalized) requiredTiers.add(normalized);
+            });
+            (Array.isArray(plan?.query_hints) ? plan.query_hints : []).forEach(query => {
+                const normalized = String(query || '').trim();
+                if (normalized && requiredQueries.size < 8) requiredQueries.add(normalized);
+            });
+        }
+    }
 
     if (/(个人信息|用户信息|背景|学习|学历|学校|专业|年级|研究方向|本科|身份|偏好|习惯)/.test(combined)) {
         requiredFocuses.add('user_profile');
@@ -610,7 +732,8 @@ function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', 
     return {
         requiredFocuses: Array.from(requiredFocuses),
         requiredQueries: Array.from(requiredQueries).filter(Boolean).slice(0, 8),
-        requiredTiers: Array.from(requiredTiers)
+        requiredTiers: Array.from(requiredTiers),
+        preferredSlots: Array.from(preferredSlots)
     };
 }
 
@@ -651,7 +774,7 @@ function buildSlotQueries(seedQueries = [], fallbackQueries = []) {
     ])).slice(0, 4);
 }
 
-function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retrievalLabel = '', latestUserMessage = '' } = {}) {
+function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retrievalLabel = '', latestUserMessage = '', decisionPlan = null } = {}) {
     const topicList = Array.isArray(plannerTopics)
         ? plannerTopics.map(topic => String(topic || '').trim()).filter(Boolean)
         : [];
@@ -676,6 +799,28 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
             limit: Math.max(1, Math.min(12, Number(slot.limit || 4) || 4))
         });
     };
+
+    if (decisionPlan && Array.isArray(decisionPlan.plans) && decisionPlan.plans.length > 0) {
+        decisionPlan.plans.forEach((plan) => {
+            const planQueries = Array.isArray(plan?.query_hints)
+                ? plan.query_hints.map(query => String(query || '').trim()).filter(Boolean)
+                : [];
+            addSlot({
+                name: String(plan?.slot || 'general').trim().toLowerCase() || 'general',
+                queries: buildSlotQueries(planQueries, baseQueries.length > 0 ? baseQueries : [retrievalLabel || latestUserMessage || '用户近况']),
+                filters: {
+                    ...(Array.isArray(plan?.memory_focus) && plan.memory_focus.length > 0 ? { memory_focus: plan.memory_focus } : {}),
+                    ...(Array.isArray(plan?.memory_tier) && plan.memory_tier.length > 0 ? { memory_tier: plan.memory_tier } : {}),
+                    ...(retrievalRequest?.filters || {})
+                },
+                temporal_hint: retrievalRequest?.temporal_hint || {},
+                limit: Math.max(1, Math.min(12, Number(plan?.limit || retrievalRequest?.limit || 4) || 4))
+            });
+        });
+        if (slots.length > 0) {
+            return slots;
+        }
+    }
 
     const profileSignals = /(用户信息|个人信息|背景|姓名|年龄|身份|学校|学历|专业|年级|称呼|城市|家庭|经历|性格|基本情况)/;
     const lifeArcSignals = /(工作|职业|实习|公司|项目|求职|offer|入职|工作内容|方向|学习|学业|课程|创业|近况|最近|现状|进展|计划|目标|健康|状态|困扰|压力)/;
@@ -1775,37 +1920,50 @@ ${dynamicPromptBase}`;
             'You already inferred these likely long-term topics from the user message:',
             plannerTopics.length > 0 ? `- ${plannerTopics.join('\n- ')}` : '- (none)',
             '',
-            'Now decide whether retrieval is needed before replying.',
+            'Now decide which memory retrieval plans would materially improve the reply quality before answering.',
             '',
             '[Core Principle]',
-            '- Judge retrieval by whether it would materially improve this reply\'s quality: factual accuracy, continuity, personalization, emotional coherence, specificity, or confidence.',
+            '- Treat this as a planning task for retrieval quality, not a binary yes/no shortcut.',
+            '- Decide which RAG dimensions would materially improve the reply: factual accuracy, continuity, personalization, emotional coherence, specificity, or confidence.',
             '- Do NOT use the weak standard "I can answer something from recent chat, so skip retrieval".',
-            '- If retrieval would make the answer noticeably better, richer, safer, or less forgetful, prefer retrieval.',
+            '- If any memory lookup would make the answer noticeably better, return one or more retrieval plans.',
             '- If the user is clearly asking what happened on a specific day or time window, prefer routing to direct date browse instead of semantic vector search.',
             '',
-            '[Retrieval Is Extra Important]',
-            '- If the topics point to user_profile, user_current_arc, or relationship, strongly prefer retrieval.',
-            '- If the user is asking what you know about them, how you see them, whether you remember them, or asking for a summary of them, strongly prefer retrieval.',
-            '- If the user is touching earlier relationship nodes, repeated affection, or long-running life threads, strongly prefer retrieval.',
-            '- If retrieval would help recover older facts, prior decisions, older wording, earlier promises, interview/job history, or stable user background, strongly prefer retrieval.',
-            '- If the user includes a clear time anchor, date, duration, amount, count, ranking, or sequence constraint, strongly prefer retrieval because recent chat alone often loses those details.',
-            '- Questions like "昨天发生了什么", "三天前发生了什么", "上周那天怎么了" should usually trigger direct date browse, not vector rewrite.',
-            '- Questions like "三天前你说了什么", "上周", "第2次", "50块", "几点", "多久" should usually trigger memory retrieval or date browse unless the answer is plainly present in the latest visible turns.',
+            '[Available Memory Schema]',
+            '- memory_focus values: user_profile, user_current_arc, relationship, general.',
+            '- memory_tier values: core, active, ambient.',
+            '- retrieval slots: profile, life_arc, preference, relationship, general.',
             '',
-            '[When ENOUGH_CONTEXT Is Allowed]',
-            '- Only output ENOUGH_CONTEXT when retrieval would add almost no meaningful quality gain.',
-            '- Recent chat alone must already be enough for a high-quality answer, not just a minimally acceptable answer.',
-            '- If answering correctly depends on remembering an exact time, number, amount, count, or ordering detail, ENOUGH_CONTEXT is usually NOT allowed.',
-            '- If you are on the fence, prefer SEARCH_MEMORY.',
+            '[Planning Guidance]',
+            '- If topics point to user_profile, user_current_arc, or relationship, usually return at least one retrieval plan.',
+            '- If the user is asking what you know about them, how you see them, whether you remember them, or asking for a summary of them, return retrieval plans.',
+            '- If the user is touching earlier relationship nodes, repeated affection, long-running life threads, work/study history, or stable background, return retrieval plans.',
+            '- If the user includes a clear time anchor, date, duration, amount, count, ranking, or sequence constraint, prefer date browse or time-aware retrieval.',
+            '- Only set rag_needed=false when retrieval would add almost no meaningful quality gain.',
             '',
             '[Output Format]',
-            '- If the user is asking what happened during a specific day or time window and direct date browse is the best route, output ONLY: BROWSE_DATE: [time phrase]',
-            '- For BROWSE_DATE, the bracket content must be ONLY the pure temporal phrase itself, such as "昨天", "前天", "三天前", "上周", "上周三", "2026-04-08".',
-            '- Do NOT include verbs, events, or question text inside BROWSE_DATE. Correct: "BROWSE_DATE: 三天前". Wrong: "BROWSE_DATE: 三天前发生了什么", "BROWSE_DATE: 昨天你说的话".',
-            '- If retrieval is needed, output ONLY: SEARCH_MEMORY: [keyword]',
-            '- The keyword should usually be one of the inferred topics above, or a short merge of the most important one.',
-            '- When time or numbers matter, preserve them in the keyword instead of weakening them. Prefer "三天前的事" over "最近的事", and "50元转账" over "转账".',
-            '- If retrieval is not needed, output ONLY: ENOUGH_CONTEXT'
+            '- Output ONLY valid JSON.',
+            '- Use this schema:',
+            '{',
+            '  "rag_needed": true,',
+            '  "route": "semantic_rag" | "temporal_browse" | "none",',
+            '  "retrieval_label": "short Chinese label",',
+            '  "temporal_hint": "三天前",',
+            '  "plans": [',
+            '    {',
+            '      "slot": "profile | life_arc | preference | relationship | general",',
+            '      "memory_focus": ["user_profile"],',
+            '      "memory_tier": ["core", "active"],',
+            '      "query_hints": ["用户背景", "稳定偏好"],',
+            '      "reason": "why this plan helps output quality",',
+            '      "limit": 4',
+            '    }',
+            '  ]',
+            '}',
+            '- For temporal browse, set route="temporal_browse", rag_needed=false, temporal_hint to only the pure time phrase, and plans=[].',
+            '- For no retrieval, set route="none", rag_needed=false, plans=[].',
+            '- For semantic retrieval, prefer 1 to 3 plans, with plans aligned to the database schema above.',
+            '- Keep retrieval_label and query_hints specific. Preserve time or number constraints when they matter.'
         ].join('\n');
         let parsedDecision = normalizedResumeState?.parsedDecision || null;
         if (!parsedDecision || !['rewrite', 'retrieve', 'browse_summary'].includes(resumeFrom)) {
@@ -2127,7 +2285,8 @@ ${dynamicPromptBase}`;
         const rewriteConstraints = normalizedResumeState?.rewriteConstraints || deriveRagRewriteConstraints({
             plannerTopics,
             retrievalLabel,
-            latestUserMessage: recentInputString
+            latestUserMessage: recentInputString,
+            decisionPlan: parsedDecision?.decisionPlan || null
         });
 
         const rewritePrompt = [
@@ -2278,7 +2437,8 @@ ${dynamicPromptBase}`;
             retrievalRequest,
             plannerTopics,
             retrievalLabel,
-            latestUserMessage: recentInputString
+            latestUserMessage: recentInputString,
+            decisionPlan: parsedDecision?.decisionPlan || null
         });
         recordLlmDebug(character, 'event', 'Starting structured memory retrieval.', {
             context_type: 'chat_intent_retrieve',

@@ -112,13 +112,16 @@ function getPublicAgencyAnnouncements(cityDb, limit = 50) {
     return (cityDb.getCityAnnouncements(limit) || []).filter((item) => String(item.source_type || '') === 'agency');
 }
 
-function getVisibleAgencyAds(socialHousingDb, cityDb, limit = 12) {
+function getAgencyAdsWithPublishState(socialHousingDb, cityDb, limit = 12) {
     const publicKeys = new Set(
         getPublicAgencyAnnouncements(cityDb, 50)
             .map((item) => buildAgencyAdKey(item.title, item.content))
             .filter(Boolean)
     );
-    return (socialHousingDb.getAgencyAds(limit) || []).filter((ad) => !publicKeys.has(buildAgencyAdKey(ad.title, ad.content)));
+    return (socialHousingDb.getAgencyAds(limit) || []).map((ad) => ({
+        ...ad,
+        is_published: publicKeys.has(buildAgencyAdKey(ad.title, ad.content))
+    }));
 }
 
 function doesAgencyAdReferenceHome(ad, home) {
@@ -400,7 +403,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 districts: cityDb.getDistricts ? cityDb.getDistricts() : [],
                 agency_model_options: getAgencyModelOptions(req.db),
                 agency: socialHousingDb.getAgencyConfig(),
-                agency_ads: getVisibleAgencyAds(socialHousingDb, cityDb, 12),
+                agency_ads: getAgencyAdsWithPublishState(socialHousingDb, cityDb, 12),
                 public_agency_announcements: publicAgencyAnnouncements
             });
         } catch (e) {
@@ -467,7 +470,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 success: true,
                 removed_agency_ads: removedAgencyAds,
                 housing_tiers: socialHousingDb.getHousingTiers(),
-                agency_ads: getVisibleAgencyAds(socialHousingDb, cityDb, 12)
+                agency_ads: getAgencyAdsWithPublishState(socialHousingDb, cityDb, 12)
             });
         } catch (e) {
             res.status(500).json({ success: false, error: e.message });
@@ -525,7 +528,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 success: true,
                 ad,
                 agency: socialHousingDb.getAgencyConfig(),
-                agency_ads: getVisibleAgencyAds(socialHousingDb, ensureCityDb(req.db), 12)
+                agency_ads: getAgencyAdsWithPublishState(socialHousingDb, ensureCityDb(req.db), 12)
             });
         } catch (e) {
             try {
@@ -554,7 +557,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
             socialHousingDb.deleteAgencyAd(req.params.id);
             res.json({
                 success: true,
-                agency_ads: getVisibleAgencyAds(socialHousingDb, cityDb, 12)
+                agency_ads: getAgencyAdsWithPublishState(socialHousingDb, cityDb, 12)
             });
         } catch (e) {
             res.status(500).json({ success: false, error: e.message });

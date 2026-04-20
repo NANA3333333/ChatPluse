@@ -612,18 +612,6 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                             决定角色在私聊或商业街行动时，最多能读到公告区多少条广播、广告和街头公告。
                         </div>
                     </div>
-                    <div>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', marginBottom: '6px' }}>
-                            <span>陌生人相遇概率</span>
-                            <span style={{ fontWeight: '600', color: '#ff9800' }}>{config.city_stranger_meet_prob || '20'}%</span>
-                        </div>
-                        <input type="range" min="0" max="100" step="5" value={parseInt(config.city_stranger_meet_prob) || 20}
-                            onChange={e => updateConfig('city_stranger_meet_prob', e.target.value)}
-                            style={{ width: '100%' }} />
-                        <div style={{ fontSize: '10px', color: '#999', marginTop: '4px' }}>
-                            两个互不相识、也没有共同群聊的角色在同地点相遇时，触发攀谈认识的概率。
-                        </div>
-                    </div>
                 </div>
             </div>
 
