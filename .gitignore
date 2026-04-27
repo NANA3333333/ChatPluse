@@ -3,12 +3,15 @@ node_modules/
 dist/
 build/
 .DS_Store
+.qdrant-initialized
 
 # Server specific
 server/.env
 data/
 server/data/
 server/uploads/
+server/data.sqlite
+server/out.txt
 *.db
 *.db-wal
 *.db-shm
@@ -17,6 +20,7 @@ server/uploads/
 # Client specific
 client/dist/
 client/node_modules/
+client/login-page.png
 
 # Local runtime / logs
 .runtime/
@@ -30,7 +34,14 @@ git_history.txt
 nul.css
 client/nul.css
 server/public/uploads/
+server/public/assets/
+server/public/index.html
+server/public/pop.wav
+server/public/vite.svg
 chatpulse_logo.png
+
+# Bundled/local service binaries
+tools/qdrant/
 
 # Debug exports / local reports / local screenshots
 debug_exports/

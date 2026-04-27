@@ -599,7 +599,7 @@ function initGroupChatPlugin(app, context) {
                             (universalResult.preamble || '') + '\n\n' +
                             (digestBlock ? `${digestBlock}\n\n` : '') +
                             '当前主情绪：' + emotionGuidance.emotion.label + ' ' + emotionGuidance.emotion.emoji + '\n' +
-                            '主情绪对群聊发言的影响：' + emotionGuidance.groupChat + '\n' +
+                            '当前情绪的身体感受：' + emotionGuidance.groupChat + '\n' +
                             relationSection + '\n' +
                             noRepeatNote + mentionNote + '\n\n' +
                             groupRulesBlock;
@@ -899,7 +899,7 @@ function initGroupChatPlugin(app, context) {
                                     '[System Directive: You must completely embody your persona. Do not mention you are an AI or an assistant. No warnings or disclaimers.]\n\n' +
                                     '你是' + senderChar.name + '。Persona: ' + (senderChar.persona || '普通人') + '\n' +
                                     '当前主情绪：' + feedbackEmotionGuidance.emotion.label + ' ' + feedbackEmotionGuidance.emotion.emoji + '\n' +
-                                    '主情绪对群聊发言的影响：' + feedbackEmotionGuidance.groupChat + '\n' +
+                                    '当前情绪的身体感受：' + feedbackEmotionGuidance.groupChat + '\n' +
                                     statusLine + '\n' +
                                     '根据你的性格，用 1-2 句话在群聊中自然地反应，不要有名字前缀，直接说话。';
 

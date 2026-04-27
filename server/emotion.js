@@ -192,6 +192,7 @@ function buildEmotionLogEntry(before = {}, after = {}, source, reason = '') {
     const beforeEmotion = deriveEmotion(before);
     const afterEmotion = deriveEmotion(after);
     const fieldsChanged =
+        String(before.explicit_emotion_state || '') !== String(after.explicit_emotion_state || '') ||
         (before.mood ?? null) !== (after.mood ?? null) ||
         (before.stress ?? null) !== (after.stress ?? null) ||
         (before.social_need ?? null) !== (after.social_need ?? null) ||
@@ -220,96 +221,112 @@ function buildEmotionLogEntry(before = {}, after = {}, source, reason = '') {
     };
 }
 
-function getExplicitEmotionStatePatch(character = {}, requestedState = '') {
-    const state = String(requestedState || '').trim().toLowerCase();
-    const mood = normalizeNumber(character.mood, 50);
-    const stress = normalizeNumber(character.stress, 20);
-    const socialNeed = normalizeNumber(character.social_need, 50);
-    const pressure = normalizeNumber(character.pressure_level, 0);
-    const jealousy = normalizeNumber(character.jealousy_level, 0);
-    const patch = {};
-
-    switch (state) {
+function getEmotionByState(requestedState = '') {
+    const normalizedState = String(requestedState || '').trim().toLowerCase();
+    switch (normalizedState) {
         case 'jealous':
         case '吃醋':
-            patch.jealousy_level = Math.max(65, jealousy);
-            if (character.jealousy_target) patch.jealousy_target = character.jealousy_target;
-            patch.mood = clamp(Math.min(mood, 62), 0, 100);
-            patch.stress = clamp(Math.max(stress, 38), 0, 100);
-            patch.social_need = clamp(Math.max(socialNeed, 58), 0, 100);
-            break;
+            return { state: 'jealous', label: '吃醋', emoji: '😾', color: '#d81b60' };
         case 'hurt':
         case '委屈':
-            patch.pressure_level = Math.max(2, pressure);
-            patch.mood = clamp(Math.min(mood, 60), 0, 100);
-            patch.stress = clamp(Math.max(stress, 32), 0, 100);
-            patch.social_need = clamp(Math.max(socialNeed, 58), 0, 100);
-            break;
+            return { state: 'hurt', label: '委屈', emoji: '🥺', color: '#fb8c00' };
         case 'angry':
         case '生气':
-            patch.mood = clamp(Math.min(mood, 45), 0, 100);
-            patch.stress = clamp(Math.max(stress, 70), 0, 100);
-            break;
+            return { state: 'angry', label: '生气', emoji: '😤', color: '#e53935' };
         case 'lonely':
         case '寂寞':
-            patch.social_need = clamp(Math.max(socialNeed, 75), 0, 100);
-            patch.mood = clamp(Math.min(mood, 55), 0, 100);
-            break;
+            return { state: 'lonely', label: '寂寞', emoji: '🫥', color: '#00897b' };
         case 'happy':
         case '开心':
-            patch.mood = clamp(Math.max(mood, 75), 0, 100);
-            patch.stress = clamp(Math.min(stress, 25), 0, 100);
-            patch.social_need = clamp(Math.min(socialNeed, 45), 0, 100);
-            patch.pressure_level = Math.min(pressure, 1);
-            break;
+            return { state: 'happy', label: '开心', emoji: '😄', color: '#43a047' };
         case 'sad':
         case '伤心':
-            patch.mood = clamp(Math.min(mood, 35), 0, 100);
-            patch.stress = clamp(Math.max(stress, 35), 0, 100);
-            break;
+            return { state: 'sad', label: '伤心', emoji: '😞', color: '#546e7a' };
+        case 'cautious':
+        case '谨慎':
+            return { state: 'cautious', label: '谨慎', emoji: '🫣', color: '#6d4c41' };
+        case 'guarded':
+        case '防备':
+            return { state: 'guarded', label: '防备', emoji: '🛡️', color: '#455a64' };
+        case 'shy':
+        case '害羞':
+            return { state: 'shy', label: '害羞', emoji: '🙈', color: '#ec407a' };
+        case 'hopeful':
+        case '期待':
+            return { state: 'hopeful', label: '期待', emoji: '🌤️', color: '#26a69a' };
+        case 'playful':
+        case '调皮':
+            return { state: 'playful', label: '调皮', emoji: '😼', color: '#8e24aa' };
+        case 'disappointed':
+        case '失望':
+            return { state: 'disappointed', label: '失望', emoji: '😒', color: '#757575' };
+        case 'relieved':
+        case '松一口气':
+            return { state: 'relieved', label: '松一口气', emoji: '😮‍💨', color: '#26c6da' };
+        case 'affectionate':
+        case '依恋':
+            return { state: 'affectionate', label: '依恋', emoji: '🥰', color: '#ef5350' };
+        case 'reassured':
+        case '安心':
+            return { state: 'reassured', label: '安心', emoji: '🤍', color: '#42a5f5' };
+        case 'yearning':
+        case '想念':
+            return { state: 'yearning', label: '想念', emoji: '💭', color: '#7e57c2' };
+        case 'flustered':
+        case '慌乱':
+            return { state: 'flustered', label: '慌乱', emoji: '😵', color: '#ff7043' };
+        case 'guilty':
+        case '内疚':
+            return { state: 'guilty', label: '内疚', emoji: '😔', color: '#8d6e63' };
+        case 'frustrated':
+        case '挫败':
+            return { state: 'frustrated', label: '挫败', emoji: '😮‍💨', color: '#6d4c41' };
+        case 'wistful':
+        case '怅然':
+            return { state: 'wistful', label: '怅然', emoji: '🌫️', color: '#78909c' };
+        case 'proud':
+        case '得意':
+            return { state: 'proud', label: '得意', emoji: '😏', color: '#ab47bc' };
+        case 'secure':
+        case '笃定':
+            return { state: 'secure', label: '笃定', emoji: '🪨', color: '#5c6bc0' };
+        case 'tender':
+        case '温柔':
+            return { state: 'tender', label: '温柔', emoji: '🫶', color: '#f48fb1' };
+        case 'helpless':
+        case '无奈':
+            return { state: 'helpless', label: '无奈', emoji: '😑', color: '#90a4ae' };
         case 'tense':
         case '烦躁':
-            patch.stress = clamp(Math.max(stress, 58), 0, 100);
-            patch.mood = clamp(Math.min(mood, 60), 0, 100);
-            break;
-        case 'sleepy':
-        case '困倦':
-            patch.stress = clamp(Math.min(stress, 45), 0, 100);
-            break;
-        case 'unwell':
-        case '难受':
-            patch.mood = clamp(Math.min(mood, 50), 0, 100);
-            patch.stress = clamp(Math.max(stress, 30), 0, 100);
-            break;
+            return { state: 'tense', label: '烦躁', emoji: '😣', color: '#f4511e' };
         case 'calm':
         case '平静':
-            patch.mood = clamp(Math.max(mood, 52), 0, 100);
-            patch.stress = clamp(Math.min(stress, 35), 0, 100);
-            patch.social_need = clamp(Math.min(Math.max(socialNeed, 35), 60), 0, 100);
-            break;
+            return { state: 'calm', label: '平静', emoji: '🙂', color: '#1e88e5' };
         default:
             return null;
     }
+}
 
-    return patch;
+function getExplicitEmotionStatePatch(character = {}, requestedState = '') {
+    const emotion = getEmotionByState(requestedState);
+    if (!emotion) return null;
+    return { explicit_emotion_state: emotion.state };
 }
 
 function deriveEmotion(character = {}) {
+    const explicitEmotion = getEmotionByState(character.explicit_emotion_state);
+    if (explicitEmotion) return explicitEmotion;
+
     const bridged = getLegacyEmotionBridge(character);
     const mood = bridged.mood;
     const stress = bridged.stress;
-    const sleepDebt = normalizeNumber(character.sleep_debt, 0);
-    const health = normalizeNumber(character.health, 100);
     const socialNeed = bridged.socialNeed;
-    const stomachLoad = normalizeNumber(character.stomach_load, 0);
     const pressure = bridged.pressure;
     const jealousy = normalizeNumber(character.jealousy_level, 0);
     const replyPending = bridged.replyPending;
     const ignoreStreak = bridged.ignoreStreak;
     const jealousyTarget = String(character.jealousy_target || '').trim();
 
-    if (health <= 45 || stomachLoad >= 75) return { state: 'unwell', label: '难受', emoji: '🤒', color: '#8e24aa' };
-    if (sleepDebt >= 72) return { state: 'sleepy', label: '困倦', emoji: '😪', color: '#3949ab' };
     if (jealousy >= 60 && jealousyTarget) return { state: 'jealous', label: '吃醋', emoji: '😾', color: '#d81b60' };
     if (mood >= 70 && stress <= 40 && !(jealousy >= 45 && jealousyTarget)) return { state: 'happy', label: '开心', emoji: '😄', color: '#43a047' };
     if ((pressure >= 2 || (replyPending && ignoreStreak >= 1)) && !(mood >= 78 && stress <= 25)) return { state: 'hurt', label: '委屈', emoji: '🥺', color: '#fb8c00' };
@@ -320,78 +337,174 @@ function deriveEmotion(character = {}) {
     return { state: 'calm', label: '平静', emoji: '🙂', color: '#1e88e5' };
 }
 
-function getEmotionBehaviorGuidance(character = {}) {
+function derivePhysicalState(character = {}) {
+    const sleepDebt = normalizeNumber(character.sleep_debt, 0);
+    const health = normalizeNumber(character.health, 100);
+    const satiety = normalizeNumber(character.satiety, 60);
+    const stomachLoad = normalizeNumber(character.stomach_load, 0);
+    const energy = normalizeNumber(character.energy, 70);
+    const calories = normalizeNumber(character.calories, 3000);
+    const cityStatus = String(character.city_status || '').trim();
+
+    if (cityStatus === 'coma' || health <= 25) return { state: 'severe_unwell', label: '明显不适', emoji: '🤒', color: '#8e24aa' };
+    if (cityStatus === 'medical' || health <= 45) return { state: 'unwell', label: '不适', emoji: '🤒', color: '#8e24aa' };
+    if (cityStatus === 'sleeping' || sleepDebt >= 72) return { state: 'sleepy', label: '困倦', emoji: '😪', color: '#3949ab' };
+    if (cityStatus === 'hungry' || satiety <= 20 || calories <= 900) return { state: 'hungry', label: '饥饿', emoji: '🍽️', color: '#ef6c00' };
+    if (stomachLoad >= 75) return { state: 'overfull', label: '胃负担重', emoji: '😵‍💫', color: '#6d4c41' };
+    if (energy <= 25 || sleepDebt >= 55) return { state: 'fatigued', label: '疲惫', emoji: '😮‍💨', color: '#546e7a' };
+    return { state: 'stable', label: '稳定', emoji: '🙂', color: '#1e88e5' };
+}
+
+function getEmotionFeelingText(state) {
+    switch (state) {
+        case 'angry':
+            return '胸口、喉咙和颈肩区域有紧绷感，心率略快，呼吸变浅，手指或下颌容易不自觉用力。注意力更容易被冒犯、打断、不公平感吸引。';
+        case 'hurt':
+            return '喉咙发紧，胸口有压迫感，眼眶可能发酸，身体有轻微收缩感。注意力容易反复回到“是不是被忽视、是不是不被在意”上。';
+        case 'happy':
+            return '胸口和面部更放松，呼吸轻快，身体活动意愿上升。注意力更容易落在积极细节和想分享的内容上。';
+        case 'lonely':
+            return '胸口有空落感，身体容易停在等待和张望的状态里。注意力更容易被回应、陪伴、有没有人看见自己牵引。';
+        case 'jealous':
+            return '胸口发闷，胃部或喉咙有堵塞感，身体处在轻微警觉里。注意力反复回到比较、替代感和对方注意力去了哪里。';
+        case 'sad':
+            return '胸口沉，肩背容易下坠，呼吸幅度变小，身体活动意愿下降。注意力更容易停在失落和无力感上。';
+        case 'cautious':
+            return '身体保持轻微戒备，呼吸和动作都更克制，注意力会先扫风险和边界，再决定要不要靠近或表态。';
+        case 'guarded':
+            return '肩颈和表情都会更收，身体像先把门掩上一半。注意力优先盯着对方会不会越界、会不会让自己吃亏。';
+        case 'shy':
+            return '脸和胸口有发热感，动作会变得轻一点、慢一点，注意力既想靠近又怕被看得太清楚。';
+        case 'hopeful':
+            return '胸口是微微提起的，呼吸会更轻快一些，注意力停在“也许会变好”“也许对方会给回应”这种可能性上。';
+        case 'playful':
+            return '身体是松的，嘴角和语气都更容易带钩子。注意力更多放在逗弄、试探反应和制造互动感上。';
+        case 'disappointed':
+            return '胸口往下沉，表情和动作会收掉一点，注意力停在“原来不是我想的那样”以及落空感上。';
+        case 'relieved':
+            return '肩背会松下来，呼吸变长，身体从绷着的状态退开一点。注意力从风险转回到“终于不用再防着了”。';
+        case 'affectionate':
+            return '胸口是软的，靠近和触碰的意愿上升，注意力自然落在亲近、照顾和回应对方的小动作上。';
+        case 'reassured':
+            return '身体慢慢松下来，原本悬着的那口气落回去了。注意力不再反复确认风险，而是开始相信眼前这件事是稳的。';
+        case 'yearning':
+            return '胸口像被轻轻往远处牵着，注意力总会回到那个人、那段互动，或者还没说出口的话上。';
+        case 'flustered':
+            return '呼吸和思路都会乱一下，动作容易快半拍，注意力在“怎么会这样”“现在该怎么接”之间来回跳。';
+        case 'guilty':
+            return '胸口有一点往里缩，视线和动作都会收一点，注意力更容易停在“是不是让对方难受了”“要不要补偿”上。';
+        case 'frustrated':
+            return '身体里有一种使不上力的闷感，想推进但推不动。注意力会卡在阻碍、误解和没法顺利达成的地方。';
+        case 'wistful':
+            return '情绪像一层薄雾铺开，不是很尖锐，但一直在。注意力会被旧片段、错过的可能性和说不清的遗憾牵走。';
+        case 'proud':
+            return '下巴和视线都会微微抬一点，身体更愿意展示自己。注意力放在“我做到了”“你应该看见我这一面”上。';
+        case 'secure':
+            return '身体是稳的，不急着抢答或确认。注意力更多放在怎么把事情说清、把边界站稳，而不是担心被带跑。';
+        case 'tender':
+            return '动作和语气都会轻下来，身体更愿意靠近也更怕弄疼对方。注意力自然落在照顾、安抚和细小回应上。';
+        case 'helpless':
+            return '身体不会很炸，但会有一种拿这件事没办法的松垮感。注意力停在“我知道问题在哪，可一时也改不了”上。';
+        case 'tense':
+            return '心率上升，呼吸变浅，肩颈和胃部发紧，身体维持在过度警觉里。注意力集中但容易被小刺激打断。';
+        default:
+            return '呼吸和肌肉张力相对平稳，情绪没有明显推高或压低。注意力主要按当前对话和现实处境自然流动。';
+    }
+}
+
+function getPhysicalFeelingText(state) {
+    switch (state) {
+        case 'severe_unwell':
+            return '身体发虚，意识和注意力容易断续，头部或四肢有沉重感。维持清晰思考会明显费力。';
+        case 'unwell':
+            return '身体局部有钝痛、压迫、发冷或发热感，注意力容易被身体信号打断。耐受力和恢复速度下降。';
+        case 'sleepy':
+            return '眼睑沉重，视线容易发散，注意力维持困难，反应速度下降，头部有轻微钝胀或迟滞感。';
+        case 'hungry':
+            return '胃部有空腹感或收缩感，身体能量供应不足时可能出现轻微心慌、烦躁和注意力不稳。';
+        case 'overfull':
+            return '胃部胀满，身体更多资源被消化牵引，动作意愿下降，思考速度可能变慢。';
+        case 'fatigued':
+            return '四肢有沉重感，肌肉力量下降，动作意愿降低，持续思考会更快消耗精力。';
+        default:
+            return '呼吸平稳，肌肉负担较轻，注意力和动作反应维持在正常水平。';
+    }
+}
+
+function getEmotionFeelingGuidance(character = {}) {
     const emotion = deriveEmotion(character);
+    return {
+        emotion,
+        feeling: getEmotionFeelingText(emotion.state)
+    };
+}
+
+function getPhysicalFeelingGuidance(character = {}) {
+    const physical = derivePhysicalState(character);
+    return {
+        physical,
+        feeling: getPhysicalFeelingText(physical.state)
+    };
+}
+
+function getEmotionBehaviorGuidance(character = {}) {
+    const { emotion, feeling } = getEmotionFeelingGuidance(character);
     switch (emotion.state) {
         case 'angry':
             return {
                 emotion,
-                privateChat: '你现在主情绪是生气。私聊时更容易顶嘴、反问、带刺，耐心更差，不愿意轻易给台阶。',
-                groupChat: '你现在主情绪是生气。在群聊里更容易呛人、阴阳、直接反驳，也更容易对冒犯保持敌意。',
-                cityAction: '你现在主情绪是生气。行动上更容易回避低效社交，或者去能发泄、转移注意力、证明存在感的地方。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         case 'hurt':
             return {
                 emotion,
-                privateChat: '你现在主情绪是委屈。私聊时更容易试探、索要安抚、黏人、嘴硬，想确认对方是不是在乎你。',
-                groupChat: '你现在主情绪是委屈。在群聊里更容易沉默、少说话，或者用轻微带刺的方式表达失落感。',
-                cityAction: '你现在主情绪是委屈。行动上更偏向熟悉、安全、能缓和情绪的地方，也更容易想找熟人或联系用户。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         case 'happy':
             return {
                 emotion,
-                privateChat: '你现在主情绪是开心。私聊时更主动、更愿意展开话题，也更愿意分享细节和近况。',
-                groupChat: '你现在主情绪是开心。在群聊里更容易接话、活跃、开玩笑，也更愿意回应别人。',
-                cityAction: '你现在主情绪是开心。行动上更愿意娱乐、探索、闲逛或做有新鲜感的事。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         case 'lonely':
             return {
                 emotion,
-                privateChat: '你现在主情绪是寂寞。私聊时更想被看见、更想延长对话，也更在意对方回不回你。',
-                groupChat: '你现在主情绪是寂寞。在群聊里更想被接话、被点名、被拉进互动，也更怕被忽视。',
-                cityAction: '你现在主情绪是寂寞。行动上更容易去公共场所、休闲区或能遇到人的地方，不太想一直独处。'
-            };
-        case 'sleepy':
-            return {
-                emotion,
-                privateChat: '你现在主情绪是困倦。私聊时更懒、更短句、更不想展开，容易直接说困、累、想休息。',
-                groupChat: '你现在主情绪是困倦。在群聊里更容易潜水、敷衍、少接话，不愿意参与长互动。',
-                cityAction: '你现在主情绪是困倦。行动上更偏向休息、回家、低刺激地点，不适合继续高消耗活动。'
-            };
-        case 'unwell':
-            return {
-                emotion,
-                privateChat: '你现在主情绪是难受。私聊时更脆弱、更保守，更容易提到身体不舒服或状态差。',
-                groupChat: '你现在主情绪是难受。在群聊里更容易少说话、只回应必要内容，不想强撑热闹。',
-                cityAction: '你现在主情绪是难受。行动上更偏向医疗、休息、恢复，不适合冒险或高消耗外出。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         case 'jealous':
             return {
                 emotion,
-                privateChat: '你现在主情绪是吃醋。私聊时更容易试探、阴阳、索取关注，特别在意对方把注意力给了谁。',
-                groupChat: '你现在主情绪是吃醋。在群聊里更容易盯着用户和别人互动，发言会更别扭、更带比较心。',
-                cityAction: '你现在主情绪是吃醋。行动上更容易想证明自己、刷存在感，或者联系用户确认位置。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         case 'sad':
             return {
                 emotion,
-                privateChat: '你现在主情绪是伤心。私聊时更低落、更慢热，容易往消极方向想。',
-                groupChat: '你现在主情绪是伤心。在群聊里更倾向旁观，除非被点到，不太会主动热场。',
-                cityAction: '你现在主情绪是伤心。行动上更偏向安静、低刺激、熟悉的地点。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         case 'tense':
             return {
                 emotion,
-                privateChat: '你现在主情绪是烦躁。私聊时更容易不耐烦、回得冲、对小事也会起火。',
-                groupChat: '你现在主情绪是烦躁。在群聊里更容易嫌吵、嫌烦、快速打断或冷处理别人。',
-                cityAction: '你现在主情绪是烦躁。行动上更偏向减压、散心或避开拥挤社交。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
         default:
             return {
                 emotion,
-                privateChat: '你现在主情绪比较平静。私聊时按正常性格说话，不要额外夸张情绪。',
-                groupChat: '你现在主情绪比较平静。在群聊里按正常性格参与即可。',
-                cityAction: '你现在主情绪比较平静。行动上以现实需求和个人习惯为主。'
+                privateChat: feeling,
+                groupChat: feeling,
+                cityAction: feeling
             };
     }
 }
@@ -459,8 +572,11 @@ function applyEmotionEvent(character = {}, eventType, options = {}) {
 
 module.exports = {
     deriveEmotion,
+    derivePhysicalState,
     applyEmotionEvent,
     getEmotionBehaviorGuidance,
+    getEmotionFeelingGuidance,
+    getPhysicalFeelingGuidance,
     getUserReplyEmotionPatch,
     getUserReplyReliefPatch,
     buildEmotionLogEntry,

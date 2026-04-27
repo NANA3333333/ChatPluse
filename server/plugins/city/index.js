@@ -6,11 +6,13 @@ const { createMayorService } = require('./services/mayorService');
 const { createMayorRuntimeService } = require('./services/mayorRuntimeService');
 const { createQuestService } = require('./services/questService');
 const { createSocialService } = require('./services/socialService');
+const { registerCoreCityRoutes } = require('./routes/coreRoutes');
+const { registerEventQuestRoutes } = require('./routes/eventQuestRoutes');
 const initCityGrowthDb = require('../cityGrowth/growthDb');
 const schoolLogic = require('../cityGrowth/schoolLogic');
 const { enqueueBackgroundTask } = require('../../backgroundQueue');
 const { buildUniversalContext } = require('../../contextBuilder');
-const { deriveEmotion, applyEmotionEvent, getEmotionBehaviorGuidance, buildEmotionLogEntry } = require('../../emotion');
+const { deriveEmotion, derivePhysicalState, applyEmotionEvent, getEmotionBehaviorGuidance, buildEmotionLogEntry } = require('../../emotion');
 
 // Phase 5: Social encounter cooldown - prevents same pair from chatting every tick
 const socialCooldowns = new Map(); // key: "charA_id::charB_id" -> timestamp
@@ -126,7 +128,10 @@ module.exports = function initCityPlugin(app, context) {
         engine?.broadcastEvent?.(wsClients, { type: 'refresh_contacts' });
         await engine.triggerImmediateUserReply(char.id, wsClients, {
             propagateError: true,
-            extraSystemDirective
+            extraSystemDirective,
+            triggerSource: 'city_admin_grant',
+            triggerRoute: 'city.triggerAdminGrantChat',
+            triggerNote: `grant_${grantKind}`
         });
         return newMessage;
     }
@@ -176,7 +181,10 @@ module.exports = function initCityPlugin(app, context) {
         try {
             await engine.triggerImmediateUserReply(char.id, wsClients, {
                 propagateError: true,
-                extraSystemDirective: directive
+                extraSystemDirective: directive,
+                triggerSource: 'city_hacker_intel',
+                triggerRoute: 'city.triggerHackerIntelReply',
+                triggerNote: 'hacker intel reply'
             });
             recordCityLlmDebug(db, char, 'event', 'hacker_intel_reply', 'Hacker intel reply dispatch succeeded.', {
                 has_intel: true,
@@ -1787,7 +1795,7 @@ ${districtSpecificRule ? districtSpecificRule + '\n' : ''}严格返回 JSON：
         }
         const emotionGuidance = getEmotionBehaviorGuidance(char);
         hardConstraintText += `\n- 主情绪：${emotionGuidance.emotion.label} ${emotionGuidance.emotion.emoji}`;
-        hardConstraintText += `\n- 情绪影响：${emotionGuidance.cityAction}`;
+        hardConstraintText += `\n- 情绪感受：${emotionGuidance.cityAction}`;
         const growthDb = ensureCityGrowthDb(context.getUserDb(char.user_id || 'default'));
         const schoolPromptBlock = schoolLogic.buildSchoolPromptBlock(growthDb, char);
 
@@ -1806,7 +1814,6 @@ ${universalContext?.preamble || ''}
 - 休闲：${leisures.join(', ') || '暂无'}
 
 [当前状态]
-三维 Int/Sta/Cha: ${char.stat_int ?? 50}/${char.stat_sta ?? 50}/${char.stat_cha ?? 50}
 地点=${char.location || '未知'} | 状态=${char.city_status || '健康'}
 体力=${cal}/4000 | 金币=${wallet}
 精力=${state.energy} 睡眠债=${state.sleep_debt} 心情=${state.mood} 压力=${state.stress}
@@ -1989,305 +1996,17 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         return `\n[竞争任务现场]\n${names} 正在竞争同一条公告任务：${quest.emoji || '📜'} ${quest.title}。\n任务内容：${quest.description || ''}\n${onSite}\n这次偶遇请明显体现“彼此知道对方在抢同一单”的紧张感、试探、让步、暗中较劲或嘴上不说破的竞争。`;
     }
 
-    // REST API: logs, characters, districts, config, economy
-
-    app.get('/api/city/logs', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const requestedLimit = Number.parseInt(req.query.limit, 10);
-            const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 1000)) : 300;
-            res.json({ success: true, logs: req.db.city.getCityLogs(limit) });
-        }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/announcements', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const requestedLimit = Number.parseInt(req.query.limit, 10);
-            const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 200)) : 50;
-            res.json({ success: true, announcements: req.db.city.getCityAnnouncements(limit) });
-        }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/characters', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const chars = req.db.getCharacters().map(c => {
-                const emotion = deriveEmotion(c);
-                return {
-                    id: c.id, name: c.name, avatar: c.avatar,
-                    calories: c.calories ?? 2000, city_status: c.city_status ?? 'idle',
-                    location: c.location ?? 'home', sys_survival: c.sys_survival ?? 1, sys_city_social: c.sys_city_social ?? 1,
-                    is_scheduled: c.is_scheduled ?? 1,
-                    city_action_frequency: c.city_action_frequency ?? 1,
-                    wallet: c.wallet ?? 200,
-                    stat_int: c.stat_int ?? 50, stat_sta: c.stat_sta ?? 50, stat_cha: c.stat_cha ?? 50,
-                    energy: c.energy ?? 100, sleep_debt: c.sleep_debt ?? 0, mood: c.mood ?? 50,
-                    stress: c.stress ?? 20, social_need: c.social_need ?? 50, health: c.health ?? 100,
-                    satiety: c.satiety ?? 45, stomach_load: c.stomach_load ?? 0,
-                    emotion_state: emotion.state, emotion_label: emotion.label, emotion_emoji: emotion.emoji, emotion_color: emotion.color,
-                    api_endpoint: c.api_endpoint || '', model_name: c.model_name || '',
-                    inventory: req.db.city.getInventory(c.id)
-                };
-            });
-            res.json({ success: true, characters: chars });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/districts', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); res.json({ success: true, districts: req.db.city.getDistricts() }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.post('/api/city/districts', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            if (!req.body.name) return res.status(400).json({ error: '缺少名称' });
-            const payload = normalizeDistrictPayload(req.body);
-            req.db.city.upsertDistrict(payload);
-            res.json({ success: true, district: req.db.city.getDistrict(payload.id) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.delete('/api/city/districts/:id', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); req.db.city.deleteDistrict(req.params.id); res.json({ success: true }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.patch('/api/city/districts/:id/toggle', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const d = req.db.city.getDistrict(req.params.id);
-            if (!d) return res.status(404).json({ error: '分区不存在' });
-            req.db.city.upsertDistrict({ ...d, is_enabled: d.is_enabled ? 0 : 1 });
-            res.json({ success: true, district: req.db.city.getDistrict(req.params.id) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.get('/api/city/config', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); res.json({ success: true, config: req.db.city.getConfig() }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.post('/api/city/config', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            if (!req.body.key) return res.status(400).json({ error: '缺少 key' });
-            req.db.city.setConfig(req.body.key, req.body.value);
-            res.json({ success: true, config: req.db.city.getConfig() });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // Handle Manual Time Skip 
-    app.post('/api/city/time-skip', authMiddleware, async (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const { minutes } = req.body;
-            if (!minutes || isNaN(minutes) || minutes <= 0) return res.status(400).json({ error: '无效的时间跳跃分钟数' });
-
-            const config = req.db.city.getConfig();
-            const oldCityDate = getCityDate(config);
-
-            // Apply the offset to the existing offset
-            const oldDays = parseInt(config.city_time_offset_days) || 0;
-            const oldHours = parseInt(config.city_time_offset_hours) || 0;
-
-            let totalOffsetHoursDisplay = oldHours + (minutes / 60);
-            let addedDays = Math.floor(totalOffsetHoursDisplay / 24);
-            let remainingHours = totalOffsetHoursDisplay % 24;
-
-            // Handle negative overflow cleanly for future-proofing, though we only jump forward here
-            if (remainingHours < 0) {
-                addedDays -= 1;
-                remainingHours += 24;
-            }
-
-            const newDays = oldDays + addedDays;
-            const newHours = remainingHours;
-
-            req.db.city.setConfig('city_time_offset_days', newDays);
-            req.db.city.setConfig('city_time_offset_hours', newHours);
-
-            // Fetch updated config and date
-            const newConfig = req.db.city.getConfig();
-            const newCityDate = getCityDate(newConfig);
-
-            // Execute backfill
-            const processedTasks = await runTimeSkipBackfill(req.db, oldCityDate, newCityDate, req.user.id);
-            res.json({ success: true, processedTasks });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/economy', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); res.json({ success: true, stats: req.db.city.getEconomyStats() }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.get('/api/city/schedules/:charId', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const schedule = req.db.city.getTodaySchedule(req.params.charId);
-            if (!schedule) return res.json({ success: true, schedule: [] });
-            res.json({ success: true, schedule: JSON.parse(schedule.schedule_json) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.post('/api/city/give-gold', authMiddleware, async (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const { characterId, amount } = req.body;
-            const char = req.db.getCharacter(characterId);
-            if (!char) return res.status(404).json({ error: '角色不存在' });
-            const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
-            const giftAmount = Number(amount) || 0;
-            const newWallet = (char.wallet || 0) + giftAmount;
-            req.db.updateCharacter(characterId, { wallet: newWallet });
-            req.db.city.logAction(characterId, 'GIFT', `${userName}给 ${char.name} 送了 ${giftAmount} 金币 🎁`, 0, giftAmount);
-
-            const wsClients = getWsClients(req.user.id);
-            const engine = getEngine(req.user.id);
-            if (engine && typeof engine.broadcastWalletSync === 'function') {
-                engine.broadcastWalletSync(wsClients, characterId);
-            }
-            await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'gold', {
-                amount: giftAmount
-            });
-
-            res.json({ success: true, wallet: newWallet });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.post('/api/city/feed', authMiddleware, async (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const { characterId, calories } = req.body;
-            const char = req.db.getCharacter(characterId);
-            if (!char) return res.status(404).json({ error: '角色不存在' });
-            const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
-            const addCals = Number(calories) || 1000;
-            const newCals = Math.min(4000, (char.calories ?? 2000) + addCals);
-            req.db.updateCharacter(characterId, { calories: newCals, city_status: newCals > 500 ? 'idle' : 'hungry' });
-            req.db.city.logAction(characterId, 'FED', `${userName}给 ${char.name} 送了补给 (+${addCals}卡) 🍱`, addCals, 0);
-            await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'calories', {
-                amount: addCals
-            });
-            res.json({ success: true, calories: newCals });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // New REST API: items & inventory
-
-    // Get all items in the shop catalog
-    app.get('/api/city/items', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); res.json({ success: true, items: req.db.city.getItems() }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // CRUD item
-    app.post('/api/city/items', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            if (!req.body.name) return res.status(400).json({ error: '缺少名称' });
-            const payload = normalizeItemPayload(req.body);
-            req.db.city.upsertItem(payload);
-            res.json({ success: true, item: req.db.city.getItem(payload.id) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.delete('/api/city/items/:id', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); req.db.city.deleteItem(req.params.id); res.json({ success: true }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // Get a character's inventory
-    app.get('/api/city/inventory/:charId', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            res.json({ success: true, inventory: req.db.city.getInventory(req.params.charId) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // Admin: give item to a character
-    app.post('/api/city/give-item', authMiddleware, async (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const { characterId, itemId, quantity } = req.body;
-            const char = req.db.getCharacter(characterId);
-            const item = req.db.city.getItem(itemId);
-            if (!char) return res.status(404).json({ error: '角色不存在' });
-            if (!item) return res.status(404).json({ error: '物品不存在' });
-            const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
-            const safeQuantity = quantity || 1;
-            req.db.city.addToInventory(characterId, itemId, safeQuantity);
-            req.db.city.logAction(characterId, 'GIVE_ITEM', `${userName}给 ${char.name} 送了 ${item.emoji}${item.name} x${safeQuantity} 🎁`, 0, 0);
-            await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'item', {
-                itemName: item.name,
-                itemEmoji: item.emoji,
-                quantity: safeQuantity
-            });
-            res.json({ success: true, inventory: req.db.city.getInventory(characterId) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // Get a character's schedule
-    app.get('/api/city/schedule/:charId', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const schedule = req.db.city.getTodaySchedule(req.params.charId);
-            res.json({ success: true, schedule: schedule ? JSON.parse(schedule.schedule_json) : null });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // Admin: Clear all current city activity logs
-    app.delete('/api/city/logs/clear', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            req.db.city.clearAllLogs();
-
-            // Also explicitly clear Mayor broadcast messages from the main chat history
-            try {
-                const getRawDb = req.db.getRawDb || (() => req.db._db);
-                if (getRawDb && typeof getRawDb === 'function') {
-                    const rdb = getRawDb();
-                    rdb.prepare("DELETE FROM messages WHERE role = 'system' AND content LIKE '【市长播报】%'").run();
-                }
-            } catch (err) { console.error('[City] Failed to clear mayor messages:', err.message); }
-
-            res.json({ success: true, message: '商业街活动记录与市长广播已清空' });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/events', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); res.json({ success: true, events: req.db.city.getAllEvents() }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.delete('/api/city/events/:id', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); req.db.city.deleteEvent(req.params.id); res.json({ success: true }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/quests', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const quests = req.query.all === '1' ? req.db.city.getAllQuests() : req.db.city.getActiveQuests();
-            res.json({ success: true, quests });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-    app.delete('/api/city/quests/:id', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); req.db.city.deleteQuest(req.params.id); res.json({ success: true }); }
-        catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    // Admin: Wipe ALL city data (logs, inventory, districts, etc., and reset characters)
-    app.delete('/api/city/data/wipe', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            req.db.city.wipeAllData();
-
-            // Also explicitly clear Mayor broadcast messages from the main chat history
-            try {
-                const getRawDb = req.db.getRawDb || (() => req.db._db);
-                if (getRawDb && typeof getRawDb === 'function') {
-                    const rdb = getRawDb();
-                    rdb.prepare("DELETE FROM messages WHERE role = 'system' AND content LIKE '【市长播报】%'").run();
-                }
-            } catch (err) { console.error('[City] Failed to clear mayor messages on wipe:', err.message); }
-
-            res.json({ success: true, message: '商业街所有数据已清空' });
-        } catch (e) { res.status(500).json({ error: e.message }); }
+    registerCoreCityRoutes(app, {
+        authMiddleware,
+        ensureCityDb,
+        deriveEmotion,
+        normalizeDistrictPayload,
+        normalizeItemPayload,
+        getCityDate,
+        runTimeSkipBackfill,
+        triggerAdminGrantChat,
+        getWsClients,
+        getEngine
     });
 
     // Autonomous event loop & RNG minute scheduling
@@ -3003,6 +2722,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const cals = char.calories ?? 2000, wallet = char.wallet ?? 200;
         const state = normalizeSurvivalState(char);
         const emotionState = deriveEmotion(char).state;
+        const physicalState = derivePhysicalState(char).state;
         // Check if char has food in inventory first
         if (cals < 500 && wallet >= 15) return districts.find(d => d.type === 'food') || districts[0];
         if (state.energy < 20) {
@@ -3012,8 +2732,8 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         }
         if (cals < 300 || state.energy < 35 || state.sleep_debt > 75) return districts.find(d => d.type === 'rest') || districts[0];
         if (state.health < 35) return districts.find(d => d.type === 'medical') || districts[0];
-        if (emotionState === 'unwell') return districts.find(d => d.type === 'medical') || districts.find(d => d.type === 'rest') || districts[0];
-        if (emotionState === 'sleepy') return districts.find(d => d.type === 'rest') || districts[0];
+        if (physicalState === 'unwell' || physicalState === 'severe_unwell') return districts.find(d => d.type === 'medical') || districts.find(d => d.type === 'rest') || districts[0];
+        if (physicalState === 'sleepy' || physicalState === 'fatigued') return districts.find(d => d.type === 'rest') || districts[0];
         if (emotionState === 'hurt' || emotionState === 'sad') {
             return districts.find(d => d.type === 'rest')
                 || districts.find(d => d.type === 'leisure')
@@ -3299,219 +3019,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         return mayorRuntimeService.applyFallbackMayorDecisions(db);
     }
 
-    // Events & quests REST APIs
-
-    app.get('/api/city/events', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const active = req.query.all === '1' ? req.db.city.getAllEvents() : req.db.city.getActiveEvents();
-            res.json({ success: true, events: active });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.post('/api/city/events', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            if (!req.body.title) return res.status(400).json({ error: '缺少 title' });
-            req.db.city.createEvent(req.body);
-            res.json({ success: true });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.delete('/api/city/events/:id', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            req.db.city.deleteEvent(req.params.id);
-            res.json({ success: true });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.get('/api/city/quests', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const active = req.query.all === '1' ? req.db.city.getAllQuests() : req.db.city.getActiveQuests();
-            res.json({ success: true, quests: active });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.post('/api/city/quests', authMiddleware, (req, res) => {
-        (async () => {
-            ensureCityDb(req.db);
-            if (!req.body.title) return res.status(400).json({ error: '缺少 title' });
-            const scoredQuest = await scoreQuestDifficultyWithMayor(req.db, req.body);
-            const questId = req.db.city.createQuest({
-                ...req.body,
-                completion_target: scoredQuest.targetScore,
-                difficulty_reason: scoredQuest.reason
-            });
-            publishQuestAnnouncement(req.db, questId, req.body);
-            res.json({ success: true, questId });
-        })().catch((e) => res.status(500).json({ error: e.message }));
-    });
-
-    app.post('/api/city/logs/:id/retry-quest-score', authMiddleware, (req, res) => {
-        (async () => {
-            ensureCityDb(req.db);
-            const logId = Number(req.params.id || 0);
-            if (!logId) return res.status(400).json({ error: '缺少有效日志 ID' });
-            const review = req.db.city.getQuestProgressReviewByLogId?.(logId);
-            if (!review) return res.status(404).json({ error: '这条行动还没有任务评分记录' });
-            if (String(review.status || '') !== 'error') {
-                return res.status(400).json({ error: '只有评分失败的行动才需要重试' });
-            }
-            const rawDb = req.db.city.db;
-            const log = rawDb.prepare('SELECT * FROM city_logs WHERE id = ?').get(logId);
-            if (!log) return res.status(404).json({ error: '行动日志不存在' });
-            const char = req.db.getCharacter(review.character_id);
-            if (!char) return res.status(404).json({ error: '角色不存在' });
-            const quest = req.db.city.getQuestById?.(review.quest_id);
-            if (!quest) return res.status(404).json({ error: '任务不存在' });
-            const claim = review.claim_id
-                ? rawDb.prepare('SELECT * FROM city_quest_claims WHERE id = ?').get(review.claim_id)
-                : rawDb.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(review.quest_id, review.character_id);
-            if (!claim) return res.status(404).json({ error: '任务领取记录不存在' });
-            const district = req.db.city.getDistrict(log.location)
-                || req.db.city.getEnabledDistricts().find((item) => String(item.id || '').toLowerCase() === String(log.location || '').toLowerCase())
-                || { id: String(log.location || 'street'), name: String(log.location || '街区'), emoji: '📍' };
-            const scoreResult = await scoreQuestProgressWithMayor(
-                req.db,
-                char,
-                quest,
-                claim,
-                district,
-                { log: log.content },
-                { actionLogId: logId, actionContent: log.content }
-            );
-            if (!scoreResult?.success) {
-                return res.status(500).json({
-                    error: scoreResult?.review?.error_message || '市长评分重试失败',
-                    review: scoreResult?.review || null,
-                    canRetry: true
-                });
-            }
-            res.json({ success: true, review: scoreResult.review });
-        })().catch((e) => res.status(500).json({ error: e.message, canRetry: true }));
-    });
-
-    app.post('/api/city/quests/:id/claim', authMiddleware, async (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const questId = req.params.id;
-            const charId = String(req.body?.characterId || '').trim();
-            if (!charId) return res.status(400).json({ error: '缺少 characterId' });
-            const quest = req.db.city.getAllQuests(1000).find((item) => String(item.id) === String(questId));
-            if (!quest) return res.status(404).json({ error: '任务不存在' });
-            const char = req.db.getCharacter(charId);
-            if (!char) return res.status(404).json({ error: '角色不存在' });
-            if (quest.is_completed) return res.status(400).json({ error: '任务已完成' });
-            const claimResult = req.db.city.claimQuest(questId, charId);
-            if (!claimResult?.success) {
-                const reasonMap = {
-                    quest_unavailable: '任务已失效或已完成，不能再领取'
-                };
-                return res.status(400).json({ error: reasonMap[claimResult?.reason] || '任务领取失败' });
-            }
-            req.db.city.logAction('system', 'QUEST', `📌 ${char.name} 领取了悬赏任务「${quest.title}」`, 0, 0);
-            if (typeof req.db.city.addCityAnnouncement === 'function') {
-                req.db.city.addCityAnnouncement('system', '任务状态', `${char.name} 已领取悬赏任务「${quest.title}」`, 'street');
-            }
-            broadcastCityEvent(req.user.id, char.id, 'QUEST_CLAIMED', `📌 ${char.name} 领取了「${quest.title}」`);
-
-            const targetDistrict = req.db.city.getDistrict(quest.target_district)
-                || req.db.city.getDistrict('street')
-                || req.db.city.getEnabledDistricts().find((item) => String(item.id || '').toLowerCase() === String(quest.target_district || '').toLowerCase())
-                || req.db.city.getEnabledDistricts()[0]
-                || null;
-
-            let actionResult = null;
-            let actionError = '';
-            const engine = req.engine || getEngine(req.user.id);
-            const wsClients = getWsClients(req.user.id);
-            if (engine && typeof engine.triggerImmediateUserReply === 'function') {
-                const districtLabel = targetDistrict
-                    ? `${targetDistrict.emoji || ''}${targetDistrict.name || targetDistrict.id || quest.target_district || '商业街'}`
-                    : (quest.target_district || '商业街');
-                const rewardText = `${Number(quest.reward_gold || 0)}金币${Number(quest.reward_cal || 0) > 0 ? ` + ${Number(quest.reward_cal || 0)}体力` : ''}`;
-                const directiveLines = [
-                    '[系统任务派发提醒]',
-                    `用户刚刚手动把一个公告任务分派给你，任务已经登记到你名下。`,
-                    `任务：${quest.emoji || '📜'} ${quest.title}`,
-                    `地点：${districtLabel}`,
-                    quest.description ? `任务内容：${quest.description}` : '',
-                    `奖励：${rewardText}`,
-                    '请你先像正常私聊一样，给用户发一条自然回应，表示你已经知道这件事。',
-                    '如果你决定立刻去做，就像平时私聊触发商业街那样，在回复里自然附带 [CITY_ACTION: {...}] 或 [CITY_INTENT: ...]，让系统继续走你领取公告后的正常链路。',
-                    '不要把标签、系统提示、流程说明直接说给用户听。'
-                ].filter(Boolean);
-                try {
-                    actionResult = await engine.triggerImmediateUserReply(char.id, wsClients, {
-                        extraSystemDirective: directiveLines.join('\n')
-                    });
-                } catch (err) {
-                    actionError = err?.message || 'manual_assignment_reply_failed';
-                    console.warn(`[City/QuestClaim] manual assignment reply failed for ${char.name}: ${actionError}`);
-                    req.db.city.logAction(
-                        'system',
-                        'QUEST',
-                        `⚠️ ${char.name} 已领取「${quest.title}」，但任务私聊派发失败：${actionError}`,
-                        0,
-                        0,
-                        targetDistrict?.id || quest.target_district || 'street'
-                    );
-                }
-            }
-
-            res.json({
-                success: true,
-                actionTriggered: !!actionResult?.triggered,
-                actionResult,
-                actionError
-            });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.post('/api/city/quests/:id/complete', authMiddleware, async (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const questId = req.params.id;
-            const charId = String(req.body?.characterId || '').trim();
-            if (!charId) return res.status(400).json({ error: '缺少 characterId' });
-            const quest = req.db.city.getAllQuests(1000).find((item) => String(item.id) === String(questId));
-            if (!quest) return res.status(404).json({ error: '任务不存在' });
-            const claimant = req.db.getCharacter(charId);
-            if (!claimant) return res.status(404).json({ error: '角色不存在' });
-            const completion = req.db.city.resolveQuestCompletion(questId, charId);
-            if (!completion?.success) return res.status(400).json({ error: '任务完成失败' });
-
-            if (completion.won) {
-                const wallet = Number(claimant.wallet || 0) + Number(completion.reward_gold || 0);
-                const calories = Number(claimant.calories || 0) + Number(completion.reward_cal || 0);
-                req.db.updateCharacter(claimant.id, { wallet, calories });
-                const resolution = await buildQuestResolutionNarrations(claimant, quest, req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' }, req.db, 'success');
-                req.db.city.logAction(claimant.id, 'QUEST', resolution.log, 0, 0, quest.target_district || 'street');
-                req.db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, quest.target_district || 'street');
-                if (quest.source_announcement_id) req.db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
-                req.db.city.addCityAnnouncement?.('system', '任务完成', resolution.announcement, 'street');
-                res.json({ success: true, won: true });
-                return;
-            }
-
-            const resolution = await buildQuestResolutionNarrations(claimant, quest, req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' }, req.db, 'failed');
-            req.db.city.logAction(claimant.id, 'QUEST', resolution.log, 0, 0, quest.target_district || 'street');
-            req.db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, quest.target_district || 'street');
-            req.db.city.addCityAnnouncement?.('system', '任务失效', resolution.announcement, 'street');
-            res.json({ success: true, won: false, reason: completion.reason || 'already_completed' });
-        } catch (e) { res.status(500).json({ error: e.message }); }
-    });
-
-    app.delete('/api/city/quests/:id', authMiddleware, (req, res) => {
-        try {
-            ensureCityDb(req.db);
-            const quest = req.db.city.getQuestById?.(req.params.id);
-            if (quest?.source_announcement_id) req.db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
-            req.db.city.deleteQuest(req.params.id);
-            res.json({ success: true });
-        } catch (e) { res.status(500).json({ error: e.message }); }
+    registerEventQuestRoutes(app, {
+        authMiddleware,
+        ensureCityDb,
+        scoreQuestDifficultyWithMayor,
+        publishQuestAnnouncement,
+        scoreQuestProgressWithMayor,
+        buildQuestResolutionNarrations,
+        broadcastCityEvent,
+        getEngine,
+        getWsClients
     });
 
     // Manual Schedule Generation Trigger
@@ -3581,7 +3098,12 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                     if (chatContent && String(chatContent).trim() !== '') {
                         const engine = getEngine(userId);
                         const wsClients = getWsClients(userId);
-                        const { id: msgId, timestamp: msgTs } = db.addMessage(char.id, 'character', chatContent);
+                        const cityOutreachMeta = {
+                            source: 'city_outreach',
+                            event_type: eventType || '',
+                            generated_from: 'city_action'
+                        };
+                        const { id: msgId, timestamp: msgTs } = db.addMessage(char.id, 'character', chatContent, cityOutreachMeta);
                         const freshChar = db.getCharacter(char.id) || char;
                         const hadPendingReply = !!freshChar.city_reply_pending;
                         const nextIgnoreStreak = hadPendingReply ? Math.min(6, (freshChar.city_ignore_streak || 0) + 1) : 0;
@@ -3611,7 +3133,8 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         );
                         const newMessage = {
                             id: msgId, character_id: char.id, role: 'character',
-                            content: chatContent, timestamp: msgTs, read: 0
+                            content: chatContent, timestamp: msgTs, read: 0,
+                            metadata: cityOutreachMeta
                         };
                         engine.broadcastNewMessage(wsClients, newMessage);
                         engine.broadcastEvent(wsClients, { type: 'refresh_contacts' });

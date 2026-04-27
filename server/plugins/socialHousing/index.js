@@ -2,6 +2,7 @@ const initSocialHousingDb = require('./db');
 const initCityDb = require('../city/cityDb');
 
 const AUTO_TICK_MS = 60 * 1000;
+const RENT_TICK_MS = 60 * 1000;
 
 function compactText(value, fallback = '') {
     return String(value || '').replace(/\s+/g, ' ').trim() || fallback;
@@ -122,6 +123,30 @@ function getAgencyAdsWithPublishState(socialHousingDb, cityDb, limit = 12) {
         ...ad,
         is_published: publicKeys.has(buildAgencyAdKey(ad.title, ad.content))
     }));
+}
+
+function clampNumber(value, min, max) {
+    const num = Number(value);
+    if (!Number.isFinite(num)) return min;
+    return Math.max(min, Math.min(max, num));
+}
+
+function applyRentStressPatch(character = {}, binding = {}) {
+    const missed = Math.max(1, Number(binding.missed_rent_count || 1));
+    return {
+        stress: clampNumber(Number(character.stress || 20) + 6 + missed * 2, 0, 100),
+        mood: clampNumber(Number(character.mood || 50) - 3 - missed, 0, 100),
+        social_need: clampNumber(Number(character.social_need || 50) + 2, 0, 100),
+        pressure_level: clampNumber(Number(character.pressure_level || 0) + 1, 0, 5)
+    };
+}
+
+function buildRentLog(char = {}, binding = {}, paid = false, amount = 0) {
+    const homeLabel = `${binding.housing_emoji || ''}${binding.housing_name || binding.housing_id || '住所'}`.trim();
+    if (paid) {
+        return `${char.name} 支付了 ${amount} 金币房租，${homeLabel} 的租约又稳了一周。`;
+    }
+    return `${char.name} 的 ${homeLabel} 房租到期，但钱包余额不足，居住状态变成拖欠。`;
 }
 
 function doesAgencyAdReferenceHome(ad, home) {
@@ -389,6 +414,60 @@ module.exports = function initSocialHousingPlugin(app, context) {
         };
     }
 
+    function settleCharacterRent(db, characterId, options = {}) {
+        const socialHousingDb = ensureSocialHousingDb(db);
+        const cityDb = ensureCityDb(db);
+        const character = db.getCharacter(characterId);
+        if (!character) return { success: false, reason: 'character_missing' };
+        const housingContext = socialHousingDb.getHousingContextForCharacter(characterId);
+        if (!housingContext?.binding?.housing_id) return { success: false, reason: 'no_housing' };
+        const binding = housingContext.binding;
+        const home = housingContext.housing || {};
+        const amount = Math.max(0, Number(binding.rent_weekly || home.weekly_rent || 0));
+        if (amount <= 0) return { success: false, reason: 'rent_not_configured' };
+
+        if (Number(character.wallet || 0) >= amount) {
+            db.updateCharacter(character.id, { wallet: Number(character.wallet || 0) - amount });
+            const nextBinding = socialHousingDb.markRentPaid(character.id, Date.now());
+            cityDb.logAction(
+                character.id,
+                'RENT',
+                buildRentLog(character, { ...binding, housing_name: home.name, housing_emoji: home.emoji }, true, amount),
+                0,
+                -amount,
+                character.location || 'home'
+            );
+            return { success: true, paid: true, amount, character: db.getCharacter(character.id), binding: nextBinding };
+        }
+
+        const nextBinding = socialHousingDb.markRentOverdue(character.id);
+        const stressPatch = applyRentStressPatch(character, nextBinding || binding);
+        db.updateCharacter(character.id, stressPatch);
+        cityDb.logAction(
+            character.id,
+            'RENT_OVERDUE',
+            buildRentLog(character, { ...binding, housing_name: home.name, housing_emoji: home.emoji }, false, amount),
+            0,
+            0,
+            character.location || 'home'
+        );
+        return { success: true, paid: false, amount, character: db.getCharacter(character.id), binding: nextBinding };
+    }
+
+    function settleDueRentsForDb(db) {
+        const socialHousingDb = ensureSocialHousingDb(db);
+        const dueBindings = socialHousingDb.getDueRentBindings(Date.now());
+        const results = [];
+        for (const binding of dueBindings) {
+            try {
+                results.push(settleCharacterRent(db, binding.character_id));
+            } catch (e) {
+                results.push({ success: false, character_id: binding.character_id, error: e.message });
+            }
+        }
+        return results;
+    }
+
     app.get('/api/social-housing/bootstrap', authMiddleware, (req, res) => {
         try {
             const socialHousingDb = ensureSocialHousingDb(req.db);
@@ -487,6 +566,31 @@ module.exports = function initSocialHousingPlugin(app, context) {
             socialHousingDb.saveBinding(req.params.id, req.body || {});
             res.json({
                 success: true,
+                characters: socialHousingDb.getCharactersWithBindings(() => req.db.getCharacters()),
+                housing_context: socialHousingDb.getHousingContextForCharacter(req.params.id)
+            });
+        } catch (e) {
+            res.status(500).json({ success: false, error: e.message });
+        }
+    });
+
+    app.post('/api/social-housing/characters/:id/pay-rent', authMiddleware, (req, res) => {
+        try {
+            const result = settleCharacterRent(req.db, req.params.id, { manual: true });
+            if (!result.success) {
+                return res.status(400).json({ success: false, error: result.reason || '房租结算失败' });
+            }
+            const socialHousingDb = ensureSocialHousingDb(req.db);
+            const wsClients = getWsClients(req.user.id);
+            wsClients?.forEach((client) => {
+                if (client.readyState === 1) {
+                    client.send(JSON.stringify({ type: 'refresh_contacts' }));
+                    client.send(JSON.stringify({ type: 'city_update', action: 'rent-settled', character_id: req.params.id }));
+                }
+            });
+            res.json({
+                success: true,
+                result,
                 characters: socialHousingDb.getCharactersWithBindings(() => req.db.getCharacters())
             });
         } catch (e) {
@@ -608,4 +712,25 @@ module.exports = function initSocialHousingPlugin(app, context) {
             }
         }
     }, AUTO_TICK_MS);
+
+    setInterval(() => {
+        const users = typeof authDb.getAllUsers === 'function' ? authDb.getAllUsers() : [];
+        for (const user of users) {
+            try {
+                if (String(user.status || 'active') !== 'active') continue;
+                const db = getUserDb(user.id);
+                const results = settleDueRentsForDb(db);
+                if (!results.some((item) => item?.success)) continue;
+                const wsClients = getWsClients(user.id);
+                wsClients?.forEach((client) => {
+                    if (client.readyState === 1) {
+                        client.send(JSON.stringify({ type: 'refresh_contacts' }));
+                        client.send(JSON.stringify({ type: 'city_update', action: 'rent-settled' }));
+                    }
+                });
+            } catch (e) {
+                console.warn('[SocialHousing] rent settlement failed:', e.message);
+            }
+        }
+    }, RENT_TICK_MS);
 };

@@ -27,6 +27,7 @@
     "multer": "^2.1.0",
     "node-cron": "^4.2.1",
     "onnxruntime-node": "^1.24.2",
+    "sharp": "^0.34.5",
     "unzipper": "^0.12.3",
     "vectra": "^0.12.3",
     "ws": "^8.19.0"

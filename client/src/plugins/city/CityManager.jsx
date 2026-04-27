@@ -1,7 +1,7 @@
 ﻿import React, { useState, useEffect, useCallback } from 'react';
 import { Plus, Trash2, ToggleLeft, ToggleRight, Save, DollarSign, Heart, Edit3, X, Power, Package, ShoppingBag, AlertTriangle } from 'lucide-react';
 import { resolveAvatarUrl } from '../../utils/avatar';
-import { deriveEmotion } from '../../utils/emotion';
+import { deriveEmotion, derivePhysicalState } from '../../utils/emotion';
 import SchoolGrowthPanel from '../cityGrowth/SchoolGrowthPanel';
 
 const FALLBACK_AVATAR = 'https://api.dicebear.com/7.x/shapes/svg?seed=User';
@@ -852,6 +852,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: '8px', padding: '12px' }}>
                     {characters.map(c => {
                         const emotion = deriveEmotion(c);
+                        const physical = derivePhysicalState(c);
                         return (
                         <div key={c.id} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '8px', border: '1px solid #eee', borderRadius: '8px' }}>
                             <img src={avatarSrc(c.avatar, apiUrl)} alt="" style={{ width: '28px', height: '28px', borderRadius: '50%', objectFit: 'cover' }} />
@@ -859,13 +860,9 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
                                 <div style={{ fontWeight: '500', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
                                     <span>{c.name}</span>
                                     <span style={{ fontSize: '10px', color: emotion.color, fontWeight: '700' }}>{emotion.emoji} {emotion.label}</span>
+                                    <span style={{ fontSize: '10px', color: physical.color, fontWeight: '700' }}>{physical.emoji} {physical.label}</span>
                                 </div>
                                 <div style={{ fontSize: '10px', color: '#999' }}>{(c.wallet || 0).toFixed(0)}币 · {c.calories}卡 · <span onClick={(e) => { e.stopPropagation(); setViewInventory({ charName: c.name, inventory: c.inventory || [] }); }} style={{ cursor: 'pointer', color: (c.inventory || []).length > 0 ? 'var(--accent-color, #2196f3)' : '#999', textDecoration: (c.inventory || []).length > 0 ? 'underline' : 'none' }}>背包 {(c.inventory || []).length} 件</span></div>
-                                <div style={{ display: 'flex', gap: '6px', marginTop: '2px' }}>
-                                    <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', backgroundColor: '#e3f2fd', color: '#1565c0' }}>智 {c.stat_int ?? 50}</span>
-                                    <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', backgroundColor: '#e8f5e9', color: '#2e7d32' }}>体 {c.stat_sta ?? 50}</span>
-                                    <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', backgroundColor: '#fce4ec', color: '#c62828' }}>魅 {c.stat_cha ?? 50}</span>
-                                </div>
                             </div>
                             <button onClick={() => giveGold(c.id, c.name)} style={{ ...btnStyle('#ff9800'), padding: '3px 6px', fontSize: '10px' }} title="发金币"><DollarSign size={10} /></button>
                             <button onClick={() => feedChar(c.id, c.name)} style={{ ...btnStyle('#4caf50'), padding: '3px 6px', fontSize: '10px' }} title="补体力"><Heart size={10} /></button>

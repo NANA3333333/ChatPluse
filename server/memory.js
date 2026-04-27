@@ -16,6 +16,7 @@ const LOCAL_VECTOR_INDEX_ENABLED = process.env.LOCAL_VECTOR_INDEX_ENABLED === '1
 // Dynamic import for transformers.js
 let pipeline = null;
 let extractionDisabled = false;
+let extractionRetryAt = 0;
 const embeddingCache = new Map();
 const embeddingInFlight = new Map();
 const EMBEDDING_CACHE_LIMIT = 256;
@@ -48,7 +49,11 @@ function setWsClientsResolver(resolver) {
 }
 
 async function getExtractor() {
-    if (extractionDisabled) return null;
+    if (extractionDisabled) {
+        if (Date.now() < extractionRetryAt) return null;
+        extractionDisabled = false;
+        embeddingStats.extractorState = 'idle';
+    }
     if (!pipeline) {
         embeddingStats.extractorState = 'loading';
         try {
@@ -56,8 +61,9 @@ async function getExtractor() {
             pipeline = await transformers.pipeline('feature-extraction', LOCAL_EMBEDDING_MODEL);
             embeddingStats.extractorState = 'ready';
         } catch (e) {
-            console.error('[Memory] Xenova/ONNX initialization failed. Disabling local embeddings. Error:', e.message);
+            console.error('[Memory] Xenova/ONNX initialization failed. Temporarily disabling local embeddings. Error:', e.message);
             extractionDisabled = true;
+            extractionRetryAt = Date.now() + 60 * 1000;
             embeddingStats.extractorState = 'failed';
             embeddingStats.lastError = String(e.message || e);
             return null;
@@ -108,8 +114,7 @@ async function getEmbedding(text) {
     const pending = (async () => {
         const extractor = await getExtractor();
         if (!extractor) {
-            // Return a zero-vector if local embeddings are broken
-            return Array.from({ length: LOCAL_EMBEDDING_DIM }, () => 0);
+            throw new Error('Local embedding model is unavailable; refusing to create a zero vector.');
         }
         const output = await extractor(normalizedText, { pooling: 'mean', normalize: true });
         const vector = Array.from(output.data);
@@ -1315,6 +1320,16 @@ function getMemory(userId) {
         return Array.from(variants).filter(Boolean);
     }
 
+    function isUsefulGenericChineseAnchor(anchor = '') {
+        const value = String(anchor || '').trim();
+        if (!value || value.length < 2) return false;
+        if (/^(的|了|和|与|对|把|被|将|给|在|向|从|跟)/.test(value)) return false;
+        if (/(的|了|和|与|对|把|被|将|给|在|向|从|跟)$/.test(value)) return false;
+        if (/^(用户对|用户与|关于|有关|对话中|互动中|关系中|我的|你的|他的|她的)$/.test(value)) return false;
+        if (/^(含义|解释|细节|记录|历史|确认|明确解释)$/.test(value)) return false;
+        return true;
+    }
+
     function buildExpandedMemorySearchQueries(queryText = '') {
         const raw = String(queryText || '').trim();
         if (!raw) return [];
@@ -1332,13 +1347,14 @@ function getMemory(userId) {
         const genericAnchors = [];
         for (const chunk of chineseChunks) {
             for (const variant of expandGenericChineseAnchor(chunk)) {
+                if (!isUsefulGenericChineseAnchor(variant)) continue;
                 genericAnchors.push(variant);
                 variants.add(variant);
                 expandBilingualAliases(variant).forEach(v => variants.add(v));
             }
         }
 
-        if (genericAnchors.length >= 2) {
+        if (genericAnchors.length >= 2 && genericAnchors[0] !== genericAnchors[1]) {
             variants.add(`${genericAnchors[0]} ${genericAnchors[1]}`);
         }
 
@@ -1355,6 +1371,37 @@ function getMemory(userId) {
             .slice(0, 8);
     }
 
+    function extractLexicalQueryTokens(variant = '') {
+        const raw = String(variant || '').trim();
+        if (!raw) return [];
+        const tokens = raw.match(/[a-zA-Z0-9+_.-]{2,}|[\u4e00-\u9fff]{2,}/g) || [];
+        const normalizedSeen = new Set();
+        return tokens
+            .map(token => normalizeSearchText(token))
+            .filter(token => token && token.length >= 2)
+            .filter(token => {
+                if (normalizedSeen.has(token)) return false;
+                normalizedSeen.add(token);
+                return true;
+            })
+            .slice(0, 8);
+    }
+
+    function computeLexicalVariantBoost(haystack, variant = '') {
+        const needle = normalizeSearchText(variant);
+        if (!haystack || !needle || needle.length < 2) return 0;
+        if (haystack.includes(needle)) {
+            return needle.length >= 6 ? 0.16 : 0.08;
+        }
+
+        const tokens = extractLexicalQueryTokens(variant);
+        if (tokens.length < 2) return 0;
+        const hitCount = tokens.filter(token => haystack.includes(token)).length;
+        const coverage = hitCount / tokens.length;
+        if (hitCount < 2 || coverage < 0.35) return 0;
+        return Math.min(0.14, 0.04 + (hitCount * 0.035) + (coverage * 0.04));
+    }
+
     function computeLexicalBoost(memoryRow, queryVariants = []) {
         const haystack = normalizeSearchText([
             memoryRow?.summary,
@@ -1368,11 +1415,7 @@ function getMemory(userId) {
 
         let boost = 0;
         for (const variant of queryVariants) {
-            const needle = normalizeSearchText(variant);
-            if (!needle || needle.length < 2) continue;
-            if (haystack.includes(needle)) {
-                boost += needle.length >= 6 ? 0.16 : 0.08;
-            }
+            boost += computeLexicalVariantBoost(haystack, variant);
         }
         return Math.min(boost, 0.32);
     }
@@ -1443,7 +1486,7 @@ function getMemory(userId) {
                         row.relationships,
                         row.location
                     ].filter(Boolean).join(' '));
-                    if (haystack.includes(needle)) {
+                    if (haystack.includes(needle) || computeLexicalVariantBoost(haystack, variant) > 0) {
                         matchedQuery = variant;
                         break;
                     }

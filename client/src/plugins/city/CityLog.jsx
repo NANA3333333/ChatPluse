@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import CityManager from './CityManager';
 import { resolveAvatarUrl } from '../../utils/avatar';
-import { deriveEmotion } from '../../utils/emotion';
+import { deriveEmotion, derivePhysicalState } from '../../utils/emotion';
 
 const FALLBACK_AVATAR = 'https://api.dicebear.com/7.x/shapes/svg?seed=User';
 const avatarSrc = (url, apiUrl) => resolveAvatarUrl(url, apiUrl) || FALLBACK_AVATAR;
@@ -844,6 +844,7 @@ export default function CityLog({ apiUrl, userProfile }) {
                                 {characters.map((c) => {
                                     const status = getStatusDetails(c.city_status);
                                     const emotion = deriveEmotion(c);
+                                    const physical = derivePhysicalState(c);
                                     const pct = Math.min(100, Math.max(0, (c.calories / 4000) * 100));
                                     const bagOpen = expandedBag === c.id;
                                     const inventory = c.inventory || [];
@@ -862,6 +863,7 @@ export default function CityLog({ apiUrl, userProfile }) {
                                                 <img src={avatarSrc(c.avatar, apiUrl)} alt="" style={{ width: isMobile ? '26px' : '28px', height: isMobile ? '26px' : '28px', borderRadius: '50%', objectFit: 'cover' }} />
                                                 <span style={{ fontWeight: '500', flex: 1, minWidth: 0, fontSize: isMobile ? '12px' : '13px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</span>
                                                 <span style={{ fontSize: '10px', color: emotion.color, fontWeight: '700', flexShrink: 0 }}>{emotion.emoji} {emotion.label}</span>
+                                                <span style={{ fontSize: '10px', color: physical.color, fontWeight: '700', flexShrink: 0 }}>{physical.emoji} {physical.label}</span>
                                                 <span style={{ fontSize: '12px', fontWeight: '600', color: '#ff9800', flexShrink: 0 }}>{(c.wallet || 0).toFixed(0)}💰</span>
                                             </div>
                                             <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: isMobile ? '10px' : '11px', color: status.color, marginBottom: '6px', padding: '4px 6px', backgroundColor: `${status.color}12`, borderRadius: '4px', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }}>

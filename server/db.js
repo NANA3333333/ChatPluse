@@ -181,6 +181,7 @@ function getUserDb(userId) {
             mood INTEGER DEFAULT 50,
             stress INTEGER DEFAULT 20,
             social_need INTEGER DEFAULT 50,
+            explicit_emotion_state TEXT DEFAULT '',
             health INTEGER DEFAULT 100,
             satiety INTEGER DEFAULT 45,
             stomach_load INTEGER DEFAULT 0,
@@ -368,6 +369,21 @@ function getUserDb(userId) {
             meta TEXT DEFAULT '{}',
             timestamp INTEGER NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS reply_dispatch_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_id TEXT NOT NULL,
+            source TEXT NOT NULL DEFAULT 'unknown',
+            route TEXT NOT NULL DEFAULT '',
+            request_id TEXT NOT NULL DEFAULT '',
+            latest_user_message_id INTEGER,
+            latest_user_message_timestamp INTEGER,
+            payload TEXT NOT NULL DEFAULT '{}',
+            note TEXT NOT NULL DEFAULT '',
+            timestamp INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_reply_dispatch_logs_char_time
+            ON reply_dispatch_logs(character_id, timestamp DESC);
 
         CREATE TABLE IF NOT EXISTS prompt_block_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -837,6 +853,7 @@ function getUserDb(userId) {
         try { db.prepare('ALTER TABLE characters ADD COLUMN mood INTEGER DEFAULT 50').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN stress INTEGER DEFAULT 20').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN social_need INTEGER DEFAULT 50').run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN explicit_emotion_state TEXT DEFAULT ''").run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN health INTEGER DEFAULT 100').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN satiety INTEGER DEFAULT 45').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN stomach_load INTEGER DEFAULT 0').run(); } catch (e) { }
@@ -896,7 +913,7 @@ function getUserDb(userId) {
         'sys_proactive', 'sys_timer', 'sys_pressure', 'sys_jealousy', 'is_diary_unlocked', 'diary_password', 'wallet', 'emoji', 'last_moment_at',
         'jealousy_level', 'jealousy_target', 'city_reply_pending', 'city_ignore_streak', 'city_last_outreach_at', 'city_post_ignore_reaction',
         'city_status_started_at', 'city_status_until_at', 'city_medical_last_recovery_at',
-        'stat_int', 'stat_sta', 'stat_cha', 'energy', 'sleep_debt', 'sleep_pressure', 'mood', 'stress', 'social_need', 'health', 'satiety', 'stomach_load', 'work_distraction', 'sleep_disruption', 'llm_debug_capture',
+        'stat_int', 'stat_sta', 'stat_cha', 'energy', 'sleep_debt', 'sleep_pressure', 'mood', 'stress', 'social_need', 'explicit_emotion_state', 'health', 'satiety', 'stomach_load', 'work_distraction', 'sleep_disruption', 'llm_debug_capture',
         'sweep_limit', 'sweep_last_error', 'sweep_last_run_at', 'sweep_last_success_at', 'sweep_last_saved_count',
         // City DLC fields
         'calories', 'city_status', 'location', 'education', 'sys_survival', 'sys_city_notify', 'sys_city_social',
@@ -1030,6 +1047,52 @@ function getUserDb(userId) {
             .all(characterId, limit);
     }
 
+    function addReplyDispatchLog(entry) {
+        const stmt = db.prepare(`
+            INSERT INTO reply_dispatch_logs (
+                character_id,
+                source,
+                route,
+                request_id,
+                latest_user_message_id,
+                latest_user_message_timestamp,
+                payload,
+                note,
+                timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+        stmt.run(
+            entry.character_id,
+            String(entry.source || 'unknown'),
+            String(entry.route || ''),
+            String(entry.request_id || ''),
+            entry.latest_user_message_id ?? null,
+            entry.latest_user_message_timestamp ?? null,
+            typeof entry.payload === 'string' ? entry.payload : JSON.stringify(entry.payload || {}),
+            String(entry.note || ''),
+            entry.timestamp || Date.now()
+        );
+    }
+
+    function getReplyDispatchLogs(characterId, limit = 50) {
+        return db.prepare(`
+            SELECT * FROM reply_dispatch_logs
+            WHERE character_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+        `).all(characterId, limit).map(row => {
+            let payload = row.payload;
+            if (typeof payload === 'string' && payload.trim()) {
+                try {
+                    payload = JSON.parse(payload);
+                } catch (e) {
+                    payload = { raw: payload };
+                }
+            }
+            return { ...row, payload: payload || {} };
+        });
+    }
+
     function normalizeMessageRow(row) {
         if (!row) return row;
         let metadata = row.metadata;
@@ -1057,6 +1120,16 @@ function getUserDb(userId) {
             .all(characterId, beforeId, limit)
             .reverse()
             .map(normalizeMessageRow);
+    }
+
+    function getLatestUserMessage(characterId) {
+        const row = db.prepare(`
+            SELECT * FROM messages
+            WHERE character_id = ? AND role = 'user'
+            ORDER BY id DESC
+            LIMIT 1
+        `).get(characterId);
+        return normalizeMessageRow(row);
     }
 
     // Returns messages excluding hidden ones — used for LLM context
@@ -2807,14 +2880,17 @@ function getUserDb(userId) {
         getCharacter,
         addEmotionLog,
         addLlmDebugLog,
+        addReplyDispatchLog,
         getEmotionLogs,
         getLlmDebugLogs,
+        getReplyDispatchLogs,
         getCharacterHiddenState,
         updateCharacterHiddenState,
         updateCharacter,
         deleteCharacter,
         getMessages,
         getMessagesBefore,
+        getLatestUserMessage,
         getVisibleMessages,
         getVisibleMessagesSince,
         getRecentUserConversationIntel,

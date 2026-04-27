@@ -112,8 +112,8 @@ function getSchoolActionEffects(growthDb, char, district, currentState) {
     const profile = getCharacterSchoolProfile(growthDb, char.id);
     const deficits = {
         psychology: Math.max(0, (currentState.stress || 0) - 35) + Math.max(0, 45 - (currentState.mood || 50)),
-        vocational: Math.max(0, 55 - (char.stat_int ?? 50)) + Math.max(0, 55 - (char.stat_sta ?? 50)),
-        social: Math.max(0, (currentState.social_need || 50) - 45) + Math.max(0, 55 - (char.stat_cha ?? 50)),
+        vocational: 0,
+        social: Math.max(0, (currentState.social_need || 50) - 45),
         life_management: Math.max(0, 35 - (currentState.energy || 50)) + Math.max(0, (currentState.stomach_load || 0) - 35) + Math.max(0, 35 - (currentState.satiety || 50)),
     };
 

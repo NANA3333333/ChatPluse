@@ -6,7 +6,7 @@ import RecommendModal from './RecommendModal';
 import { Send, Smile, Paperclip, Bell, Users, ShieldBan, Trash, BookOpen, Brain, MoreHorizontal, UserPlus, Gift, Heart, UserMinus, ShieldAlert, BadgeInfo, ChevronLeft } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
-import { deriveEmotion } from '../utils/emotion';
+import { deriveEmotion, derivePhysicalState } from '../utils/emotion';
 
 function normalizeMessages(list = []) {
     const byId = new Map();
@@ -219,6 +219,7 @@ function ChatWindow({
         skipped: false
     };
     const emotion = deriveEmotion(contact || {});
+    const physical = derivePhysicalState(contact || {});
     const displayMessages = useMemo(() => collapseRepeatedApiErrors(messages), [messages]);
 
     // Fetch most recent messages when contact changes
@@ -446,7 +447,8 @@ function ChatWindow({
                     />
                     <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: 0, flex: 1 }}>
                         <span style={{ fontSize: '16px', fontWeight: '600', color: 'var(--text-primary)', whiteSpace: 'nowrap' }}>{contact.name}</span>
-                        <span style={{ fontSize: '12px', color: emotion.color, fontWeight: '600', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{emotion.emoji} {emotion.label}</span>
+                        <span title="心理状态" style={{ fontSize: '12px', color: emotion.color, fontWeight: '600', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{emotion.emoji} {emotion.label}</span>
+                        <span title="生理状态" style={{ fontSize: '12px', color: physical.color, fontWeight: '600', whiteSpace: 'nowrap', flex: '0 0 auto' }}>{physical.emoji} {physical.label}</span>
                         <RagHeaderProgress progress={ragProgress} lang={lang} />
                         {engineState?.[contact.id]?.isBlocked === 1 && <span style={{ color: 'var(--danger)', fontSize: '14px', fontWeight: 'bold' }}>(Blocked) [X]</span>}
                     </div>

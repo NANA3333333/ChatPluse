@@ -9,7 +9,8 @@
 
 const { getTokenCount } = require('./utils/tokenizer');
 const { getAdaptiveTailWindowSize } = require('./utils/contextWindow');
-const { getEmotionBehaviorGuidance } = require('./emotion');
+const { getEmotionFeelingGuidance, getPhysicalFeelingGuidance } = require('./emotion');
+const initSocialHousingDb = require('./plugins/socialHousing/db');
 const crypto = require('crypto');
 const { callLLM } = require('./llm');
 
@@ -232,6 +233,50 @@ function buildRecentPrivateRouteContext(db, character, maxItems = 6) {
         return ['[最近私聊窗口]', ...lines].join('\n');
     } catch (e) {
         console.warn('[ContextBuilder] Failed to build recent private route context:', e.message);
+        return '';
+    }
+}
+
+function buildBasePrivateContextWindow(db, character, userName = '用户') {
+    if (!db || typeof db.getVisibleMessages !== 'function' || !character?.id) return '';
+    try {
+        const privateLimit = Math.max(0, parseInt(character?.context_msg_limit ?? 60, 10) || 60);
+        if (privateLimit <= 0) return '';
+        const rows = db.getVisibleMessages(character.id, privateLimit) || [];
+        if (!Array.isArray(rows) || rows.length === 0) return '';
+
+        const lines = rows.map(row => {
+            let metadata = row?.metadata || null;
+            if (typeof metadata === 'string' && metadata.trim()) {
+                try { metadata = JSON.parse(metadata); } catch (e) { metadata = null; }
+            }
+            const source = metadata && typeof metadata === 'object'
+                ? String(metadata.source || metadata.origin || metadata.type || '').trim()
+                : '';
+            const isCityOutreach = ['city_outreach', 'city_private_outreach', 'city_to_chat', 'background_city_outreach'].includes(source);
+            const role = isCityOutreach
+                ? `${character.name}（商业街主动私聊）`
+                : row?.role === 'character'
+                    ? character.name
+                    : row?.role === 'system'
+                        ? '系统'
+                        : userName;
+            const content = String(row?.content || '').trim();
+            return content ? `${role}: ${content}` : '';
+        }).filter(Boolean);
+
+        if (lines.length === 0) return '';
+        return [
+            `====== [BASE PRIVATE CHAT WINDOW / R=${privateLimit}] ======`,
+            '[PRIVATE WINDOW RULES]',
+            '- 下面内容来自你和用户的最近私聊窗口，是所有场景都会参考的基础上下文。',
+            '- 它可以影响你对用户刚刚是否找过你、你们正在聊什么、你的情绪延续、商业街行动动机和对用户的回应。',
+            '- 如果当前任务不是直接回复私聊，不要把这里的内容机械复述成活动记录；只把它当作连续生活背景。',
+            ...lines,
+            '=========================================================='
+        ].join('\n');
+    } catch (e) {
+        console.warn('[ContextBuilder] Failed to build base private context window:', e.message);
         return '';
     }
 }
@@ -626,16 +671,82 @@ function buildTimeBehaviorGuidance(timeOfDay, isWeekend, character, isGroupConte
     return `${lines.join('\n')}\n`;
 }
 
-function buildCompactEmotionImpact(emotionGuidance, isGroupContext) {
+function buildCompactEmotionImpact(emotionGuidance) {
     let block = '';
-    block += `[主情绪]: ${emotionGuidance.emotion.label} ${emotionGuidance.emotion.emoji}\n`;
-    block += compactLine('私聊倾向', emotionGuidance.privateChat);
-    if (isGroupContext) {
-        block += compactLine('群聊倾向', emotionGuidance.groupChat);
-    } else if (['angry', 'hurt', 'jealous', 'tense'].includes(emotionGuidance.emotion.state)) {
-        block += '[强情绪边界]: 私聊回复仍要控制在 1-3 句内，不要连发或说半截。\n';
+    block += `[角色当前情绪（你自己，不是用户）]: ${emotionGuidance.emotion.label} ${emotionGuidance.emotion.emoji}\n`;
+    block += compactLine('角色当前情绪感受（你自己）', emotionGuidance.feeling);
+    block += '[状态使用方式]: 上面这些情绪只描述你自己此刻的身体和注意力感受，不是用户 Nana 的状态；不要把这些数值或状态说成用户身上的情况。\n';
+    return block;
+}
+
+function buildCompactPhysicalFeeling(physicalGuidance) {
+    let block = '';
+    block += `[角色当前生理状态（你自己，不是用户）]: ${physicalGuidance.physical.label} ${physicalGuidance.physical.emoji}\n`;
+    block += compactLine('角色当前生理感受（你自己）', physicalGuidance.feeling);
+    return block;
+}
+
+function ensureSocialHousingDb(db) {
+    if (!db) return null;
+    if (!db.socialHousing) {
+        const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : db;
+        db.socialHousing = initSocialHousingDb(rawDb);
+    }
+    return db.socialHousing;
+}
+
+function buildHousingContextBlock(db, character) {
+    let housingContext = null;
+    try {
+        housingContext = ensureSocialHousingDb(db)?.getHousingContextForCharacter?.(character.id) || null;
+    } catch (e) {
+        return '';
+    }
+    if (!housingContext?.binding) return '';
+    const binding = housingContext.binding;
+    const home = housingContext.housing;
+    const socialClass = housingContext.social_class;
+    const rent = Number(binding.rent_weekly || home?.weekly_rent || 0);
+    const dueAt = Number(binding.rent_due_at || 0);
+    const dueText = dueAt > 0 ? new Date(dueAt).toLocaleString('zh-CN') : '未设置';
+    const statusLabels = {
+        stable: '稳定居住',
+        temporary: '临时落脚',
+        unstable: '居住不稳',
+        overdue: '租金拖欠'
+    };
+    let block = '\n[住房与阶层]\n';
+    if (socialClass) {
+        block += `[社会阶层]: ${socialClass.emoji || ''}${socialClass.name || socialClass.id} - ${socialClass.description || ''}\n`;
+    }
+    if (home) {
+        block += `[当前住所]: ${home.emoji || ''}${home.name || home.id}\n`;
+        block += `[住所质感]: 舒适度${Number(home.comfort || 0)} / 体面感${Number(home.prestige || 0)} / 隐私感${Number(home.privacy || 0)}\n`;
+        if (home.description) block += compactLine('住所描述', home.description);
+    } else if (binding.housing_id) {
+        block += `[当前住所]: ${binding.housing_id}\n`;
+    }
+    block += `[居住状态]: ${statusLabels[String(binding.housing_status || 'stable')] || binding.housing_status || '稳定居住'}\n`;
+    if (rent > 0) block += `[房租压力]: 周租 ${rent} 金币；下次催租 ${dueText}；已拖欠 ${Number(binding.missed_rent_count || 0)} 次\n`;
+    if (binding.note) block += compactLine('住房备注', binding.note);
+    if (String(binding.housing_status || '') === 'overdue') {
+        block += '[租金拖欠感受]: 这件事压在心里，会带来现实压力、被催促感和不稳定感。\n';
     }
     return block;
+}
+
+function getHousingContextSourceParts(db, character) {
+    try {
+        const housingContext = ensureSocialHousingDb(db)?.getHousingContextForCharacter?.(character.id) || null;
+        if (!housingContext?.binding) return null;
+        return {
+            binding: housingContext.binding,
+            housing: housingContext.housing,
+            social_class: housingContext.social_class
+        };
+    } catch (e) {
+        return null;
+    }
 }
 
 function buildCitySceneChatGuidance(db, character, isGroupContext) {
@@ -733,7 +844,9 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     prompt += buildTimeBehaviorGuidance(timeOfDay, isWeekend, character, isGroupContext);
 
     const physicalCondition = getPhysicalCondition(character);
-    const emotionGuidance = getEmotionBehaviorGuidance(character);
+    const emotionGuidance = getEmotionFeelingGuidance(character);
+    const physicalGuidance = getPhysicalFeelingGuidance(character);
+    const housingSourceParts = getHousingContextSourceParts(db, character);
     let jealousyActive = false;
     try {
         const jeal = db.getJealousyState(character.id);
@@ -745,7 +858,7 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
         character.id,
         isGroupContext ? 'runtime_state_group' : 'runtime_state_private',
         {
-            template_version: 2,
+            template_version: 3,
             isGroupContext: !!isGroupContext,
             wallet: character.wallet ?? 0,
             calories: character.calories,
@@ -755,6 +868,8 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
             sleep_disruption: character.sleep_disruption ?? 0,
             physical_label: physicalCondition.label,
             physical_summary: physicalCondition.summary,
+            physical_state: physicalGuidance.physical.state,
+            physical_feeling: physicalGuidance.feeling,
             energy: character.energy,
             sleep_debt: character.sleep_debt,
             mood: character.mood,
@@ -766,61 +881,64 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
             emotion_state: emotionGuidance.emotion.state,
             emotion_label: emotionGuidance.emotion.label,
             emotion_emoji: emotionGuidance.emotion.emoji,
-            emotion_private: emotionGuidance.privateChat,
-            emotion_group: emotionGuidance.groupChat,
+            emotion_feeling: emotionGuidance.feeling,
             pressure_level: character.pressure_level || 0,
             jealousy_active: jealousyActive,
             city_reply_pending: character.city_reply_pending || 0,
             city_ignore_streak: character.city_ignore_streak || 0,
             city_post_ignore_reaction: character.city_post_ignore_reaction || 0,
             diary_password: character.diary_password || '',
+            housing_context: housingSourceParts,
             relationship_anchors: getRelationshipAnchorSourceParts(db, character, activeTargets)
         },
         () => {
             let block = '';
-            block += `[你的钱包余额]: ¥${character.wallet ?? 0}\n`;
+            block += '[角色状态边界提醒]: 以下“角色/你自己”状态块全部只描述你这个角色本人，不是用户 Nana。除非用户明确说的是她自己，否则不要把这些钱包、饥饿、困倦、精力、情绪、压力数值复述成用户的状态。\n';
+            block += `[角色钱包余额（你自己）]: ¥${character.wallet ?? 0}\n`;
             if (character.calories !== undefined) {
                 const calPercent = Math.round((character.calories / 4000) * 100);
-                block += `[你的体力状况]: ${character.calories}/4000 (${calPercent}%)\n`;
+                block += `[角色体力状况（你自己）]: ${character.calories}/4000 (${calPercent}%)\n`;
             }
             if (character.location) {
                 const currentDistrict = db.city?.getDistrict ? db.city.getDistrict(character.location) : null;
                 const locationLabel = currentDistrict
                     ? `${currentDistrict.emoji || ''}${currentDistrict.name || currentDistrict.id || character.location}`.trim()
                     : character.location;
-                block += `[你的当前位置]: ${locationLabel}\n`;
+                block += `[角色当前位置（你自己）]: ${locationLabel}\n`;
             }
             if (character.city_status && character.city_status !== 'idle') {
                 const statusLabels = { hungry: '饥饿', working: '工作中', sleeping: '休息中', eating: '进食中', medical: '治疗中', coma: '晕倒' };
-                block += `[你的当前行动状态]: ${statusLabels[character.city_status] || character.city_status}\n`;
+                block += `[角色当前行动状态（你自己）]: ${statusLabels[character.city_status] || character.city_status}\n`;
             }
-            block += `[你的综合身体状态等级]: ${physicalCondition.label}\n`;
+            block += `[角色综合身体状态等级（你自己）]: ${physicalCondition.label}\n`;
             block += `[综合身体状态后果]: ${physicalCondition.summary}\n`;
+            block += buildCompactPhysicalFeeling(physicalGuidance);
             block += buildCitySceneChatGuidance(db, character, isGroupContext);
             if (character.energy !== undefined) {
-                block += `[你的精力]: ${character.energy}/100\n`;
+                block += `[角色精力（你自己）]: ${character.energy}/100\n`;
                 block += compactLine('精力影响', getEnergyHint(character.energy));
             }
             if (character.sleep_debt !== undefined) {
-                block += `[你的睡眠债]: ${character.sleep_debt}/100\n`;
+                block += `[角色睡眠债（你自己）]: ${character.sleep_debt}/100\n`;
                 block += compactLine('睡眠影响', getSleepDebtHint(character.sleep_debt));
             }
-            if (character.mood !== undefined) block += `[你当前的整体心情]: ${character.mood}/100\n`;
-            if (character.stress !== undefined) block += `[你当前的现实压力]: ${character.stress}/100\n`;
-            if (character.social_need !== undefined) block += `[你当前的社交需求]: ${character.social_need}/100\n`;
+            if (character.mood !== undefined) block += `[角色当前整体心情（你自己）]: ${character.mood}/100\n`;
+            if (character.stress !== undefined) block += `[角色当前现实压力（你自己）]: ${character.stress}/100\n`;
+            if (character.social_need !== undefined) block += `[角色当前社交需求（你自己）]: ${character.social_need}/100\n`;
             if (character.health !== undefined) {
-                block += `[你的身体健康度]: ${character.health}/100\n`;
+                block += `[角色身体健康度（你自己）]: ${character.health}/100\n`;
                 block += compactLine('健康影响', getHealthHint(character.health));
             }
             if (character.satiety !== undefined) {
-                block += `[你的饱腹感]: ${character.satiety}/100\n`;
+                block += `[角色饱腹感（你自己）]: ${character.satiety}/100\n`;
                 block += compactLine('饱腹影响', getSatietyHint(character.satiety));
             }
             if (character.stomach_load !== undefined) {
-                block += `[你的胃负担]: ${character.stomach_load}/100\n`;
+                block += `[角色胃负担（你自己）]: ${character.stomach_load}/100\n`;
                 block += compactLine('胃负担影响', getStomachLoadHint(character.stomach_load));
             }
-            block += buildCompactEmotionImpact(emotionGuidance, isGroupContext);
+            block += buildHousingContextBlock(db, character);
+            block += buildCompactEmotionImpact(emotionGuidance);
             block += compactLine('压力影响', getPressureHint(character.pressure_level || 0));
             if (jealousyActive) {
                 block += '[嫉妒状态]: 强烈嫉妒已激活；语气可更尖锐、委屈、试探、索要独占关注。\n';
@@ -850,6 +968,17 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     prompt += stateContextBlock;
 
     breakdown.base = getDelta(startLen);
+    startLen = prompt.length;
+
+    try {
+        const basePrivateWindow = buildBasePrivateContextWindow(db, character, userName);
+        if (basePrivateWindow) {
+            prompt += `\n${basePrivateWindow}\n`;
+        }
+    } catch (e) {
+        console.error('[ContextBuilder] Base private context error:', e.message);
+    }
+    breakdown.cross_private = getDelta(startLen);
     startLen = prompt.length;
 
     // 6. Moments (朋友圈) Context
@@ -932,11 +1061,6 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
             }
         } catch (e) { console.error('[ContextBuilder] Private injection for Group error:', e.message); }
     } else {
-        // Current private thread is already counted by X-context in context-stats.
-        // Avoid injecting the same private history again here.
-        breakdown.cross_private = 0;
-        startLen = prompt.length;
-
         try {
             const normalizedRecentInput = String(recentInput || '').trim();
             const userAskedAboutGroup = /群聊|群里|在群|群消息|群里说|在群里说|拉群|那个群|群成员|大家/.test(normalizedRecentInput);

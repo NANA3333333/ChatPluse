@@ -2,6 +2,7 @@
 import { X, Trash2, Settings, RefreshCw } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
+import { deriveEmotion, derivePhysicalState } from '../utils/emotion';
 
 function parseJsonSafely(value, fallback = null) {
     if (value == null || value === '') return fallback;
@@ -57,6 +58,8 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
     };
+    const currentEmotion = contact ? deriveEmotion(contact) : null;
+    const currentPhysical = contact ? derivePhysicalState(contact) : null;
 
     useEffect(() => {
         if (!contact) return;
@@ -518,20 +521,6 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                             {contact.is_blocked ? (lang === 'en' ? 'Blocked You' : '已拉黑') : (lang === 'en' ? 'Active' : '正常')}
                         </span>
                     </div>
-                    <div style={{ display: 'flex', gap: '8px', marginTop: '14px', paddingTop: '12px', borderTop: '1px dashed #eee' }}>
-                        <div style={{ flex: 1, textAlign: 'center', padding: '8px 4px', borderRadius: '8px', background: '#e3f2fd' }}>
-                            <div style={{ fontSize: '18px', fontWeight: '700', color: '#1565c0' }}>{contact.stat_int ?? 50}</div>
-                            <div style={{ fontSize: '10px', color: '#1976d2', marginTop: '2px' }}>🧠 {lang === 'en' ? 'INT' : '智力'}</div>
-                        </div>
-                        <div style={{ flex: 1, textAlign: 'center', padding: '8px 4px', borderRadius: '8px', background: '#e8f5e9' }}>
-                            <div style={{ fontSize: '18px', fontWeight: '700', color: '#2e7d32' }}>{contact.stat_sta ?? 50}</div>
-                            <div style={{ fontSize: '10px', color: '#388e3c', marginTop: '2px' }}>💪 {lang === 'en' ? 'STA' : '体力'}</div>
-                        </div>
-                        <div style={{ flex: 1, textAlign: 'center', padding: '8px 4px', borderRadius: '8px', background: '#fce4ec' }}>
-                            <div style={{ fontSize: '18px', fontWeight: '700', color: '#c62828' }}>{contact.stat_cha ?? 50}</div>
-                            <div style={{ fontSize: '10px', color: '#d32f2f', marginTop: '2px' }}>✨ {lang === 'en' ? 'CHA' : '魅力'}</div>
-                        </div>
-                    </div>
                 </div>
 
                 <div style={{ marginTop: '10px', backgroundColor: '#fff', padding: '15px', borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
@@ -807,6 +796,33 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                 <div style={{ marginTop: '10px', backgroundColor: '#fff', padding: '15px', borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
                         <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#333' }}>
+                            {lang === 'en' ? 'Current Live State' : '当前实时状态'}
+                        </div>
+                    </div>
+                    <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px', lineHeight: '1.5' }}>
+                        {lang === 'en'
+                            ? 'This is the emotion and physical state currently in effect for the character.'
+                            : '这里显示的是角色此刻真正生效的实时情绪和生理状态，不是历史日志。'}
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '14px' }}>
+                            <span>{lang === 'en' ? 'Emotion' : '情绪'}</span>
+                            <span style={{ fontWeight: '600', color: currentEmotion?.color || '#333' }}>
+                                {currentEmotion ? `${currentEmotion.emoji} ${currentEmotion.label}` : '-'}
+                            </span>
+                        </div>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: '14px' }}>
+                            <span>{lang === 'en' ? 'Physical' : '生理状态'}</span>
+                            <span style={{ fontWeight: '600', color: currentPhysical?.color || '#333' }}>
+                                {currentPhysical ? `${currentPhysical.emoji} ${currentPhysical.label}` : '-'}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <div style={{ marginTop: '10px', backgroundColor: '#fff', padding: '15px', borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                        <div style={{ fontSize: '13px', fontWeight: 'bold', color: '#333' }}>
                             {lang === 'en' ? 'Emotion Change Log' : '情绪变化日志'}
                         </div>
                         <div style={{ fontSize: '11px', color: '#999' }}>
@@ -816,7 +832,7 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                     <div style={{ fontSize: '12px', color: '#666', marginBottom: '10px', lineHeight: '1.5' }}>
                         {lang === 'en'
                             ? 'Shows when emotion state changed, what caused it, and which hidden values moved.'
-                            : '这里会记录情绪什么时候变化、为什么变化，以及背后的隐藏数值是怎么变的。'}
+                            : '这里记录的是情绪变化历史；如果上面实时状态变了但这里没新增，通常说明这次只是重复声明了同一种情绪。'}
                     </div>
                     {emotionLogs.length === 0 ? (
                         <div style={{ fontSize: '12px', color: '#999', textAlign: 'center', padding: '10px 0', background: '#f8f9fa', borderRadius: '6px' }}>

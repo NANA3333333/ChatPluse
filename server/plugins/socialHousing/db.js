@@ -88,11 +88,19 @@ module.exports = function initSocialHousingDb(db) {
             housing_status TEXT DEFAULT 'stable',
             rent_weekly REAL DEFAULT 0,
             rent_due_day INTEGER DEFAULT 7,
+            rent_due_at INTEGER DEFAULT 0,
+            rent_last_paid_at INTEGER DEFAULT 0,
+            deposit_paid REAL DEFAULT 0,
+            missed_rent_count INTEGER DEFAULT 0,
             note TEXT DEFAULT '',
             updated_at INTEGER DEFAULT 0,
             FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE
         );
     `);
+    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN rent_due_at INTEGER DEFAULT 0;"); } catch (e) { }
+    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN rent_last_paid_at INTEGER DEFAULT 0;"); } catch (e) { }
+    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN deposit_paid REAL DEFAULT 0;"); } catch (e) { }
+    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN missed_rent_count INTEGER DEFAULT 0;"); } catch (e) { }
 
     db.exec(`
         CREATE TABLE IF NOT EXISTS social_housing_agency (
@@ -273,6 +281,19 @@ module.exports = function initSocialHousingDb(db) {
     }
 
     repairSeedData();
+    try {
+        db.prepare(`
+            UPDATE social_housing_bindings
+            SET rent_weekly = COALESCE(NULLIF(rent_weekly, 0), (
+                    SELECT weekly_rent FROM social_housing_homes WHERE social_housing_homes.id = social_housing_bindings.housing_id
+                )),
+                rent_due_at = CASE
+                    WHEN COALESCE(rent_due_at, 0) <= 0 AND housing_id != '' THEN ?
+                    ELSE rent_due_at
+                END
+            WHERE housing_id != ''
+        `).run(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    } catch (e) { }
 
     function getClasses() {
         return db.prepare('SELECT * FROM social_housing_classes ORDER BY sort_order ASC, name ASC').all().map((row) => ({
@@ -345,26 +366,63 @@ module.exports = function initSocialHousingDb(db) {
         db.prepare("UPDATE social_housing_bindings SET housing_id = '' WHERE housing_id = ?").run(id);
     }
 
+    function getHousingById(id) {
+        if (!id) return null;
+        const row = db.prepare('SELECT * FROM social_housing_homes WHERE id = ?').get(String(id));
+        if (!row) return null;
+        return {
+            ...row,
+            weekly_rent: Number(row.weekly_rent || 0),
+            deposit: Number(row.deposit || 0),
+            sale_price: Number(row.sale_price || 0)
+        };
+    }
+
+    function normalizeRentDueAt(payload = {}, current = null, home = null) {
+        const explicit = Number(payload.rent_due_at || 0);
+        if (explicit > 0) return explicit;
+        const existingDueAt = Number(current?.rent_due_at || 0);
+        const housingChanged = String(payload.housing_id || '') !== String(current?.housing_id || '');
+        if (existingDueAt > 0 && !housingChanged) return existingDueAt;
+        const dueDays = Math.max(1, Math.min(30, Number(payload.rent_due_day || current?.rent_due_day || 7)));
+        return Date.now() + dueDays * 24 * 60 * 60 * 1000;
+    }
+
     function saveBinding(characterId, payload) {
+        const current = db.prepare('SELECT * FROM social_housing_bindings WHERE character_id = ?').get(characterId) || null;
+        const nextHousingId = String(payload.housing_id || '').trim();
+        const home = getHousingById(nextHousingId);
+        const rentWeekly = Number(payload.rent_weekly || 0) || Number(home?.weekly_rent || 0);
+        const depositPaid = Number(payload.deposit_paid ?? current?.deposit_paid ?? 0) || 0;
+        const nextDueAt = normalizeRentDueAt(payload, current, home);
+        const housingChanged = String(nextHousingId || '') !== String(current?.housing_id || '');
         db.prepare(`
             INSERT INTO social_housing_bindings
-            (character_id, social_class_id, housing_id, housing_status, rent_weekly, rent_due_day, note, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (character_id, social_class_id, housing_id, housing_status, rent_weekly, rent_due_day, rent_due_at, rent_last_paid_at, deposit_paid, missed_rent_count, note, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(character_id) DO UPDATE SET
                 social_class_id=excluded.social_class_id,
                 housing_id=excluded.housing_id,
                 housing_status=excluded.housing_status,
                 rent_weekly=excluded.rent_weekly,
                 rent_due_day=excluded.rent_due_day,
+                rent_due_at=excluded.rent_due_at,
+                rent_last_paid_at=excluded.rent_last_paid_at,
+                deposit_paid=excluded.deposit_paid,
+                missed_rent_count=excluded.missed_rent_count,
                 note=excluded.note,
                 updated_at=excluded.updated_at
         `).run(
             characterId,
             String(payload.social_class_id || '').trim(),
-            String(payload.housing_id || '').trim(),
-            String(payload.housing_status || 'stable').trim() || 'stable',
-            Number(payload.rent_weekly || 0),
+            nextHousingId,
+            String(payload.housing_status || (housingChanged ? 'stable' : current?.housing_status) || 'stable').trim() || 'stable',
+            rentWeekly,
             Number(payload.rent_due_day || 7),
+            nextDueAt,
+            Number(payload.rent_last_paid_at ?? current?.rent_last_paid_at ?? 0) || 0,
+            depositPaid,
+            Number(payload.missed_rent_count ?? (housingChanged ? 0 : current?.missed_rent_count) ?? 0) || 0,
             String(payload.note || '').trim(),
             Date.now()
         );
@@ -372,6 +430,11 @@ module.exports = function initSocialHousingDb(db) {
 
     function getBindings() {
         return db.prepare('SELECT * FROM social_housing_bindings').all();
+    }
+
+    function getBinding(characterId) {
+        const row = db.prepare('SELECT * FROM social_housing_bindings WHERE character_id = ?').get(characterId);
+        return row || null;
     }
 
     function getCharactersWithBindings(getCharacters) {
@@ -397,6 +460,10 @@ module.exports = function initSocialHousingDb(db) {
                     ...binding,
                     rent_weekly: Number(binding.rent_weekly || 0),
                     rent_due_day: Number(binding.rent_due_day || 7),
+                    rent_due_at: Number(binding.rent_due_at || 0),
+                    rent_last_paid_at: Number(binding.rent_last_paid_at || 0),
+                    deposit_paid: Number(binding.deposit_paid || 0),
+                    missed_rent_count: Number(binding.missed_rent_count || 0),
                     social_class: socialClass,
                     housing
                 } : null
@@ -510,15 +577,85 @@ module.exports = function initSocialHousingDb(db) {
         db.prepare('DELETE FROM social_housing_ads WHERE id = ?').run(Number(id));
     }
 
+    function getHousingContextForCharacter(characterId) {
+        const binding = getBinding(characterId);
+        if (!binding) return null;
+        const home = binding.housing_id ? getHousingById(binding.housing_id) : null;
+        const socialClass = binding.social_class_id
+            ? db.prepare('SELECT * FROM social_housing_classes WHERE id = ?').get(binding.social_class_id)
+            : null;
+        return {
+            binding: {
+                ...binding,
+                rent_weekly: Number(binding.rent_weekly || 0),
+                rent_due_day: Number(binding.rent_due_day || 7),
+                rent_due_at: Number(binding.rent_due_at || 0),
+                rent_last_paid_at: Number(binding.rent_last_paid_at || 0),
+                deposit_paid: Number(binding.deposit_paid || 0),
+                missed_rent_count: Number(binding.missed_rent_count || 0)
+            },
+            housing: home,
+            social_class: socialClass
+        };
+    }
+
+    function markRentPaid(characterId, paidAt = Date.now()) {
+        const binding = getBinding(characterId);
+        if (!binding) return null;
+        const dueDays = Math.max(1, Math.min(30, Number(binding.rent_due_day || 7)));
+        db.prepare(`
+            UPDATE social_housing_bindings
+            SET housing_status = 'stable',
+                rent_last_paid_at = ?,
+                rent_due_at = ?,
+                missed_rent_count = 0,
+                updated_at = ?
+            WHERE character_id = ?
+        `).run(paidAt, paidAt + dueDays * 24 * 60 * 60 * 1000, Date.now(), characterId);
+        return getBinding(characterId);
+    }
+
+    function markRentOverdue(characterId, retryAt = Date.now() + 24 * 60 * 60 * 1000) {
+        const binding = getBinding(characterId);
+        if (!binding) return null;
+        db.prepare(`
+            UPDATE social_housing_bindings
+            SET housing_status = 'overdue',
+                rent_due_at = ?,
+                missed_rent_count = missed_rent_count + 1,
+                updated_at = ?
+            WHERE character_id = ?
+        `).run(retryAt, Date.now(), characterId);
+        return getBinding(characterId);
+    }
+
+    function getDueRentBindings(now = Date.now()) {
+        return db.prepare(`
+            SELECT b.*, h.name AS housing_name, h.emoji AS housing_emoji, h.weekly_rent AS home_weekly_rent
+            FROM social_housing_bindings b
+            LEFT JOIN social_housing_homes h ON h.id = b.housing_id
+            WHERE b.housing_id != ''
+              AND COALESCE(b.rent_weekly, h.weekly_rent, 0) > 0
+              AND COALESCE(b.rent_due_at, 0) > 0
+              AND b.rent_due_at <= ?
+        `).all(now);
+    }
+
     return {
         getClasses,
         getHousingTiers,
+        getHousingById,
         upsertClass,
         upsertHousing,
         deleteClass,
         deleteHousing,
         saveBinding,
+        getBinding,
         getCharactersWithBindings,
+        getHousingContextForCharacter,
+        markRentPaid,
+        markRentOverdue,
+        getDueRentBindings,
         getAgencyConfig,
         saveAgencyConfig,
         addAgencyAd,

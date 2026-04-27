@@ -11,6 +11,10 @@ $clientOut = Join-Path $root 'client-live.out.log'
 $clientErr = Join-Path $root 'client-live.err.log'
 $qdrantOut = Join-Path $root 'qdrant-live.out.log'
 $qdrantErr = Join-Path $root 'qdrant-live.err.log'
+$bundledNode = Join-Path $runtimeDir 'node20\node.exe'
+$bundledNpm = Join-Path $runtimeDir 'node20\npm.cmd'
+$nodeExe = if (Test-Path $bundledNode) { $bundledNode } else { 'node' }
+$npmCmd = if (Test-Path $bundledNpm) { $bundledNpm } else { 'npm.cmd' }
 $dockerComposeFile = Join-Path $root 'docker-compose.yml'
 $localQdrantExe = Join-Path $root 'tools\qdrant\current\qdrant.exe'
 $localQdrantConfig = Join-Path $root 'config\qdrant.yaml'
@@ -138,7 +142,7 @@ $qdrantReady = Start-Qdrant
 
 Write-Host '[stack] starting backend on http://localhost:8000'
 $serverProc = if ($qdrantReady) {
-    Start-Process -FilePath node `
+    Start-Process -FilePath $nodeExe `
         -ArgumentList 'index.js' `
         -WorkingDirectory (Join-Path $root 'server') `
         -RedirectStandardOutput $serverOut `
@@ -146,8 +150,9 @@ $serverProc = if ($qdrantReady) {
         -WindowStyle Hidden `
         -PassThru
 } else {
+    $nodeCmd = '"' + $nodeExe + '" index.js'
     Start-Process -FilePath cmd.exe `
-        -ArgumentList @('/c', 'set QDRANT_ENABLED=0&& node index.js') `
+        -ArgumentList @('/c', "set QDRANT_ENABLED=0&& $nodeCmd") `
         -WorkingDirectory (Join-Path $root 'server') `
         -RedirectStandardOutput $serverOut `
         -RedirectStandardError $serverErr `
@@ -163,7 +168,7 @@ if (-not (Wait-ForHttp 'http://localhost:8000' 20)) {
 }
 
 Write-Host '[stack] starting frontend on http://localhost:5173'
-$clientProc = Start-Process -FilePath npm.cmd `
+$clientProc = Start-Process -FilePath $npmCmd `
     -ArgumentList @('run', 'dev', '--', '--host', '127.0.0.1', '--port', '5173', '--strictPort') `
     -WorkingDirectory (Join-Path $root 'client') `
     -RedirectStandardOutput $clientOut `

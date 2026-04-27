@@ -1726,31 +1726,6 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             </label>
                         </div>
 
-                        {/* Base Stats Panel */}
-                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginTop: '10px', padding: '10px', background: '#f0f4f8', borderRadius: '4px', border: '1px solid #dce4ec' }}>
-                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响工作收益和学习效率">
-                                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span>🧠 {t('Intelligence', '智力（决定打工赚钱多少）')}</span>
-                                    <span style={{ fontWeight: '600', color: '#2196f3' }}>{editingContact.stat_int ?? 50}</span>
-                                </span>
-                                <input type="range" min="0" max="100" value={editingContact.stat_int ?? 50} onChange={(e) => setEditingContact({ ...editingContact, stat_int: parseInt(e.target.value) || 50 })} style={{ width: '100%' }} />
-                            </label>
-                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响体力上限和抗饥饿能力">
-                                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span>💪 {t('Stamina', '体力（越高越不容易饥饿）')}</span>
-                                    <span style={{ fontWeight: '600', color: '#4caf50' }}>{editingContact.stat_sta ?? 50}</span>
-                                </span>
-                                <input type="range" min="0" max="100" value={editingContact.stat_sta ?? 50} onChange={(e) => setEditingContact({ ...editingContact, stat_sta: parseInt(e.target.value) || 50 })} style={{ width: '100%' }} />
-                            </label>
-                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '13px', color: '#444' }} title="影响社交好感度加成">
-                                <span style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-                                    <span>✨ {t('Charm', '魅力（影响社交互动效果）')}</span>
-                                    <span style={{ fontWeight: '600', color: '#e91e63' }}>{editingContact.stat_cha ?? 50}</span>
-                                </span>
-                                <input type="range" min="0" max="100" value={editingContact.stat_cha ?? 50} onChange={(e) => setEditingContact({ ...editingContact, stat_cha: parseInt(e.target.value) || 50 })} style={{ width: '100%' }} />
-                            </label>
-                        </div>
-
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px', padding: '10px', background: '#f5f7fa', borderRadius: '4px', border: '1px solid #e2e8f0' }}>
                             <strong style={{ fontSize: '13px', color: '#4a5568' }}>Memory Extraction AI (Small Model)</strong>
                             <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>

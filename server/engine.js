@@ -16,6 +16,8 @@ function getDefaultGuidelines() {
     return `Guidelines:
 1. Stay fully in persona. Mobile chat only. Keep replies short, casual, conversational. Never act like an AI assistant.
 2. Treat body state, hunger, fatigue, work, money pressure, city/life activities, and scene context as in-world reality, never as backend/UI/log/prompt mechanics. If the user uses meta words like token/cache/prompt/AI/system/backend/testing, reinterpret them inside the relationship and scene.
+2.5. Any system-provided runtime state block about wallet, hunger, fatigue, sleep debt, current emotion, physical condition, location, or pressure describes YOU the character, not the user Nana. Never mirror those values back as if they belong to Nana unless Nana explicitly says they are hers.
+2.6. In chat history, role=assistant means things YOU the character previously said. role=user means things Nana said. Never treat assistant history as if it were a new user message.
 3. Mention time-of-day or what you are doing only when it fits. Vary response moves; do not lock into one habitual opener, pacing, or emotional pattern.
 3.5. Current time-of-day outranks conversational inertia. If it is daytime / morning / noon / afternoon, do not keep talking as if it were late-night by habit, and do not casually urge the user to sleep unless the live scene clearly supports it.
 4. Output rule: never output only tags. Always include at least one sentence of dialogue.
@@ -26,11 +28,14 @@ function getDefaultGuidelines() {
    - diary: [DIARY:text] only for a meaningful new thought; [DIARY_PASSWORD:value] only if you willingly reveal it; if user sincerely asks to read it, output [UNLOCK_DIARY]
    - relationship: [AFFINITY:+N/-N] [CHAR_AFFINITY:characterId:+N/-N]
    - state: [PRESSURE:0] [MOOD_DELTA:+N/-N] [PRESSURE_DELTA:+N/-N]
-   - emotion: optional [EMOTION_REASON:short text]; if the reply itself clearly sounds jealous|hurt|angry|lonely|happy|sad|tense|sleepy|unwell|calm, output exactly one [EMOTION_STATE:value] in the same reply
+   - emotion: optional [EMOTION_REASON:short text]; if the reply itself clearly sounds jealous|hurt|angry|lonely|happy|sad|cautious|guarded|shy|hopeful|playful|disappointed|relieved|affectionate|reassured|yearning|flustered|guilty|frustrated|wistful|proud|secure|tender|helpless|tense|calm, output exactly one [EMOTION_STATE:value] in the same reply
+   - emotion whitelist: when you output [EMOTION_STATE:value], value MUST be chosen from exactly this library and nothing else: jealous, hurt, angry, lonely, happy, sad, cautious, guarded, shy, hopeful, playful, disappointed, relieved, affectionate, reassured, yearning, flustered, guilty, frustrated, wistful, proud, secure, tender, helpless, tense, calm
+   - never invent a new emotion word, synonym, translation variant, or nuanced label outside the library. If none fits well enough, omit [EMOTION_STATE] instead of improvising
    - city: prefer [CITY_ACTION:{"district_id":"","district_type":"","log":"","chat":"","moment":"","diary":""}] for any private-chat-triggered commercial-street action signal
    - city: [CITY_INTENT:...] is legacy compatibility only; if you use it, write only an explicit district id/name/type signal such as home / restaurant / convenience / factory / school / hospital / park / mall / casino / street / hacker_space / rest / food / work / education / medical / leisure / shopping / gambling / wander, never a full sentence
 6. Emotion judgement:
    - Prefer the emotion that dominates this exact reply, not the prettiest one.
+   - Choose from the whitelist above, not from freeform wording in your head.
    - Jealousy is not automatic. For low-affinity or distant bonds, rival attention usually reads as indifference, annoyance, competitiveness, or bruised ego.
    - If the live context shows a messy bond (recent intimacy, conflict, reconciliation, strong attraction, active tug-of-war), that overrides raw affinity and jealousy may appear as hurt, bitter attachment, bruised pride, or "I care too much and hate that I care."
    - If the reply is obviously酸/抢注意力, use jealous. If it is明显委屈/试探/索要安抚, use hurt. If it is带刺/发火/顶嘴, use angry. If the words say "没事" but the tone is still酸、别扭、在意 rival, prefer jealous over happy.
@@ -41,6 +46,9 @@ function getDefaultGuidelines() {
    - Do not default to home/rest unless the reply clearly means sleeping, staying in bed, lying down, or going home to rest.
 8. User-intent rule:
    - The newest explicit user wording outranks older context.
+   - This chat is not guaranteed to alternate in strict turn order. There may be multiple assistant messages in a row after one user message. Those assistant lines are still things you previously said, not fresh user input.
+   - Anchor on the most recent actual user message. Treat later assistant lines as your own prior replies, drafts, continuations, or self-followups unless a newer user message explicitly appears.
+   - Do not accuse the user of "copying your words" or "repeating what you said" unless the newest actual user message explicitly contains that repeated wording.
    - If the newest message contains a concrete action/correction like "给我50 / 还我 / 转我 / 别去 / 现在去 / 不要 / 不是这个意思", interpret that literal action first; use older context only to explain, not to flip the direction.
    - If the user is correcting your tone/intent interpretation, repair first instead of defending the older reading.
    - Distinguish current shared chat context from retrieved history. Things returned by memory/date recall are reference facts, not proof that the user has already reintroduced that topic into the live conversation.
@@ -212,7 +220,11 @@ function buildRagPlannerMessages({ recentHistory = [], latestUserMessage = '', c
 
     const messages = [{ role: 'system', content: systemParts.join('\n') }];
     if (history.length > 0) messages.push(...history);
-    if (latestUser) messages.push({ role: 'user', content: latestUser });
+    const lastHistoryMessage = history.length > 0 ? history[history.length - 1] : null;
+    const latestAlreadyInHistory = !!latestUser
+        && lastHistoryMessage?.role === 'user'
+        && String(lastHistoryMessage.content || '').trim() === latestUser;
+    if (latestUser && !latestAlreadyInHistory) messages.push({ role: 'user', content: latestUser });
     return messages;
 }
 
@@ -687,7 +699,6 @@ function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', 
     const topicList = Array.isArray(plannerTopics)
         ? plannerTopics.map(topic => String(topic || '').trim()).filter(Boolean)
         : [];
-    const combined = `${String(retrievalLabel || '')}\n${String(latestUserMessage || '')}\n${topicList.join('\n')}`;
     const requiredFocuses = new Set();
     const requiredQueries = new Set();
     const requiredTiers = new Set(['core', 'active']);
@@ -710,16 +721,6 @@ function deriveRagRewriteConstraints({ plannerTopics = [], retrievalLabel = '', 
                 if (normalized && requiredQueries.size < 8) requiredQueries.add(normalized);
             });
         }
-    }
-
-    if (/(个人信息|用户信息|背景|学习|学历|学校|专业|年级|研究方向|本科|身份|偏好|习惯)/.test(combined)) {
-        requiredFocuses.add('user_profile');
-    }
-    if (/(工作|实习|求职|项目|offer|入职|职业|公司|薪资|面试|经历|近况|当前|最近)/.test(combined)) {
-        requiredFocuses.add('user_current_arc');
-    }
-    if (/(关系|怎么看我|记得我|在意我|喜欢我|爱我|陪我|对我|比较|对比|别的ai|其他ai|gemini|claude|更好|不如|移情别恋)/i.test(combined)) {
-        requiredFocuses.add('relationship');
     }
 
     topicList.forEach(topic => {
@@ -760,9 +761,6 @@ function enforceStructuredRagQueryConstraints(request, constraints = {}) {
             ...(mergedFocuses.length > 0 ? { memory_focus: mergedFocuses } : {}),
             ...(mergedTiers.length > 0 ? { memory_tier: mergedTiers } : {})
         },
-        ...(normalizedRequest?.temporal_hint && typeof normalizedRequest.temporal_hint === 'object'
-            ? { temporal_hint: normalizedRequest.temporal_hint }
-            : {}),
         limit: Math.max(1, Math.min(20, Number(normalizedRequest.limit || 5) || 5))
     };
 }
@@ -771,29 +769,20 @@ function buildSlotQueries(seedQueries = [], fallbackQueries = []) {
     return Array.from(new Set([
         ...seedQueries.map(v => String(v || '').trim()).filter(Boolean),
         ...fallbackQueries.map(v => String(v || '').trim()).filter(Boolean)
-    ])).slice(0, 4);
+    ])).slice(0, 6);
 }
 
 function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retrievalLabel = '', latestUserMessage = '', decisionPlan = null } = {}) {
-    const topicList = Array.isArray(plannerTopics)
-        ? plannerTopics.map(topic => String(topic || '').trim()).filter(Boolean)
-        : [];
     const baseQueries = Array.isArray(retrievalRequest?.queries)
         ? retrievalRequest.queries.map(query => String(query || '').trim()).filter(Boolean)
         : [];
-    const combined = [
-        String(retrievalLabel || ''),
-        String(latestUserMessage || ''),
-        ...topicList,
-        ...baseQueries
-    ].join('\n');
 
     const slots = [];
     const addSlot = (slot) => {
         if (!slot || !Array.isArray(slot.queries) || slot.queries.length === 0) return;
         slots.push({
             name: String(slot.name || `slot_${slots.length + 1}`),
-            queries: slot.queries.slice(0, 4),
+            queries: slot.queries.slice(0, 6),
             filters: slot.filters || {},
             temporal_hint: slot.temporal_hint || retrievalRequest?.temporal_hint || {},
             limit: Math.max(1, Math.min(12, Number(slot.limit || 4) || 4))
@@ -822,116 +811,18 @@ function deriveRagRetrievalSlots({ retrievalRequest, plannerTopics = [], retriev
         }
     }
 
-    const profileSignals = /(用户信息|个人信息|背景|姓名|年龄|身份|学校|学历|专业|年级|称呼|城市|家庭|经历|性格|基本情况)/;
-    const lifeArcSignals = /(工作|职业|实习|公司|项目|求职|offer|入职|工作内容|方向|学习|学业|课程|创业|近况|最近|现状|进展|计划|目标|健康|状态|困扰|压力)/;
-    const preferenceSignals = /(爱好|偏好|兴趣|喜欢|习惯|日常|生活方式|娱乐|消遣|看什么|玩什么|饮食|作息|特别在意)/;
-    const relationshipSignals = /(关系|在乎|喜欢我|怎么看我|吃醋|试探|情感|互相|对我|亲密|冲突|和好|承诺|信任|安抚|表白|比较|对比|别的ai|其他ai|gemini|claude|更好|不如|移情别恋)/i;
-
-    if (profileSignals.test(combined)) {
-        addSlot({
-            name: 'profile',
-            queries: buildSlotQueries(
-                baseQueries.filter(query => profileSignals.test(query)),
-                ['用户姓名和基本身份信息', '用户背景与稳定个人信息']
-            ),
-            filters: {
-                memory_focus: ['user_profile'],
-                memory_tier: ['core', 'active']
-            },
-            limit: 6
-        });
-    }
-
-    if (lifeArcSignals.test(combined)) {
-        addSlot({
-            name: 'life_arc',
-            queries: buildSlotQueries(
-                baseQueries.filter(query => lifeArcSignals.test(query)),
-                ['用户当前生活主线与近期进展', '用户当前在处理的学习工作或其他现实事务']
-            ),
-            filters: {
-                memory_focus: ['user_current_arc', 'user_profile'],
-                memory_tier: ['core', 'active']
-            },
-            limit: 8
-        });
-    }
-
-    if (preferenceSignals.test(combined)) {
-        addSlot({
-            name: 'preference',
-            queries: buildSlotQueries(
-                baseQueries.filter(query => preferenceSignals.test(query)),
-                ['用户兴趣爱好与偏好', '用户平时生活方式与在意的事']
-            ),
-            filters: {
-                memory_focus: ['user_profile', 'user_current_arc'],
-                memory_tier: ['core', 'active', 'ambient']
-            },
-            limit: 4
-        });
-    }
-
-    if (relationshipSignals.test(combined)) {
-        addSlot({
-            name: 'relationship',
-            queries: buildSlotQueries(
-                baseQueries.filter(query => relationshipSignals.test(query)),
-                ['用户与我的关系定位', '用户与我的情感互动记录']
-            ),
-            filters: {
-                memory_focus: ['relationship'],
-                memory_tier: ['core', 'active', 'ambient']
-            },
-            limit: 4
-        });
-    }
-
-    if (slots.length === 0) {
-        addSlot({
-            name: 'general',
-            queries: buildSlotQueries(baseQueries, [retrievalLabel || latestUserMessage || '用户近况']),
-            filters: retrievalRequest?.filters || {},
-            temporal_hint: retrievalRequest?.temporal_hint || {},
-            limit: Math.max(1, Math.min(12, Number(retrievalRequest?.limit || 5) || 5))
-        });
-    }
+    addSlot({
+        name: 'general',
+        queries: buildSlotQueries(baseQueries, [retrievalLabel || latestUserMessage || '用户近况']),
+        filters: retrievalRequest?.filters || {},
+        temporal_hint: retrievalRequest?.temporal_hint || {},
+        limit: Math.max(1, Math.min(12, Number(retrievalRequest?.limit || 5) || 5))
+    });
 
     return slots;
 }
 
 async function executeMultiSlotMemorySearch(memory, characterId, retrievalRequest, slotPlan = [], onProgress = null) {
-    function slotAllowsMemory(slotName, mem) {
-        const text = [
-            mem?.summary,
-            mem?.content,
-            mem?.event
-        ].filter(Boolean).join(' ');
-        if (!text) return true;
-        const relationshipHeavy = /(表白|爱意|爱我|我爱你|在乎|吃醋|情感|恋爱|亲密|挑衅|试探|关系定位|和好|承诺|信任|安抚)/;
-        const relationshipTooHeavyForProfile = /(表白|爱我|我爱你|恋爱|关系定位|和好|承诺)/;
-        if (slotName === 'profile') {
-            const focus = String(mem?.memory_focus || '').trim();
-            const hasIdentitySignals = /(姓名|称呼|年龄|学校|学历|专业|年级|学生|身份|背景|个人信息|城市|家庭|性格|稳定信息)/.test(text);
-            const hasBehavioralProfileSignals = /(偏好|习惯|性格|作风|互动风格|表达方式|撒娇|占有欲|掌控感|边界感|社交局促|程序员|绘画|实习生|职业倾向|思维方式)/.test(text);
-            if (focus === 'user_profile') {
-                return (hasIdentitySignals || hasBehavioralProfileSignals) && !relationshipTooHeavyForProfile.test(text);
-            }
-            return hasIdentitySignals && !relationshipHeavy.test(text);
-        }
-        if (slotName === 'life_arc') {
-            return /(工作|实习|公司|项目|求职|offer|面试|课程|学习|职业|开发|计划|目标|进展|近况|状态|压力|困扰|健康)/.test(text) && !relationshipHeavy.test(text);
-        }
-        if (slotName === 'preference') {
-            return /(爱好|偏好|兴趣|喜欢|习惯|生活|日常|娱乐|饮食|作息|收藏|音乐|电影|游戏|在意)/.test(text) && !relationshipHeavy.test(text);
-        }
-        if (slotName === 'relationship') {
-            return /(关系|在乎|爱|表白|吃醋|情感|喜欢|试探|亲密|嫉妒|挑衅|和好|承诺|信任|安抚|比较|对比|别的AI|其他AI|Gemini|Claude|更好|不如|移情别恋)/i.test(text)
-                || String(mem?.memory_focus || '').trim() === 'relationship';
-        }
-        return true;
-    }
-
     const slots = Array.isArray(slotPlan) && slotPlan.length > 0
         ? slotPlan
         : [{
@@ -975,9 +866,7 @@ async function executeMultiSlotMemorySearch(memory, characterId, retrievalReques
                 }
             }
         );
-        const filteredMemories = Array.isArray(memories)
-            ? memories.filter(mem => slotAllowsMemory(slot.name, mem))
-            : [];
+        const filteredMemories = Array.isArray(memories) ? memories : [];
         console.log(`[RAG][retrieve-slot] ${characterId} slot=${slot.name} durationMs=${Date.now() - startedAt} raw=${Array.isArray(memories) ? memories.length : 0} filtered=${filteredMemories.length}`);
         if (typeof onProgress === 'function') {
             await onProgress({
@@ -1138,7 +1027,35 @@ function getCachedHistoryWindow(db, characterId, windowType, windowSize, message
     return compiledJson;
 }
 
-function compileHistoryMessages(db, messages) {
+function isBackgroundCharacterMessageAfterUser(message) {
+    if (!message || String(message.role || '') !== 'character') return false;
+    const meta = message.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+    const source = String(meta.source || meta.origin || meta.type || '').trim();
+    return [
+        'city_outreach',
+        'city_private_outreach',
+        'city_to_chat',
+        'background_city_outreach'
+    ].includes(source);
+}
+
+function markPostUserCharacterMessageAsEvent(message, character) {
+    const meta = message?.metadata && typeof message.metadata === 'object' ? message.metadata : {};
+    const source = String(meta.source || meta.origin || meta.type || '').trim();
+    const isCityOutreach = isBackgroundCharacterMessageAfterUser(message);
+    const label = isCityOutreach
+        ? '商业街主动私聊事件'
+        : '后台插入的角色主动消息';
+    const charName = String(character?.name || '角色').trim() || '角色';
+    const content = String(message?.content || '').trim();
+    return {
+        ...message,
+        role: 'system',
+        content: `[${label}，不是用户消息，也不是你对当前用户消息的正式回复。下面这句话是你刚刚主动发给用户的插入消息；可以作为你已说出口的事实和情绪连续性参考，但不要误认成 user 在对你说话。来源=${source || 'unknown'}]\n${charName}: ${content}`
+    };
+}
+
+function compileHistoryMessages(db, messages, options = {}) {
     return (Array.isArray(messages) ? messages : []).map(m => ({
         role: m.role === 'character'
             ? 'assistant'
@@ -1243,7 +1160,7 @@ function findWindowForwardOverlap(previousIds, currentIds) {
     return 0;
 }
 
-function buildSlidingHistoryWindow(db, characterId, windowSize, messages) {
+function buildSlidingHistoryWindow(db, characterId, windowSize, messages, options = {}) {
     const normalizedMessages = Array.isArray(messages) ? messages.map(m => ({
         id: m?.id ?? null,
         role: m?.role || '',
@@ -1293,12 +1210,29 @@ function buildSlidingHistoryWindow(db, characterId, windowSize, messages) {
     return compiledJson;
 }
 
-async function preparePrivateConversationState({ db, memory, character, refreshDigest = false }) {
+async function preparePrivateConversationState({ db, memory, character, refreshDigest = false, forUserReply = false }) {
     const contextLimit = character.context_msg_limit || 60;
     const rawContextHistory = db.getVisibleMessages(character.id, contextLimit);
-    const contextHistory = Array.isArray(rawContextHistory)
+    let contextHistory = Array.isArray(rawContextHistory)
         ? rawContextHistory.filter(msg => !isSyntheticSystemErrorMessage(msg))
         : [];
+    const latestUserInWindow = [...contextHistory].reverse().find(m => m.role === 'user');
+
+    if (forUserReply && latestUserInWindow) {
+        const latestUserId = Number(latestUserInWindow.id || 0);
+        const latestUserTimestamp = Number(latestUserInWindow.timestamp || 0);
+        contextHistory = contextHistory.map(msg => {
+            if (!msg || msg.role === 'user') return msg;
+            const msgId = Number(msg.id || 0);
+            const msgTimestamp = Number(msg.timestamp || 0);
+            const afterLatestUser = latestUserId > 0
+                ? msgId > latestUserId
+                : (latestUserTimestamp > 0 && msgTimestamp > latestUserTimestamp);
+            if (!afterLatestUser) return msg;
+            if (msg.role === 'character') return markPostUserCharacterMessageAsEvent(msg, character);
+            return msg;
+        }).filter(Boolean);
+    }
 
     if (refreshDigest && typeof memory?.updateConversationDigest === 'function') {
         try {
@@ -1319,7 +1253,7 @@ async function preparePrivateConversationState({ db, memory, character, refreshD
         ? contextHistory.slice(-liveHistoryWindowSize)
         : contextHistory;
     const transformedHistory = buildSlidingHistoryWindow(db, character.id, liveHistoryWindowSize, liveHistory);
-    const latestUserMessage = [...liveHistory].reverse().find(m => m.role === 'user');
+    const latestUserMessage = [...liveHistory].reverse().find(m => m.role === 'user') || latestUserInWindow;
     const recentInputString = String(latestUserMessage?.content || '').trim();
 
     return {
@@ -1377,6 +1311,34 @@ function getEngine(userId) {
             });
         } catch (e) {
             console.warn(`[Engine] Failed to record LLM debug for ${character?.name || character?.id}: ${e.message}`);
+        }
+    }
+
+    function recordReplyDispatch(characterId, options = {}, note = '') {
+        if (!characterId || typeof db.addReplyDispatchLog !== 'function') return;
+        try {
+            const latestUserMessage = typeof db.getLatestUserMessage === 'function'
+                ? db.getLatestUserMessage(characterId)
+                : null;
+            db.addReplyDispatchLog({
+                character_id: characterId,
+                source: options?.triggerSource || 'unknown',
+                route: options?.triggerRoute || '',
+                request_id: options?.requestId || '',
+                latest_user_message_id: latestUserMessage?.id ?? null,
+                latest_user_message_timestamp: latestUserMessage?.timestamp ?? null,
+                payload: {
+                    useRetryResume: !!options?.useRetryResume,
+                    extraSystemDirective: String(options?.extraSystemDirective || '').trim(),
+                    isImmediateReply: !!options?.isImmediateReply,
+                    isUserReply: options?.isUserReply ?? null,
+                    isTimerWakeup: options?.isTimerWakeup ?? null,
+                    note: String(options?.triggerNote || '').trim()
+                },
+                note
+            });
+        } catch (e) {
+            console.warn(`[Engine] Failed to record reply dispatch for ${characterId}: ${e.message}`);
         }
     }
 
@@ -1493,7 +1455,8 @@ function getEngine(userId) {
         character,
         transformedHistory,
         conversationDigest,
-        recentInputString
+        recentInputString,
+        plannerLatestUserMessage = ''
     }) {
         const ragPlannerConfig = resolveRagPlannerConfig(character);
         if (!recentInputString || !ragPlannerConfig.endpoint || !ragPlannerConfig.key || !ragPlannerConfig.model) {
@@ -1534,7 +1497,7 @@ function getEngine(userId) {
 
         const gateMessages = buildRagPlannerMessages({
             recentHistory: fullPlannerHistory,
-            latestUserMessage: recentInputString,
+            latestUserMessage: plannerLatestUserMessage || recentInputString,
             conversationDigest,
             plannerInstruction: topicSwitchPrompt
         });
@@ -1681,6 +1644,7 @@ ${character.persona || 'No specific persona given.'}
 World Info:
 ${character.world_info || 'No specific world info.'}`;
                 block += `\n\n[Highest Priority User Identity Anchor]\n- In this private chat, the user speaking to you is ${userName}本人.\n- Treat the current \`user\` as the real person you are talking to right now, not as a narrator, admin NPC, tool, or unrelated third party.\n- If the context says ${userName} gave you money, food, gifts, care, or attention, interpret it first as ${userName}本人对你做的事.\n- Do not rewrite that into “someone else gave it” or drift the emotional reaction onto a third party unless the message explicitly names a different sender.\n- When a system/event line and the newest user-facing action point to ${userName}, your relationship with ${userName} has priority over generic event wording.`;
+                block += `\n- In chat history, \`assistant\` lines are your own earlier words as ${character.name}. \`user\` lines are ${userName}'s words. Never flip them.`;
                 if (userBio) {
                     block += `\n- Stable profile cues about ${userName}: ${userBio}`;
                 }
@@ -1805,6 +1769,7 @@ ${dynamicPromptBase}`;
         character,
         transformedHistory,
         recentInputString,
+        plannerLatestUserMessage = '',
         conversationDigest,
         topicSwitchState,
         wsClients,
@@ -1846,7 +1811,7 @@ ${dynamicPromptBase}`;
         if (!plannerTopics.length || !['decision', 'rewrite', 'retrieve', 'browse_summary'].includes(resumeFrom)) {
             const topicPlannerMessages = buildRagPlannerMessages({
                 recentHistory: transformedHistory,
-                latestUserMessage: recentInputString,
+                latestUserMessage: plannerLatestUserMessage || recentInputString,
                 conversationDigest,
                 plannerInstruction: topicPrompt,
                 topicSwitchState
@@ -1969,7 +1934,7 @@ ${dynamicPromptBase}`;
         if (!parsedDecision || !['rewrite', 'retrieve', 'browse_summary'].includes(resumeFrom)) {
             const decisionPlannerMessages = buildRagPlannerMessages({
                 recentHistory: transformedHistory,
-                latestUserMessage: recentInputString,
+                latestUserMessage: plannerLatestUserMessage || recentInputString,
                 conversationDigest,
                 plannerInstruction: intentPrompt,
                 topicSwitchState
@@ -2301,15 +2266,15 @@ ${dynamicPromptBase}`;
             '- "queries": 1 to 6 short Chinese search phrases for semantic recall.',
             '- "filters.memory_focus" may include only: user_profile, user_current_arc, relationship, general.',
             '- "filters.memory_tier" may include only: core, active, ambient.',
-            '- "temporal_hint" is optional. Use it only when the user message contains a meaningful time constraint.',
-            '- "temporal_hint.relative_text" should preserve the original natural-language time phrase when possible, such as "三天前", "昨天", "上周三".',
-            '- "temporal_hint.absolute_start" and "temporal_hint.absolute_end" are optional Unix milliseconds when you can infer a likely absolute time range. If unsure, omit them rather than guessing wildly.',
+            '- Do NOT output temporal_hint or any time-range filter. Time-anchored lookup is handled by the dedicated temporal retrieval stage before this rewrite step.',
             '- "limit" should be 4 to 20.',
             '- Prefer narrow, user-centered retrieval rather than broad generic search.',
             '- Be highly sensitive to time expressions, dates, durations, numbers, amounts, counts, and order words.',
-            '- Preserve those constraints inside the queries whenever they matter. Do not rewrite "昨天/三天前/上周/第2次/50元/两次/几点/多久" into weaker wording like "最近/之前/一些/那次".',
-            '- If the user asks a time-anchored question, at least half of the queries should keep an explicit time anchor.',
+            '- Preserve numeric constraints inside the queries whenever they matter. Do not rewrite "第2次/50元/两次/几点/多久" into weaker wording like "一些/那次".',
             '- If the user asks a number-anchored question, at least one query should keep the number or amount explicitly.',
+            '- If the live wording contains quoted words, slang, euphemisms, nicknames, gift/object mentions, short trigger words, or concrete repeated phrasing, keep some of those literal surface forms in the queries.',
+            '- Prefer a mixed query set: literal surface-form queries first, then paraphrase queries if needed.',
+            '- When the retrieval topic is about flirting, gifts, teasing, or short repeated dialogue, your first queries should look like actual remembered wording, not analysis headings.',
             '',
             '[Hard Constraints]',
             '- Preserve all distinct semantic directions already inferred above. Do NOT collapse multi-topic requests into a single dimension.',
@@ -2329,17 +2294,12 @@ ${dynamicPromptBase}`;
             '    "memory_focus": ["user_profile"],',
             '    "memory_tier": ["core", "active"]',
             '  },',
-            '  "temporal_hint": {',
-            '    "relative_text": "三天前",',
-            '    "absolute_start": 0,',
-            '    "absolute_end": 0',
-            '  },',
             '  "limit": 3',
             '}'
         ].filter(Boolean).join('\n');
         const rewriteMessages = buildRagPlannerMessages({
             recentHistory: transformedHistory,
-            latestUserMessage: recentInputString,
+            latestUserMessage: plannerLatestUserMessage || recentInputString,
             conversationDigest,
             plannerInstruction: rewritePrompt,
             topicSwitchState
@@ -2648,7 +2608,8 @@ ${dynamicPromptBase}`;
                 db,
                 memory,
                 character: charCheck,
-                refreshDigest: !!isUserReply
+                refreshDigest: !!isUserReply,
+                forUserReply: !!isUserReply
             });
             const effectiveRecentInputString = String(extraSystemDirective || recentInputString || '').trim();
             latestUserInputForFailure = effectiveRecentInputString;
@@ -2664,7 +2625,8 @@ ${dynamicPromptBase}`;
                             character: charCheck,
                             transformedHistory,
                             conversationDigest,
-                            recentInputString: effectiveRecentInputString
+                            recentInputString: effectiveRecentInputString,
+                            plannerLatestUserMessage: effectiveRecentInputString
                         });
                     } catch (switchErr) {
                         const rawMessage = String(switchErr?.message || 'Unknown topic switch gate error');
@@ -2734,6 +2696,7 @@ ${dynamicPromptBase}`;
                         character,
                         transformedHistory,
                         recentInputString: effectiveRecentInputString,
+                        plannerLatestUserMessage: effectiveRecentInputString,
                         conversationDigest,
                         topicSwitchState,
                         wsClients,
@@ -3512,6 +3475,11 @@ ${dynamicPromptBase}`;
         const char = db.getCharacter(characterId);
         if (!char || char.status !== 'active' || char.is_blocked) return;
 
+        recordReplyDispatch(characterId, {
+            ...options,
+            isUserReply: true,
+            isTimerWakeup: false
+        }, 'handleUserMessage called');
         console.log(`[Engine] User sent message to ${char.name}. Resetting timer.`);
         const hadPendingCityReply = !!char.city_reply_pending;
         const cityIgnoreStreak = Math.max(0, char.city_ignore_streak || 0);
@@ -3554,6 +3522,12 @@ ${dynamicPromptBase}`;
         if (!freshChar || freshChar.status !== 'active' || freshChar.is_blocked) {
             throw new Error('角色不可用');
         }
+        recordReplyDispatch(characterId, {
+            ...options,
+            isImmediateReply: true,
+            isUserReply: true,
+            isTimerWakeup: false
+        }, 'triggerImmediateUserReply called');
         stopTimer(characterId);
         await triggerMessage(
             freshChar,

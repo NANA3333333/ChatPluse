@@ -41,8 +41,16 @@ const { getMemory, extractMemoryFromContext, setWsClientsResolver, getEmbeddingD
 const { getTokenCount } = require('./utils/tokenizer');
 const { getBackgroundQueueStats } = require('./backgroundQueue');
 const qdrant = require('./qdrant');
+const crypto = require('crypto');
 
 let pluginContext = null;
+
+function createRequestTraceId(prefix = 'req') {
+    const randomPart = typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID().slice(0, 8)
+        : Math.random().toString(36).slice(2, 10);
+    return `${prefix}-${Date.now().toString(36)}-${randomPart}`;
+}
 
 function getEngineWithPluginHooks(userId) {
     const engine = getEngine(userId);
@@ -912,6 +920,7 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
     try {
         const { characterId, content } = req.body;
         if (!characterId || !content) return res.status(400).json({ error: 'Missing characterId or content' });
+        const requestId = createRequestTraceId('msg');
 
         const charObj = db.getCharacter(characterId);
 
@@ -942,7 +951,12 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
         engine.broadcastNewMessage?.(wsClients, savedMessage);
 
         // Tell the engine to handle the user message: it will trigger an immediate reply
-        engine.handleUserMessage(characterId, wsClients);
+        engine.handleUserMessage(characterId, wsClients, {
+            triggerSource: 'api_messages',
+            triggerRoute: 'POST /api/messages',
+            requestId,
+            triggerNote: 'primary user send'
+        });
 
         // Check if other characters get jealous that user is talking to this character
         engine.triggerJealousyCheck(characterId, wsClients);
@@ -967,6 +981,7 @@ app.post('/api/messages/:characterId/retry', authMiddleware, (req, res) => {
     try {
         const { characterId } = req.params;
         const { failedMessageId } = req.body;
+        const requestId = createRequestTraceId('retry');
 
         // Delete the error message from the DB if provided
         if (failedMessageId) {
@@ -974,9 +989,29 @@ app.post('/api/messages/:characterId/retry', authMiddleware, (req, res) => {
         }
 
         // Re-attempt generation, resuming from the last failed RAG node when available.
-        engine.handleUserMessage(characterId, wsClients, { useRetryResume: true });
+        engine.handleUserMessage(characterId, wsClients, {
+            useRetryResume: true,
+            triggerSource: 'api_retry',
+            triggerRoute: 'POST /api/messages/:characterId/retry',
+            requestId,
+            triggerNote: failedMessageId ? `retry_failed_message_${failedMessageId}` : 'retry_without_failed_message_id'
+        });
 
         res.json({ success: true });
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/debug/reply-dispatch/:characterId', authMiddleware, (req, res) => {
+    const db = req.db;
+    try {
+        const { characterId } = req.params;
+        const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+        if (typeof db.getReplyDispatchLogs !== 'function') {
+            return res.status(501).json({ error: 'Reply dispatch debug is unavailable' });
+        }
+        res.json(db.getReplyDispatchLogs(characterId, limit));
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -1052,7 +1087,12 @@ app.post('/api/transfer', authMiddleware, (req, res) => {
         });
 
         // Tell the engine to process the unblock reaction
-        engine.handleUserMessage(characterId, wsClients);
+        engine.handleUserMessage(characterId, wsClients, {
+            triggerSource: 'transfer_unblock',
+            triggerRoute: 'POST /api/characters/:characterId/transfer',
+            requestId: createRequestTraceId('unblock'),
+            triggerNote: 'transfer unblocked character'
+        });
 
         // Push user message to UI via WS
         engine.broadcastNewMessage?.(wsClients, savedMessage);
@@ -1219,7 +1259,12 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
         db.addMessage(id, 'system', '[System] All chat history, long-term memories, extracted vectors, moments, and diary have been completely wiped. This character is now a blank slate.');
 
         // Restart the character's engine timer so they resume proactive messaging
-        engine.handleUserMessage(id, wsClients);
+        engine.handleUserMessage(id, wsClients, {
+            triggerSource: 'deep_wipe_reset',
+            triggerRoute: 'DELETE /api/characters/:id/deep-wipe',
+            requestId: createRequestTraceId('wipe'),
+            triggerNote: 'deep wipe follow-up'
+        });
 
         res.json({ success: true });
     } catch (e) {
@@ -1475,7 +1520,12 @@ app.post('/api/moments/:id/like', authMiddleware, (req, res) => {
                         console.log(`[Moments] User liked ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
                         setTimeout(() => {
                             try {
-                                engine.handleUserMessage(char.id, wsClients);
+                                engine.handleUserMessage(char.id, wsClients, {
+                                    triggerSource: 'moment_like_reaction',
+                                    triggerRoute: 'POST /api/moments/:momentId/like',
+                                    requestId: createRequestTraceId('moment-like'),
+                                    triggerNote: `moment_like_${moment.id}`
+                                });
                             } catch (err) {
                                 console.error('[Moments] Error triggering reaction for like:', err.message);
                             }
@@ -1518,7 +1568,12 @@ app.post('/api/moments/:id/comment', authMiddleware, (req, res) => {
                         console.log(`[Moments] User commented on ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
                         setTimeout(() => {
                             try {
-                                engine.handleUserMessage(char.id, wsClients);
+                                engine.handleUserMessage(char.id, wsClients, {
+                                    triggerSource: 'moment_comment_reaction',
+                                    triggerRoute: 'POST /api/moments/:momentId/comment',
+                                    requestId: createRequestTraceId('moment-comment'),
+                                    triggerNote: `moment_comment_${moment.id}`
+                                });
                             } catch (err) {
                                 console.error('[Moments] Error triggering reaction for comment:', err.message);
                             }
