@@ -18,6 +18,7 @@ function getDefaultGuidelines() {
 2. Treat body state, hunger, fatigue, work, money pressure, city/life activities, and scene context as in-world reality, never as backend/UI/log/prompt mechanics. If the user uses meta words like token/cache/prompt/AI/system/backend/testing, reinterpret them inside the relationship and scene.
 2.5. Any system-provided runtime state block about wallet, hunger, fatigue, sleep debt, current emotion, physical condition, location, or pressure describes YOU the character, not the user Nana. Never mirror those values back as if they belong to Nana unless Nana explicitly says they are hers.
 2.6. In chat history, role=assistant means things YOU the character previously said. role=user means things Nana said. Never treat assistant history as if it were a new user message.
+2.7. Some history lines may include timestamp/speaker metadata like [2026/4/27 22:50:32] Nana:. These labels are context metadata only. Never copy that bracketed timestamp/name prefix into your reply; reply as plain chat text.
 3. Mention time-of-day or what you are doing only when it fits. Vary response moves; do not lock into one habitual opener, pacing, or emotional pattern.
 3.5. Current time-of-day outranks conversational inertia. If it is daytime / morning / noon / afternoon, do not keep talking as if it were late-night by habit, and do not casually urge the user to sleep unless the live scene clearly supports it.
 4. Output rule: never output only tags. Always include at least one sentence of dialogue.
@@ -1001,6 +1002,51 @@ function formatMessageForLLM(db, content) {
     return content;
 }
 
+function formatMessageTimestampForLLM(timestamp) {
+    const ts = Number(timestamp || 0);
+    if (!Number.isFinite(ts) || ts <= 0) return '';
+    try {
+        return new Date(ts).toLocaleString('zh-CN', {
+            hour12: false,
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    } catch (_) {
+        return '';
+    }
+}
+
+function resolveHistorySpeakerName(db, message, options = {}) {
+    const role = String(message?.role || '').trim();
+    if (role === 'user') {
+        return String(options.userName || db.getUserProfile?.()?.name || 'User').trim() || 'User';
+    }
+    if (role === 'character') {
+        return String(options.characterName || options.character?.name || 'Assistant').trim() || 'Assistant';
+    }
+    return String(options.systemName || 'System/Event').trim() || 'System/Event';
+}
+
+function formatHistoryMessageForLLM(db, message, options = {}) {
+    const content = formatMessageForLLM(db, String(message?.content || ''));
+    if (!options.includeTimeSpeaker) return content;
+    if (String(message?.role || '') === 'character') return content;
+    const timestamp = formatMessageTimestampForLLM(message?.timestamp);
+    const speaker = resolveHistorySpeakerName(db, message, options);
+    const prefix = timestamp ? `[${timestamp}] ${speaker}:` : `${speaker}:`;
+    return `${prefix} ${content}`;
+}
+
+function stripHistoryMetadataPrefixFromOutput(text = '') {
+    return String(text || '')
+        .replace(/^\s*\[\d{4}[\/-]\d{1,2}[\/-]\d{1,2}[\s,]+\d{1,2}:\d{2}(?::\d{2})?\]\s*[^:\n：]{1,48}[:：]\s*/gm, '')
+        .trim();
+}
+
 function getCachedHistoryWindow(db, characterId, windowType, windowSize, messages, compileFn) {
     const normalizedMessages = Array.isArray(messages) ? messages.map(m => ({
         id: m?.id ?? null,
@@ -1060,7 +1106,7 @@ function compileHistoryMessages(db, messages, options = {}) {
         role: m.role === 'character'
             ? 'assistant'
             : (m.role === 'user' ? 'user' : 'system'),
-        content: formatMessageForLLM(db, m.content)
+        content: formatHistoryMessageForLLM(db, m, options)
     }));
 }
 
@@ -1212,9 +1258,16 @@ function buildSlidingHistoryWindow(db, characterId, windowSize, messages, option
 
 async function preparePrivateConversationState({ db, memory, character, refreshDigest = false, forUserReply = false }) {
     const contextLimit = character.context_msg_limit || 60;
-    const rawContextHistory = db.getVisibleMessages(character.id, contextLimit);
+    const rawContextHistory = db.getVisibleMessages(character.id, 0);
     let contextHistory = Array.isArray(rawContextHistory)
-        ? rawContextHistory.filter(msg => !isSyntheticSystemErrorMessage(msg))
+        ? rawContextHistory.map(msg => {
+            if (!msg || typeof msg !== 'object') return msg;
+            let metadata = msg.metadata;
+            if (typeof metadata === 'string' && metadata.trim()) {
+                try { metadata = JSON.parse(metadata); } catch (e) { metadata = null; }
+            }
+            return { ...msg, metadata: metadata || null };
+        }).filter(msg => !isSyntheticSystemErrorMessage(msg))
         : [];
     const latestUserInWindow = [...contextHistory].reverse().find(m => m.role === 'user');
 
@@ -1234,25 +1287,36 @@ async function preparePrivateConversationState({ db, memory, character, refreshD
         }).filter(Boolean);
     }
 
+    let privateContextSummaries = typeof db.getPrivateContextSummaries === 'function'
+        ? db.getPrivateContextSummaries(character.id, 3)
+        : [];
     if (refreshDigest && typeof memory?.updateConversationDigest === 'function') {
         try {
-            await memory.updateConversationDigest(character);
+            privateContextSummaries = await memory.updateConversationDigest(character, {
+                rawWindow: contextLimit,
+                visibleMessages: contextHistory
+            });
         } catch (e) {
-            console.warn(`[Engine] Conversation digest refresh failed for ${character.name}: ${e.message}`);
+            console.warn(`[Engine] Private context summary refresh failed for ${character.name}: ${e.message}`);
+            throw e;
         }
     }
 
-    const conversationDigest = typeof db.getConversationDigest === 'function'
-        ? db.getConversationDigest(character.id)
+    const conversationDigest = privateContextSummaries.length > 0
+        ? {
+            digest_text: privateContextSummaries.map((item, index) => {
+                return `Summary ${index + 1} (${item.start_message_id}-${item.end_message_id}): ${String(item.summary_text || '').trim()}`;
+            }).join('\n\n')
+        }
         : null;
-    const hasConversationDigest = !!(conversationDigest && conversationDigest.digest_text);
-    const liveHistoryWindowSize = hasConversationDigest
-        ? getDigestTailWindowSize(contextLimit, contextHistory.length)
-        : contextLimit;
-    const liveHistory = hasConversationDigest
-        ? contextHistory.slice(-liveHistoryWindowSize)
-        : contextHistory;
-    const transformedHistory = buildSlidingHistoryWindow(db, character.id, liveHistoryWindowSize, liveHistory);
+    const hasConversationDigest = Array.isArray(privateContextSummaries) && privateContextSummaries.length > 0;
+    const liveHistoryWindowSize = Math.min(contextLimit, contextHistory.length);
+    const liveHistory = contextHistory.slice(-liveHistoryWindowSize);
+    const transformedHistory = compileHistoryMessages(db, liveHistory, {
+        includeTimeSpeaker: true,
+        characterName: character.name,
+        userName: db.getUserProfile?.()?.name || 'User'
+    });
     const latestUserMessage = [...liveHistory].reverse().find(m => m.role === 'user') || latestUserInWindow;
     const recentInputString = String(latestUserMessage?.content || '').trim();
 
@@ -1260,6 +1324,7 @@ async function preparePrivateConversationState({ db, memory, character, refreshD
         contextLimit,
         contextHistory,
         conversationDigest,
+        privateContextSummaries,
         hasConversationDigest,
         liveHistoryWindowSize,
         liveHistory,
@@ -1398,11 +1463,11 @@ function getEngine(userId) {
         });
     }
 
-    const RAG_PROGRESS_TOTAL_STEPS = 8;
-    const RAG_PROGRESS_STEP_KEYS = ['summary', 'switch', 'route', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
+    const RAG_PROGRESS_TOTAL_STEPS = 7;
+    const RAG_PROGRESS_STEP_KEYS = ['switch', 'route', 'topics', 'decision', 'rewrite', 'retrieve', 'answer'];
 
-    function createRagProgress(stepKey = 'summary') {
-        const safeKey = RAG_PROGRESS_STEP_KEYS.includes(stepKey) ? stepKey : 'summary';
+    function createRagProgress(stepKey = 'switch') {
+        const safeKey = RAG_PROGRESS_STEP_KEYS.includes(stepKey) ? stepKey : 'switch';
         return {
             runId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             totalSteps: RAG_PROGRESS_TOTAL_STEPS,
@@ -1422,7 +1487,7 @@ function getEngine(userId) {
             : createRagProgress();
         const nextKey = updates.currentKey && RAG_PROGRESS_STEP_KEYS.includes(updates.currentKey)
             ? updates.currentKey
-            : baseProgress.currentKey;
+            : (RAG_PROGRESS_STEP_KEYS.includes(baseProgress.currentKey) ? baseProgress.currentKey : 'switch');
         const nextProgress = {
             ...baseProgress,
             ...updates,
@@ -1594,6 +1659,9 @@ function getEngine(userId) {
     async function buildPrompt(character, contextMessages, isTimerWakeup = false, options = {}) {
         const defaultGuidelines = getDefaultGuidelines();
         const conversationDigest = options.conversationDigest || null;
+        const privateContextSummaries = Array.isArray(options.privateContextSummaries)
+            ? options.privateContextSummaries.slice(-3)
+            : [];
         const topicSwitchState = options.topicSwitchState || null;
         const antiRepeatSource = Array.isArray(options.antiRepeatMessages) && options.antiRepeatMessages.length > 0
             ? options.antiRepeatMessages
@@ -1607,7 +1675,7 @@ function getEngine(userId) {
         // Pass engine context down (requires memory and userDb access inside builder)
         // Since we are inside `getEngine` closure, we have access to context indirectly,
         // but `buildUniversalContext` expects { getUserDb, getMemory, userId }
-        const engineContextWrapper = { getUserDb, getMemory: require('./memory').getMemory, userId };
+        const engineContextWrapper = { getUserDb, getMemory: require('./memory').getMemory, userId, skipBasePrivateWindow: true };
         const allChars = db.getCharacters().filter(c => c.id !== character.id);
         const mentionedTargets = allChars.filter(c => recentInputString.includes(c.name));
         if (character.jealousy_target) {
@@ -1691,14 +1759,20 @@ ${dynamicPromptBase}`;
             prompt += `\n\n${topicSwitchBlock}`;
         }
 
-        if (conversationDigest?.digest_text) {
-            digestBlock = typeof memory.formatConversationDigestForPrompt === 'function'
-                ? memory.formatConversationDigestForPrompt(conversationDigest, { recentMessages: contextMessages })
-                : '';
-            if (digestBlock) {
-                dynamicPrompt += `\n\n${digestBlock}`;
-                prompt += `\n\n${digestBlock}`;
-            }
+        if (privateContextSummaries.length > 0) {
+            digestBlock = [
+                '[Private Context Summaries]',
+                '下面最多 3 段摘要来自私聊滑动窗口之外的旧原文，只用于理解之前发生过什么。',
+                '它们不是用户最新发言；如果摘要和后面的原文滑动窗口冲突，永远相信原文滑动窗口和最新 user 消息。',
+                ...privateContextSummaries.map((item, index) => {
+                    const startId = Number(item.start_message_id || 0);
+                    const endId = Number(item.end_message_id || 0);
+                    const count = Number(item.message_count || 0);
+                    return `\n[Summary ${index + 1} / messages ${startId}-${endId} / ${count}条]\n${String(item.summary_text || '').trim()}`;
+                })
+            ].join('\n');
+            dynamicPrompt += `\n\n${digestBlock}`;
+            prompt += `\n\n${digestBlock}`;
         }
 
         if (hasOverusedEllipsisStyle(contextMessages)) {
@@ -2542,7 +2616,7 @@ ${dynamicPromptBase}`;
         const initialProgress = isUserReply
             ? (() => {
                 const progress = createRagProgress(
-                    shouldResumeRag ? (generationOptions.resumeRagState.failedAt || 'summary') : 'summary'
+                    shouldResumeRag ? (generationOptions.resumeRagState.failedAt || 'switch') : 'switch'
                 );
                 return progress;
             })()
@@ -2601,6 +2675,7 @@ ${dynamicPromptBase}`;
             const {
                 contextHistory,
                 conversationDigest,
+                privateContextSummaries,
                 liveHistory,
                 transformedHistory,
                 recentInputString
@@ -2660,6 +2735,7 @@ ${dynamicPromptBase}`;
                 promptStats
             } = await buildPrompt(charCheck, liveHistory, isTimerWakeup, {
                 conversationDigest,
+                privateContextSummaries,
                 antiRepeatMessages: contextHistory,
                 recentInputString: effectiveRecentInputString,
                 topicSwitchState
@@ -3152,6 +3228,7 @@ ${dynamicPromptBase}`;
                 // Strip all tags from the final text message using a global regex
                 const globalStripRegex = /\[(?:TIMER|TRANSFER|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|AFFINITY|CHAR_AFFINITY|PRESSURE|PRESSURE_DELTA|JEALOUSY|MOOD_DELTA|EMOTION_REASON|EMOTION_STATE|CITY_INTENT|CITY_ACTION|DIARY_PASSWORD|REDPACKET_SEND|Red Packet)[^\]]*\]/gi;
                 generatedText = generatedText.replace(globalStripRegex, '').replace(/\[\s*\]/g, '').replace(/\n{3,}/g, '\n\n').trim();
+                generatedText = stripHistoryMetadataPrefixFromOutput(generatedText);
 
                 if (generatedText.length > 0 && cityReplyStateSyncCallback && !cityIntentHandled) {
                     try {
@@ -3282,8 +3359,6 @@ ${dynamicPromptBase}`;
                     // Trigger memory extraction in background based on recent context + new full message
                     memory.extractMemoryFromContext(character, [...liveHistory, { role: 'character', content: generatedText, timestamp: Date.now() }])
                         .catch(err => console.error('[Engine] Memory extraction err:', err.message));
-                    memory.updateConversationDigest(character)
-                        .catch(err => console.error('[Engine] Conversation digest update err:', err.message));
                 }
             }
 

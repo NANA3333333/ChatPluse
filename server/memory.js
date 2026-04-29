@@ -2280,177 +2280,128 @@ Output only the summary sentence, without quotes or extra explanation.
     async function updateConversationDigest(character, options = {}) {
         const memoryConfig = resolveMemoryModelConfig(character);
         if (!memoryConfig.endpoint || !memoryConfig.key || !memoryConfig.model) {
-            return null;
+            throw new Error('私聊上下文总结失败：未配置记忆/总结小模型。');
         }
 
         const db = getDb();
-        const existingDigest = typeof db.getConversationDigest === 'function'
-            ? db.getConversationDigest(character.id, { trackHit: false })
-            : null;
-        const tailWindow = Math.max(12, Math.min(
-            Number(options.tailWindow || character.context_msg_limit || 60),
-            character.context_msg_limit || 60
-        ));
-        const visibleMessages = db.getVisibleMessages(character.id, tailWindow);
+        const rawWindow = Math.max(0, Number(options.rawWindow || character.context_msg_limit || 60) || 60);
+        const threshold = Math.max(1, Number(character.private_summary_threshold || 30) || 30);
+        const visibleMessages = Array.isArray(options.visibleMessages)
+            ? options.visibleMessages
+            : db.getVisibleMessages(character.id, 0);
         if (!Array.isArray(visibleMessages) || visibleMessages.length === 0) {
-            return existingDigest;
+            return [];
         }
 
-        const latestMessageId = Number(visibleMessages[visibleMessages.length - 1]?.id || 0);
-        if (existingDigest && latestMessageId > 0 && Number(existingDigest.last_message_id || 0) === latestMessageId) {
-            return existingDigest;
+        const overflowMessages = rawWindow > 0 ? visibleMessages.slice(0, Math.max(0, visibleMessages.length - rawWindow)) : visibleMessages;
+        const latestSummary = typeof db.getLatestPrivateContextSummary === 'function'
+            ? db.getLatestPrivateContextSummary(character.id)
+            : null;
+        let baselineMessageId = Number(character.private_summary_baseline_message_id || 0);
+        if (!latestSummary && baselineMessageId <= 0) {
+            baselineMessageId = Number(overflowMessages[overflowMessages.length - 1]?.id || 0);
+            db.updateCharacter?.(character.id, {
+                private_summary_baseline_message_id: baselineMessageId,
+                private_summary_last_error: ''
+            });
+            return typeof db.getPrivateContextSummaries === 'function'
+                ? db.getPrivateContextSummaries(character.id, 3)
+                : [];
+        }
+        const lastSummarizedId = Math.max(Number(latestSummary?.end_message_id || 0), baselineMessageId);
+        let pendingMessages = overflowMessages.filter(m => Number(m.id || 0) > lastSummarizedId);
+        if (pendingMessages.length < threshold) {
+            return typeof db.getPrivateContextSummaries === 'function'
+                ? db.getPrivateContextSummaries(character.id, 3)
+                : [];
         }
 
-        const windowMessages = visibleMessages;
-        const windowText = windowMessages.map(m => `${m.role === 'user' ? 'User' : character.name}: ${m.content}`).join('\n');
-        const previousDigestText = existingDigest ? JSON.stringify({
-            digest_text: existingDigest.digest_text || '',
-            emotion_state: existingDigest.emotion_state || '',
-            relationship_state: existingDigest.relationship_state_json || [],
-            open_loops: existingDigest.open_loops_json || [],
-            recent_facts: existingDigest.recent_facts_json || [],
-            scene_state: existingDigest.scene_state_json || []
-        }, null, 2) : '{"digest_text":"","emotion_state":"","relationship_state":[],"open_loops":[],"recent_facts":[],"scene_state":[]}';
+        const speakerName = (message) => {
+            if (message.role === 'user') return 'User';
+            if (message.role === 'character') return character.name;
+            return 'System/Event';
+        };
+        const summarizeBatch = async (batch) => {
+            const dialogueText = batch.map(m => `${speakerName(m)}: ${String(m.content || '').trim()}`).join('\n');
+            const summaryPrompt = `请总结下面这一段私聊窗口外的原文对话。
 
-        const digestPrompt = `You maintain a window-scale rolling state for an ongoing private chat between User and ${character.name}.
-Rebuild the digest from the full visible dialogue window below, while using the previous digest only as supportive continuity.
+要求：
+- 只总结发生了什么，不写建议，不评价系统，不解释你在做总结。
+- 详细、准确、精简；最高 3000 字，不要灌水。
+- 必须保留关键事实、请求、承诺、误会、纠正、争执、情绪转折、关系状态、未解决问题。
+- 必须分清 User 说了什么、${character.name} 说了什么；不要把 ${character.name} 的话写成 User 的话。
+- 如果有 System/Event，写成事件背景，不要当成 User 发言。
+- 用中文自然段或要点输出纯文本，不要 JSON，不要 Markdown 表格。
 
-Goals:
-- Preserve as much meaningful information from the full window as possible, not just the last few lines.
-- Keep emotional and relationship continuity coherent across the whole visible window.
-- Preserve unresolved topics, promises, tensions, flirtation, jealousy, comfort-seeking, corrections, clarifications, disagreements, and current scene info.
-- Prefer factual recall over vague compression when possible.
-- Do not collapse the full window into a tiny status card.
-- Keep concrete phrasing, especially for disputes, corrections, and stated facts.
-- If the speakers interpret the same thing differently, record that disagreement instead of flattening it away.
-- Do not decide who is right unless the dialogue itself clearly settles it.
-- Treat the digest as a compressed replacement for the older part of the current window, so it should still carry substantial detail.
+[待总结私聊原文]
+${dialogueText}`;
 
-Return exactly one JSON object and nothing else:
-{
-  "digest_text": "a detailed rolling summary that can be several paragraphs, usually 300-1200 words when needed",
-  "emotion_state": "a concise but informative current emotional line, up to 60 words",
-  "relationship_state": ["up to 12 detailed bullets about bond state, tensions, closeness, expectations, repeated patterns"],
-  "open_loops": ["up to 12 unresolved topics / promises / emotional needs / pending clarifications"],
-  "recent_facts": ["up to 18 concrete facts, corrections, events, requests, promises, disputes, stated details that still matter"],
-  "scene_state": ["up to 10 short scene / body / activity / timeline notes that still matter"]
-}
-
-[Previous Digest]
-${previousDigestText}
-
-[Full Visible Dialogue Window]
-${windowText}`;
-
-        try {
-            const { content: responseText, usage } = await callLLM({
+            const { content, usage, finishReason } = await callLLM({
                 endpoint: memoryConfig.endpoint,
                 key: memoryConfig.key,
                 model: memoryConfig.model,
                 messages: [
-                    { role: 'system', content: 'You are a window-scale private-conversation state updater. Rebuild a detailed rolling digest from the full visible window. Output strict JSON only.' },
-                    { role: 'user', content: digestPrompt }
+                    { role: 'system', content: '你是私聊上下文总结器。你只输出对话事实总结，必须准确区分说话人。' },
+                    { role: 'user', content: summaryPrompt }
                 ],
-                maxTokens: 1400,
-                temperature: 0.2,
+                maxTokens: 3000,
+                temperature: 0.1,
                 enableCache: true,
                 cacheDb: getDb(),
-                cacheType: 'conversation_digest_update',
+                cacheType: 'private_context_summary_update',
                 cacheTtlMs: 30 * 24 * 60 * 60 * 1000,
                 cacheScope: `character:${character.id}`,
                 cacheCharacterId: character.id,
                 returnUsage: true
             });
-            recordMemoryTokenUsage(character.id, 'conversation_digest_update', usage);
+            recordMemoryTokenUsage(character.id, 'private_context_summary_update', usage);
+            const summaryText = String(content || '').trim();
+            if (!summaryText || String(finishReason || '').trim() === 'length') {
+                throw new Error('私聊上下文总结失败：小模型输出为空或被截断。');
+            }
+            return Array.from(summaryText).slice(0, 3000).join('');
+        };
 
-            const startIdx = responseText.indexOf('{');
-            const endIdx = responseText.lastIndexOf('}');
-            if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
-                const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, windowMessages, latestMessageId);
-                db.upsertConversationDigest?.({
-                    character_id: character.id,
-                    source_hash: crypto.createHash('sha256').update(JSON.stringify({
-                        fallback: true,
-                        latestMessageId,
-                        window: windowMessages.map(m => [m.id, m.role, m.content])
-                    })).digest('hex'),
-                    digest_text: fallbackDigest.digest_text,
-                    emotion_state: fallbackDigest.emotion_state,
-                    relationship_state_json: fallbackDigest.relationship_state_json,
-                    open_loops_json: fallbackDigest.open_loops_json,
-                    recent_facts_json: fallbackDigest.recent_facts_json,
-                    scene_state_json: fallbackDigest.scene_state_json,
-                    last_message_id: fallbackDigest.last_message_id
-                });
-                return db.getConversationDigest?.(character.id, { trackHit: false }) || fallbackDigest;
-            }
-            const parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
-            const normalized = normalizeConversationDigestPayload(parsed);
-            if (!normalized.digest_text) {
-                const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, windowMessages, latestMessageId);
-                db.upsertConversationDigest?.({
-                    character_id: character.id,
-                    source_hash: crypto.createHash('sha256').update(JSON.stringify({
-                        fallback: true,
-                        latestMessageId,
-                        window: windowMessages.map(m => [m.id, m.role, m.content])
-                    })).digest('hex'),
-                    digest_text: fallbackDigest.digest_text,
-                    emotion_state: fallbackDigest.emotion_state,
-                    relationship_state_json: fallbackDigest.relationship_state_json,
-                    open_loops_json: fallbackDigest.open_loops_json,
-                    recent_facts_json: fallbackDigest.recent_facts_json,
-                    scene_state_json: fallbackDigest.scene_state_json,
-                    last_message_id: fallbackDigest.last_message_id
-                });
-                return db.getConversationDigest?.(character.id, { trackHit: false }) || fallbackDigest;
-            }
-            const sourceHash = crypto.createHash('sha256')
-                .update(JSON.stringify({
-                    previousDigest: existingDigest?.digest_text || '',
-                    latestMessageId,
-                    window: windowMessages.map(m => [m.id, m.role, m.content])
-                }))
-                .digest('hex');
-            db.upsertConversationDigest?.({
-                character_id: character.id,
-                source_hash: sourceHash,
-                digest_text: normalized.digest_text,
-                emotion_state: normalized.emotion_state,
-                relationship_state_json: normalized.relationship_state_json,
-                open_loops_json: normalized.open_loops_json,
-                recent_facts_json: normalized.recent_facts_json,
-                scene_state_json: normalized.scene_state_json,
-                last_message_id: latestMessageId
+        try {
+            db.updateCharacter?.(character.id, {
+                private_summary_last_run_at: Date.now(),
+                private_summary_last_error: ''
             });
-            return db.getConversationDigest?.(character.id, { trackHit: false }) || {
-                character_id: character.id,
-                ...normalized,
-                last_message_id: latestMessageId
-            };
-        } catch (e) {
-            console.error(`[Memory] Conversation digest update failed for ${character.id}:`, e.message);
-            const fallbackDigest = buildFallbackConversationDigest(character, existingDigest, windowMessages, latestMessageId);
-            if (fallbackDigest.digest_text) {
-                db.upsertConversationDigest?.({
+            while (pendingMessages.length >= threshold) {
+                const batch = pendingMessages.slice(0, threshold);
+                const summaryText = await summarizeBatch(batch);
+                const startMessageId = Number(batch[0]?.id || 0);
+                const endMessageId = Number(batch[batch.length - 1]?.id || 0);
+                const sourceHash = crypto.createHash('sha256').update(JSON.stringify({
+                    characterId: character.id,
+                    threshold,
+                    batch: batch.map(m => [m.id, m.role, m.content])
+                })).digest('hex');
+                db.addPrivateContextSummary?.({
                     character_id: character.id,
-                    source_hash: crypto.createHash('sha256').update(JSON.stringify({
-                        fallback: true,
-                        error: e.message || '',
-                        latestMessageId,
-                        window: windowMessages.map(m => [m.id, m.role, m.content])
-                    })).digest('hex'),
-                    digest_text: fallbackDigest.digest_text,
-                    emotion_state: fallbackDigest.emotion_state,
-                    relationship_state_json: fallbackDigest.relationship_state_json,
-                    open_loops_json: fallbackDigest.open_loops_json,
-                    recent_facts_json: fallbackDigest.recent_facts_json,
-                    scene_state_json: fallbackDigest.scene_state_json,
-                    last_message_id: fallbackDigest.last_message_id
+                    start_message_id: startMessageId,
+                    end_message_id: endMessageId,
+                    message_count: batch.length,
+                    summary_text: summaryText,
+                    source_hash: sourceHash
                 });
-                return db.getConversationDigest?.(character.id, { trackHit: false }) || fallbackDigest;
+                pendingMessages = pendingMessages.slice(batch.length);
             }
-            return existingDigest;
+            db.updateCharacter?.(character.id, {
+                private_summary_last_success_at: Date.now(),
+                private_summary_last_error: ''
+            });
+            return typeof db.getPrivateContextSummaries === 'function'
+                ? db.getPrivateContextSummaries(character.id, 3)
+                : [];
+        } catch (e) {
+            const errorText = String(e?.message || e || 'unknown_error').slice(0, 500);
+            console.error(`[Memory] Private context summary update failed for ${character.id}:`, errorText);
+            db.updateCharacter?.(character.id, {
+                private_summary_last_run_at: Date.now(),
+                private_summary_last_error: errorText
+            });
+            throw new Error(`私聊上下文总结失败，请检查记忆小模型后重试：${errorText}`);
         }
     }
 

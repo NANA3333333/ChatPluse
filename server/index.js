@@ -128,6 +128,35 @@ function estimateJsonWrapperTokensForMessages(messages = []) {
 function estimateRequestBodyTokens(body) {
     return getTokenCount(JSON.stringify(body || {}));
 }
+
+function formatContextStatsTimestamp(timestamp) {
+    const ts = Number(timestamp || 0);
+    if (!Number.isFinite(ts) || ts <= 0) return '';
+    try {
+        return new Date(ts).toLocaleString('zh-CN', {
+            hour12: false,
+            year: 'numeric',
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+        });
+    } catch (_) {
+        return '';
+    }
+}
+
+function formatContextStatsHistoryMessage(db, character, message) {
+    const role = String(message?.role || '').trim();
+    if (role === 'character') return String(message?.content || '');
+    const speaker = role === 'user'
+        ? String(db.getUserProfile?.()?.name || 'User').trim()
+        : (role === 'character' ? String(character?.name || 'Assistant').trim() : 'System/Event');
+    const timestamp = formatContextStatsTimestamp(message?.timestamp);
+    const prefix = timestamp ? `[${timestamp}] ${speaker}:` : `${speaker}:`;
+    return `${prefix} ${String(message?.content || '')}`;
+}
 const multer = require('multer');
 const { callLLM } = require('./llm');
 const helmet = require('helmet');
@@ -759,12 +788,25 @@ app.post('/api/characters', authMiddleware, (req, res) => {
                 db.clearConversationDigest?.(data.id);
                 const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
                 rawDb?.prepare('DELETE FROM history_window_cache WHERE character_id = ?').run(data.id);
+                rawDb?.prepare('DELETE FROM private_context_summaries WHERE character_id = ?').run(data.id);
                 const nextCharacter = typeof db.getCharacter === 'function' ? db.getCharacter(data.id) : null;
-                if (nextCharacter && typeof memory?.updateConversationDigest === 'function') {
-                    memory.updateConversationDigest(nextCharacter).catch(err => {
-                        console.warn(`[API] Failed to rebuild conversation digest for ${nextCharacter.name}: ${err.message}`);
-                    });
-                }
+                const rawWindow = Math.max(0, Number(nextCharacter?.context_msg_limit || 60) || 60);
+                const visibleMessages = db.getVisibleMessages(data.id, 0) || [];
+                const overflowMessages = rawWindow > 0 ? visibleMessages.slice(0, Math.max(0, visibleMessages.length - rawWindow)) : visibleMessages;
+                db.updateCharacter(data.id, { private_summary_baseline_message_id: Number(overflowMessages[overflowMessages.length - 1]?.id || 0) });
+            }
+        }
+        if (prevCharacter && Object.prototype.hasOwnProperty.call(data, 'private_summary_threshold')) {
+            const prevThreshold = Number(prevCharacter.private_summary_threshold || 30);
+            const nextThreshold = Number(data.private_summary_threshold || prevThreshold);
+            if (prevThreshold !== nextThreshold) {
+                const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
+                rawDb?.prepare('DELETE FROM private_context_summaries WHERE character_id = ?').run(data.id);
+                const nextCharacter = typeof db.getCharacter === 'function' ? db.getCharacter(data.id) : null;
+                const rawWindow = Math.max(0, Number(nextCharacter?.context_msg_limit || 60) || 60);
+                const visibleMessages = db.getVisibleMessages(data.id, 0) || [];
+                const overflowMessages = rawWindow > 0 ? visibleMessages.slice(0, Math.max(0, visibleMessages.length - rawWindow)) : visibleMessages;
+                db.updateCharacter(data.id, { private_summary_baseline_message_id: Number(overflowMessages[overflowMessages.length - 1]?.id || 0) });
             }
         }
         // Reset proactive timer after settings change (do NOT call handleUserMessage 鈥?
@@ -795,12 +837,25 @@ app.put('/api/characters/:id', authMiddleware, (req, res) => {
                 db.clearConversationDigest?.(id);
                 const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
                 rawDb?.prepare('DELETE FROM history_window_cache WHERE character_id = ?').run(id);
+                rawDb?.prepare('DELETE FROM private_context_summaries WHERE character_id = ?').run(id);
                 const nextCharacter = typeof db.getCharacter === 'function' ? db.getCharacter(id) : null;
-                if (nextCharacter && typeof memory?.updateConversationDigest === 'function') {
-                    memory.updateConversationDigest(nextCharacter).catch(err => {
-                        console.warn(`[API] Failed to rebuild conversation digest for ${nextCharacter.name}: ${err.message}`);
-                    });
-                }
+                const rawWindow = Math.max(0, Number(nextCharacter?.context_msg_limit || 60) || 60);
+                const visibleMessages = db.getVisibleMessages(id, 0) || [];
+                const overflowMessages = rawWindow > 0 ? visibleMessages.slice(0, Math.max(0, visibleMessages.length - rawWindow)) : visibleMessages;
+                db.updateCharacter(id, { private_summary_baseline_message_id: Number(overflowMessages[overflowMessages.length - 1]?.id || 0) });
+            }
+        }
+        if (prevCharacter && Object.prototype.hasOwnProperty.call(data, 'private_summary_threshold')) {
+            const prevThreshold = Number(prevCharacter.private_summary_threshold || 30);
+            const nextThreshold = Number(data.private_summary_threshold || prevThreshold);
+            if (prevThreshold !== nextThreshold) {
+                const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
+                rawDb?.prepare('DELETE FROM private_context_summaries WHERE character_id = ?').run(id);
+                const nextCharacter = typeof db.getCharacter === 'function' ? db.getCharacter(id) : null;
+                const rawWindow = Math.max(0, Number(nextCharacter?.context_msg_limit || 60) || 60);
+                const visibleMessages = db.getVisibleMessages(id, 0) || [];
+                const overflowMessages = rawWindow > 0 ? visibleMessages.slice(0, Math.max(0, visibleMessages.length - rawWindow)) : visibleMessages;
+                db.updateCharacter(id, { private_summary_baseline_message_id: Number(overflowMessages[overflowMessages.length - 1]?.id || 0) });
             }
         }
         res.json({ success: true, character: db.getCharacter(id) });
@@ -1676,7 +1731,7 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         const { getUserDb } = require('./db');
         const { getMemory } = require('./memory');
         const memory = getMemory(req.user.id);
-        const engineContextWrapper = { getUserDb, getMemory, userId: req.user.id };
+        const engineContextWrapper = { getUserDb, getMemory, userId: req.user.id, skipBasePrivateWindow: true };
 
         // relationships exist in the DLC, so fallback to just friends or a raw DB query if method doesn't exist
         const isDlcActive = typeof db.getCharRelationships === 'function';
@@ -1696,20 +1751,17 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         const universalResult = await buildUniversalContext(engineContextWrapper, character, '', false, activeTargets);
         const breakdown = { ...(universalResult.breakdown || {}) };
 
-        const conversationDigest = typeof db.getConversationDigest === 'function'
-            ? db.getConversationDigest(charId, { trackHit: false })
-            : null;
+        const privateContextSummaries = typeof db.getPrivateContextSummaries === 'function'
+            ? db.getPrivateContextSummaries(charId, 3)
+            : [];
 
         // Calculate X (Recent Chat History - based on context_msg_limit)
         const contextLimit = character.context_msg_limit || 60;
-        const recentMsgs = db.getVisibleMessages(charId, contextLimit);
-        const liveHistoryWindowSize = conversationDigest?.digest_text
-            ? getDigestTailWindowSize(contextLimit, recentMsgs.length)
-            : recentMsgs.length;
-        const liveMsgs = conversationDigest?.digest_text
-            ? recentMsgs.slice(-liveHistoryWindowSize)
-            : recentMsgs;
-        const x_chat_text = liveMsgs.map(m => m.content || '').join('\n');
+        const allVisibleMsgs = db.getVisibleMessages(charId, 0);
+        const recentMsgs = allVisibleMsgs.slice(-contextLimit);
+        const liveHistoryWindowSize = recentMsgs.length;
+        const liveMsgs = recentMsgs;
+        const x_chat_text = liveMsgs.map(m => formatContextStatsHistoryMessage(db, character, m)).join('\n');
         breakdown.x_chat = getTokenCount(x_chat_text);
 
         const systemPromptPreamble = `You are playing the role of ${character.name}.\nPersona:\n${character.persona || 'No specific persona given.'}\n\nWorld Info:\n${character.world_info || 'No specific world info.'}\n\nContext:\n${universalResult.preamble}`;
@@ -1736,11 +1788,12 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
             finalSystemPrompt += `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}`;
         }
         let digestBlock = '';
-        if (conversationDigest?.digest_text && typeof memory.formatConversationDigestForPrompt === 'function') {
-            digestBlock = memory.formatConversationDigestForPrompt(conversationDigest);
-            if (digestBlock) {
-                finalSystemPrompt += `\n\n${digestBlock}`;
-            }
+        if (privateContextSummaries.length > 0) {
+            digestBlock = [
+                '[Private Context Summaries]',
+                ...privateContextSummaries.map((item, index) => `\n[Summary ${index + 1} / messages ${item.start_message_id}-${item.end_message_id} / ${item.message_count}条]\n${item.summary_text || ''}`)
+            ].join('\n');
+            finalSystemPrompt += `\n\n${digestBlock}`;
         }
 
         const ownRecentMsgs = recentMsgs
@@ -1759,38 +1812,29 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
 
         const transformedHistory = liveMsgs.map(m => ({
             role: m.role === 'character' ? 'assistant' : 'user',
-            content: String(m.content || '')
-        }));
-        const transformedFullHistory = recentMsgs.map(m => ({
-            role: m.role === 'character' ? 'assistant' : 'user',
-            content: String(m.content || '')
+            content: formatContextStatsHistoryMessage(db, character, m)
         }));
         const estimatedWithCacheMessagesRaw = [
             { role: 'system', content: finalSystemPrompt },
             ...transformedHistory
         ];
         const estimatedWithoutCacheMessagesRaw = [
-            {
-                role: 'system',
-                content: `${systemPromptPreamble}\n${getDefaultGuidelines()}${supplementalCharacterPrompt ? `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}` : ''}${antiRepeat}`
-            },
-            ...transformedFullHistory
+            { role: 'system', content: finalSystemPrompt },
+            ...transformedHistory
         ];
         const useClaudePromptCacheShape = String(character.model_name || '').toLowerCase().includes('claude');
         const estimatedWithCacheMessages = useClaudePromptCacheShape
             ? buildClaudePromptCacheEstimateMessages(estimatedWithCacheMessagesRaw)
             : estimatedWithCacheMessagesRaw;
-        const estimatedWithoutCacheMessages = useClaudePromptCacheShape
-            ? buildClaudePromptCacheEstimateMessages(estimatedWithoutCacheMessagesRaw)
-            : estimatedWithoutCacheMessagesRaw;
+        const estimatedWithoutCacheMessages = estimatedWithoutCacheMessagesRaw;
         const estimatedWithCacheMessageStats = estimateJsonWrapperTokensForMessages(estimatedWithCacheMessages);
         const estimatedWithoutCacheMessageStats = estimateJsonWrapperTokensForMessages(estimatedWithoutCacheMessages);
         const estimatedHistoryTokens = transformedHistory.reduce((sum, msg) => sum + getTokenCount(msg.content) + 6, 0);
-        const estimatedFullHistoryTokens = transformedFullHistory.reduce((sum, msg) => sum + getTokenCount(msg.content) + 6, 0);
+        const estimatedFullHistoryTokens = estimatedHistoryTokens;
         const estimatedSystemPromptTokens = getTokenCount(finalSystemPrompt);
-        const estimatedSystemPromptWithoutDigestTokens = getTokenCount(`${systemPromptPreamble}\n${getDefaultGuidelines()}${supplementalCharacterPrompt ? `\n\n[Character-Specific Supplemental Rules]\n${supplementalCharacterPrompt}` : ''}${antiRepeat}`);
+        const estimatedSystemPromptWithoutDigestTokens = estimatedSystemPromptTokens;
         const estimatedMessageEnvelopeTokens = 8 + transformedHistory.length * 2;
-        const estimatedFullMessageEnvelopeTokens = 8 + transformedFullHistory.length * 2;
+        const estimatedFullMessageEnvelopeTokens = estimatedMessageEnvelopeTokens;
         const estimatedWithCacheRequestBody = {
             model: character.model_name,
             messages: estimatedWithCacheMessages,
@@ -1809,12 +1853,10 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         const estimatedWithCacheTokens = estimateRequestBodyTokens(estimatedWithCacheRequestBody);
         const finalPromptEstimate = estimatedWithCacheTokens;
 
-        const estimatedDigestTokens = conversationDigest?.digest_text
-            ? getTokenCount(memory.formatConversationDigestForPrompt(conversationDigest) || '')
-            : 0;
+        const estimatedDigestTokens = getTokenCount(digestBlock || '');
         const estimatedTailTokens = getTokenCount(x_chat_text);
         const estimatedWithoutCacheXTokens = estimatedFullHistoryTokens;
-        const estimatedWithCacheXTokens = Math.max(0, estimatedHistoryTokens - estimatedTailTokens);
+        const estimatedWithCacheXTokens = estimatedHistoryTokens;
         const estimatedComparableBaseTokens = Math.max(
             0,
             estimatedSystemPromptWithoutDigestTokens
@@ -1839,7 +1881,6 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
             - estimatedComparableBaseTokens
             - estimatedDigestTokens
             - estimatedWithCacheXTokens
-            - estimatedTailTokens
             - Number(breakdown.city_x_y || 0)
             - Number(breakdown.z_memory || 0)
             - Number(breakdown.moments || 0)
@@ -1903,7 +1944,7 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 FROM token_usage
                 WHERE character_id = ?
                   AND context_type NOT LIKE 'memory_%'
-                  AND context_type NOT IN ('chat_intent', 'conversation_digest_update')
+                  AND context_type NOT IN ('chat_intent', 'conversation_digest_update', 'private_context_summary_update')
             `).get(charId)
             : null;
         const auxiliaryUsageRow = rawDb
@@ -1916,7 +1957,7 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 WHERE character_id = ?
                   AND (
                     context_type LIKE 'memory_%'
-                    OR context_type IN ('chat_intent', 'conversation_digest_update')
+                    OR context_type IN ('chat_intent', 'conversation_digest_update', 'private_context_summary_update')
                   )
             `).get(charId)
             : null;
@@ -1972,14 +2013,21 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
             ? rawDb.prepare(`
                 SELECT
                     COUNT(*) AS entries_count,
-                    COALESCE(SUM(hit_count), 0) AS hit_count,
-                    MAX(last_hit_at) AS last_hit_at,
                     MAX(updated_at) AS last_write_at,
-                    MAX(last_message_id) AS last_message_id
-                FROM conversation_digest_cache
+                    MAX(end_message_id) AS last_message_id
+                FROM private_context_summaries
                 WHERE character_id = ?
             `).get(charId)
             : null;
+        const latestPrivateContextSummary = typeof db.getLatestPrivateContextSummary === 'function'
+            ? db.getLatestPrivateContextSummary(charId)
+            : null;
+        const summaryLastEndId = Math.max(
+            Number(latestPrivateContextSummary?.end_message_id || 0),
+            Number(character.private_summary_baseline_message_id || 0)
+        );
+        const overflowForSummary = contextLimit > 0 ? allVisibleMsgs.slice(0, Math.max(0, allVisibleMsgs.length - contextLimit)) : allVisibleMsgs;
+        const privateSummaryPendingCount = overflowForSummary.filter(m => Number(m.id || 0) > summaryLastEndId).length;
         const latestConversationSnapshotRow = rawDb
             ? rawDb.prepare(`
                 SELECT meta, timestamp
@@ -2038,10 +2086,18 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
         const validLoggedUncachedRequestBodyTokens = loggedUncachedRequestBodyTokens > loggedCachedRequestBodyTokens
             ? loggedUncachedRequestBodyTokens
             : 0;
+        const snapshotLooksLikeLegacyFullHistory = Number(latestConversationSnapshot?.estimated_full_history_tokens || 0) > Math.max(
+            estimatedHistoryTokens * 3,
+            estimatedHistoryTokens + 5000
+        );
         const snapshotWithoutCacheTokens = Number(
-            validLoggedUncachedRequestBodyTokens
-            || latestConversationSnapshot?.estimated_without_cache_tokens
-            || estimatedWithoutCacheTokens
+            snapshotLooksLikeLegacyFullHistory
+                ? estimatedWithoutCacheTokens
+                : (
+                    validLoggedUncachedRequestBodyTokens
+                    || latestConversationSnapshot?.estimated_without_cache_tokens
+                    || estimatedWithoutCacheTokens
+                )
             || 0
         );
         const snapshotWithCacheTokens = Number(
@@ -2166,12 +2222,19 @@ app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) =>
                 history_cache_last_hit_at: historyWindowUsageRow?.last_hit_at || 0,
                 history_cache_last_write_at: historyWindowUsageRow?.last_write_at || 0,
                 digest_cache_entries_count: conversationDigestRow?.entries_count || 0,
-                digest_cache_hit_count: conversationDigestRow?.hit_count || 0,
-                digest_cache_last_hit_at: conversationDigestRow?.last_hit_at || 0,
+                digest_cache_hit_count: 0,
+                digest_cache_last_hit_at: 0,
                 digest_cache_last_write_at: conversationDigestRow?.last_write_at || 0,
                 digest_cache_last_message_id: conversationDigestRow?.last_message_id || 0,
-                digest_active: !!conversationDigest?.digest_text,
+                digest_active: privateContextSummaries.length > 0,
                 digest_live_history_window_size: liveHistoryWindowSize,
+                private_summary_threshold: character.private_summary_threshold || 30,
+                private_summary_pending_count: privateSummaryPendingCount,
+                private_summary_active_count: privateContextSummaries.length,
+                private_summary_last_error: character.private_summary_last_error || '',
+                private_summary_last_run_at: character.private_summary_last_run_at || 0,
+                private_summary_last_success_at: character.private_summary_last_success_at || 0,
+                private_summary_baseline_message_id: character.private_summary_baseline_message_id || 0,
                 last_actual_prompt_tokens: latestUsageRow?.prompt_tokens || 0,
                 last_actual_completion_tokens: latestUsageRow?.completion_tokens || 0,
                 last_actual_context_type: latestUsageRow?.context_type || '',

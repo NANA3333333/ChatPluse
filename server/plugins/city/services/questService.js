@@ -142,9 +142,29 @@ function createQuestService(deps = {}) {
                 bonusCalories += Number(result.reward_cal || 0);
                 if (quest.source_announcement_id) db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
                 const resolution = await buildQuestResolutionNarrations(char, quest, district, db, 'success');
-                db.city.logAction(char.id, 'QUEST', resolution.log, 0, 0, district.id);
+                const targetScore = Math.max(1, Number(activeClaim.completion_target || quest?.completion_target || 1));
+                const currentProgress = Math.max(0, Number(activeClaim.progress_count || 0));
+                const completionDelta = Math.max(0, targetScore - currentProgress);
+                const completionLogId = Number(options.actionLogId || 0)
+                    || db.city.logAction(char.id, 'QUEST', resolution.log, 0, 0, district.id);
+                const review = db.city.upsertQuestProgressReview?.({
+                    quest_id: quest.id,
+                    claim_id: activeClaim.id,
+                    log_id: completionLogId,
+                    character_id: char.id,
+                    status: 'success',
+                    progress_delta: completionDelta,
+                    progress_after: Math.max(targetScore, currentProgress),
+                    target_score: targetScore,
+                    is_completed: 1,
+                    comment: '任务已经完成交付并结算奖励。',
+                    short_label: '完成交付',
+                    error_message: '',
+                    raw_response: ''
+                });
                 db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, district.id);
                 db.city.addCityAnnouncement?.('system', '任务完成', resolution.announcement, district.id);
+                return { bonusMoney, bonusCalories, questReview: review };
             } else if (result?.success && !result.won) {
                 const resolution = await buildQuestResolutionNarrations(char, quest, district, db, 'failed');
                 db.city.logAction(char.id, 'QUEST', resolution.log, 0, 0, district.id);

@@ -262,7 +262,9 @@ function buildBasePrivateContextWindow(db, character, userName = '用户') {
                         ? '系统'
                         : userName;
             const content = String(row?.content || '').trim();
-            return content ? `${role}: ${content}` : '';
+            const timestamp = Number(row?.timestamp || row?.created_at || 0) || 0;
+            const timeLabel = timestamp > 0 ? new Date(timestamp).toLocaleString() : '时间未知';
+            return content ? `[${timeLabel}] ${role}: ${content}` : '';
         }).filter(Boolean);
 
         if (lines.length === 0) return '';
@@ -270,8 +272,11 @@ function buildBasePrivateContextWindow(db, character, userName = '用户') {
             `====== [BASE PRIVATE CHAT WINDOW / R=${privateLimit}] ======`,
             '[PRIVATE WINDOW RULES]',
             '- 下面内容来自你和用户的最近私聊窗口，是所有场景都会参考的基础上下文。',
+            '- 这些私聊消息按时间从旧到新排列；越靠后的消息越新，最后几条通常最接近当前对话。',
+            '- 每行开头的时间是该消息实际发生时间；判断“刚刚/刚才/现在”时，优先结合这些时间和当前轮最新 user 消息。',
             '- 它可以影响你对用户刚刚是否找过你、你们正在聊什么、你的情绪延续、商业街行动动机和对用户的回应。',
             '- 如果当前任务不是直接回复私聊，不要把这里的内容机械复述成活动记录；只把它当作连续生活背景。',
+            '- 商业街主动私聊会标成“商业街主动私聊”，那仍然是你自己发给用户的话，不是用户说的话。',
             ...lines,
             '=========================================================='
         ].join('\n');
@@ -813,7 +818,7 @@ function buildAvailableCityDistrictSignalGuide(db) {
 }
 
 async function buildUniversalContext(context, character, recentInput = '', isGroupContext = false, activeTargets = []) {
-    const { getUserDb, getMemory, userId, topicSwitchState = null } = context;
+    const { getUserDb, getMemory, userId, topicSwitchState = null, skipBasePrivateWindow = false } = context;
     const resolvedUserId = userId || character.user_id || 'default';
     const db = getUserDb(resolvedUserId);
     const memory = getMemory(resolvedUserId);
@@ -968,17 +973,6 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     prompt += stateContextBlock;
 
     breakdown.base = getDelta(startLen);
-    startLen = prompt.length;
-
-    try {
-        const basePrivateWindow = buildBasePrivateContextWindow(db, character, userName);
-        if (basePrivateWindow) {
-            prompt += `\n${basePrivateWindow}\n`;
-        }
-    } catch (e) {
-        console.error('[ContextBuilder] Base private context error:', e.message);
-    }
-    breakdown.cross_private = getDelta(startLen);
     startLen = prompt.length;
 
     // 6. Moments (朋友圈) Context
@@ -1290,6 +1284,22 @@ async function buildUniversalContext(context, character, recentInput = '', isGro
     }
 
     breakdown.q_impression = getDelta(startLen);
+    startLen = prompt.length;
+
+    // 11. Base Private Chat Window
+    // Private replies provide raw dialogue as real message history, so the
+    // universal copy is skipped there to avoid duplicating R-window content.
+    if (!skipBasePrivateWindow) {
+        try {
+            const basePrivateWindow = buildBasePrivateContextWindow(db, character, userName);
+            if (basePrivateWindow) {
+                prompt += `\n${basePrivateWindow}\n`;
+            }
+        } catch (e) {
+            console.error('[ContextBuilder] Base private context error:', e.message);
+        }
+    }
+    breakdown.cross_private = getDelta(startLen);
 
     return { preamble: prompt, retrievedMemoriesContext, breakdown, moduleRoutes };
 }

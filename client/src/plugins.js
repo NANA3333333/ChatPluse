@@ -1,9 +1,19 @@
 import AdminDashboard from './components/AdminDashboard';
 import CityLog from './plugins/city/CityLog';
 import HousingSocialPanel from './plugins/socialHousing/HousingSocialPanel';
-import { Shield, Activity, Building2 } from 'lucide-react';
+import McpLabPanel from './plugins/mcpLab/McpLabPanel';
+import { Shield, Activity, Building2, FlaskConical } from 'lucide-react';
 
 export const plugins = [
+  {
+    id: 'mcp_lab',
+    name_en: 'MCP Lab',
+    name_zh: 'MCP 实验台',
+    icon: FlaskConical,
+    component: McpLabPanel,
+    color: '#8b5cf6',
+    position: 'experiment'
+  },
   {
     id: 'admin',
     name_en: 'Admin Dashboard',

@@ -194,6 +194,11 @@ function getUserDb(userId) {
             sweep_last_run_at INTEGER DEFAULT 0,
             sweep_last_success_at INTEGER DEFAULT 0,
             sweep_last_saved_count INTEGER DEFAULT 0,
+            private_summary_threshold INTEGER DEFAULT 30,
+            private_summary_last_error TEXT DEFAULT '',
+            private_summary_last_run_at INTEGER DEFAULT 0,
+            private_summary_last_success_at INTEGER DEFAULT 0,
+            private_summary_baseline_message_id INTEGER DEFAULT 0,
             impression_q_limit INTEGER DEFAULT 3,
             context_msg_limit INTEGER DEFAULT 60
         );
@@ -433,6 +438,21 @@ function getUserDb(userId) {
         );
         CREATE INDEX IF NOT EXISTS idx_conversation_digest_lookup ON conversation_digest_cache(character_id, source_hash);
 
+        CREATE TABLE IF NOT EXISTS private_context_summaries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            character_id TEXT NOT NULL,
+            start_message_id INTEGER NOT NULL,
+            end_message_id INTEGER NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            summary_text TEXT NOT NULL DEFAULT '',
+            source_hash TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_private_context_summaries_character
+            ON private_context_summaries(character_id, end_message_id);
+
         CREATE TABLE IF NOT EXISTS group_conversation_digest_cache (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             group_id TEXT NOT NULL,
@@ -641,6 +661,26 @@ function getUserDb(userId) {
         }
         try {
             db.prepare('ALTER TABLE characters ADD COLUMN sweep_last_saved_count INTEGER DEFAULT 0').run();
+        } catch (e) {
+        }
+        try {
+            db.prepare('ALTER TABLE characters ADD COLUMN private_summary_threshold INTEGER DEFAULT 30').run();
+        } catch (e) {
+        }
+        try {
+            db.prepare("ALTER TABLE characters ADD COLUMN private_summary_last_error TEXT DEFAULT ''").run();
+        } catch (e) {
+        }
+        try {
+            db.prepare('ALTER TABLE characters ADD COLUMN private_summary_last_run_at INTEGER DEFAULT 0').run();
+        } catch (e) {
+        }
+        try {
+            db.prepare('ALTER TABLE characters ADD COLUMN private_summary_last_success_at INTEGER DEFAULT 0').run();
+        } catch (e) {
+        }
+        try {
+            db.prepare('ALTER TABLE characters ADD COLUMN private_summary_baseline_message_id INTEGER DEFAULT 0').run();
         } catch (e) {
         }
 
@@ -915,6 +955,7 @@ function getUserDb(userId) {
         'city_status_started_at', 'city_status_until_at', 'city_medical_last_recovery_at',
         'stat_int', 'stat_sta', 'stat_cha', 'energy', 'sleep_debt', 'sleep_pressure', 'mood', 'stress', 'social_need', 'explicit_emotion_state', 'health', 'satiety', 'stomach_load', 'work_distraction', 'sleep_disruption', 'llm_debug_capture',
         'sweep_limit', 'sweep_last_error', 'sweep_last_run_at', 'sweep_last_success_at', 'sweep_last_saved_count',
+        'private_summary_threshold', 'private_summary_last_error', 'private_summary_last_run_at', 'private_summary_last_success_at', 'private_summary_baseline_message_id',
         // City DLC fields
         'calories', 'city_status', 'location', 'education', 'sys_survival', 'sys_city_notify', 'sys_city_social',
         'impression_q_limit', 'is_scheduled', 'city_action_frequency', 'context_msg_limit'
@@ -2813,6 +2854,61 @@ function getUserDb(userId) {
         }
     }
 
+    function getPrivateContextSummaries(characterId, limit = 3) {
+        try {
+            return db.prepare(`
+                SELECT *
+                FROM private_context_summaries
+                WHERE character_id = ?
+                ORDER BY end_message_id DESC
+                LIMIT ?
+            `).all(String(characterId || ''), Math.max(1, Number(limit || 3) || 3)).reverse();
+        } catch (e) {
+            console.error('[DB] Error reading private context summaries:', e.message);
+            return [];
+        }
+    }
+
+    function getLatestPrivateContextSummary(characterId) {
+        try {
+            return db.prepare(`
+                SELECT *
+                FROM private_context_summaries
+                WHERE character_id = ?
+                ORDER BY end_message_id DESC
+                LIMIT 1
+            `).get(String(characterId || '')) || null;
+        } catch (e) {
+            console.error('[DB] Error reading latest private context summary:', e.message);
+            return null;
+        }
+    }
+
+    function addPrivateContextSummary(entry = {}) {
+        try {
+            const now = Date.now();
+            db.prepare(`
+                INSERT INTO private_context_summaries (
+                    character_id, start_message_id, end_message_id, message_count,
+                    summary_text, source_hash, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            `).run(
+                String(entry.character_id || ''),
+                Number(entry.start_message_id || 0),
+                Number(entry.end_message_id || 0),
+                Number(entry.message_count || 0),
+                String(entry.summary_text || ''),
+                String(entry.source_hash || ''),
+                Number(entry.created_at || now),
+                Number(entry.updated_at || now)
+            );
+            return true;
+        } catch (e) {
+            console.error('[DB] Error writing private context summary:', e.message);
+            return false;
+        }
+    }
+
     function upsertGroupConversationDigest(entry = {}) {
         try {
             const now = Date.now();
@@ -2875,6 +2971,9 @@ function getUserDb(userId) {
         getLatestHistoryWindowCache,
         getConversationDigest,
         getGroupConversationDigest,
+        getPrivateContextSummaries,
+        getLatestPrivateContextSummary,
+        addPrivateContextSummary,
         initDb,
         getCharacters,
         getCharacter,

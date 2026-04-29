@@ -55,6 +55,8 @@ function App() {
   const [hiddenMessagesCount, setHiddenMessagesCount] = useState(0);
   const effectiveUser = { ...(authUser || {}), ...(userProfile || {}) };
   const visiblePlugins = plugins.filter(p => !p.condition || p.condition(effectiveUser));
+  const experimentalPlugins = visiblePlugins.filter(p => p.position === 'experiment');
+  const regularPlugins = visiblePlugins.filter(p => p.position !== 'experiment');
 
   console.log('App render hiddenCount:', hiddenMessagesCount);
 
@@ -451,6 +453,14 @@ function App() {
           </button>
         </div>
         <div className="nav-icons-bottom">
+          {experimentalPlugins.map(Plugin => {
+            const Icon = Plugin.icon;
+            return (
+              <button key={Plugin.id} className={`nav-icon ${activeTab === Plugin.id ? 'active' : ''}`} onClick={() => setActiveTab(Plugin.id)} title={lang === 'en' ? Plugin.name_en : Plugin.name_zh} style={{ color: Plugin.color || 'inherit' }}>
+                <Icon size={24} />
+              </button>
+            );
+          })}
           <button className="nav-icon" onClick={toggleLanguage} title={t('Toggle Language')}>
             <Globe size={24} />
             <span style={{ fontSize: '10px', marginTop: '4px', fontWeight: 'bold' }}>{lang === 'en' ? '中' : 'EN'}</span>
@@ -458,7 +468,7 @@ function App() {
           <button className={`nav-icon ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')} title={lang === 'en' ? 'Settings — Global configuration' : '设置 — 全局设置'}>
             <Settings size={24} />
           </button>
-          {visiblePlugins.map(Plugin => {
+          {regularPlugins.map(Plugin => {
             const Icon = Plugin.icon;
             return (
               <button key={Plugin.id} className={`nav-icon ${activeTab === Plugin.id ? 'active' : ''}`} onClick={() => setActiveTab(Plugin.id)} title={lang === 'en' ? Plugin.name_en : Plugin.name_zh} style={{ color: Plugin.color || 'inherit' }}>

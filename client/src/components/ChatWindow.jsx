@@ -97,20 +97,18 @@ function RagHeaderProgress({ progress, lang }) {
         setDisplayStep(progress.currentStep || 0);
     }, [progress?.runId, progress?.currentStep, progress]);
 
-    const totalSteps = progress?.totalSteps || 8;
+    const totalSteps = 7;
     const percent = Math.max(0, Math.min(100, Math.round((displayStep / totalSteps) * 100)));
     const labels = [
-        lang === 'en' ? '1 Summary' : '1 \u6458\u8981',
-        lang === 'en' ? '2 Switch' : '2 \u5207\u9898',
-        lang === 'en' ? '3 Route' : '3 \u8DEF\u7531',
-        lang === 'en' ? '4 Topics' : '4 \u4E3B\u9898',
-        lang === 'en' ? '5 Decide' : '5 \u51B3\u7B56',
-        lang === 'en' ? '6 Rewrite' : '6 \u6539\u5199',
-        lang === 'en' ? '7 Retrieve' : '7 \u53EC\u56DE',
-        lang === 'en' ? '8 Output' : '8 \u8F93\u51FA'
+        lang === 'en' ? '1 Switch' : '1 \u5207\u9898',
+        lang === 'en' ? '2 Route' : '2 \u8DEF\u7531',
+        lang === 'en' ? '3 Topics' : '3 \u4E3B\u9898',
+        lang === 'en' ? '4 Decide' : '4 \u51B3\u7B56',
+        lang === 'en' ? '5 Rewrite' : '5 \u6539\u5199',
+        lang === 'en' ? '6 Retrieve' : '6 \u53EC\u56DE',
+        lang === 'en' ? '7 Output' : '7 \u8F93\u51FA'
     ];
     const currentLabelMap = {
-        summary: lang === 'en' ? 'Summary cache update' : '\u6458\u8981\u7F13\u5B58\u66F4\u65B0',
         switch: lang === 'en' ? 'Topic switch gate' : '\u5207\u9898\u5224\u65AD',
         route: lang === 'en' ? 'Module routing' : '\u6A21\u5757\u8DEF\u7531',
         topics: lang === 'en' ? 'Topic expansion' : '\u4E3B\u9898\u6269\u5C55',
@@ -212,9 +210,9 @@ function ChatWindow({
     const isCurrentlyBlocked = engineState?.[contact?.id]?.isBlocked === 1;
     const ragProgress = engineState?.[contact?.id]?.ragProgress || {
         runId: null,
-        totalSteps: 8,
+        totalSteps: 7,
         currentStep: 0,
-        currentKey: 'summary',
+        currentKey: 'switch',
         status: 'idle',
         skipped: false
     };

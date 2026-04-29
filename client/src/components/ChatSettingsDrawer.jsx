@@ -16,10 +16,29 @@ function parseJsonSafely(value, fallback = null) {
 
 function formatLlmDebugPayload(payload) {
     if (payload == null || payload === '') return '';
+    const formatMessages = (messages) => messages.map((msg, index) => {
+        const role = String(msg?.role || 'unknown').toUpperCase();
+        const content = typeof msg?.content === 'string'
+            ? msg.content
+            : JSON.stringify(msg?.content ?? '', null, 2);
+        return `--- message ${index + 1} / ${role} ---\n${content}`;
+    }).join('\n\n');
     if (typeof payload === 'string') {
         const trimmed = payload.trim();
         const parsed = parseJsonSafely(trimmed, null);
+        if (Array.isArray(parsed) && parsed.every(item => item && typeof item === 'object' && 'role' in item)) {
+            return formatMessages(parsed);
+        }
+        if (parsed?.messages && Array.isArray(parsed.messages)) {
+            return formatMessages(parsed.messages);
+        }
         return parsed ? JSON.stringify(parsed, null, 2) : trimmed;
+    }
+    if (Array.isArray(payload) && payload.every(item => item && typeof item === 'object' && 'role' in item)) {
+        return formatMessages(payload);
+    }
+    if (payload?.messages && Array.isArray(payload.messages)) {
+        return formatMessages(payload.messages);
     }
     try {
         return JSON.stringify(payload, null, 2);
@@ -39,6 +58,8 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
     const [isSavingQLimit, setIsSavingQLimit] = useState(false);
     const [contextLimit, setContextLimit] = useState(contact?.context_msg_limit ?? 60);
     const [isSavingContextLimit, setIsSavingContextLimit] = useState(false);
+    const [privateSummaryThreshold, setPrivateSummaryThreshold] = useState(contact?.private_summary_threshold ?? 30);
+    const [isSavingPrivateSummaryThreshold, setIsSavingPrivateSummaryThreshold] = useState(false);
     const [expandedHistory, setExpandedHistory] = useState({});
     const [impressionHistories, setImpressionHistories] = useState({});
     const [contextStats, setContextStats] = useState(null);
@@ -66,6 +87,7 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         setSweepLimit(contact.sweep_limit ?? 30);
         setImpressionQLimit(contact.impression_q_limit ?? 3);
         setContextLimit(contact.context_msg_limit ?? 60);
+        setPrivateSummaryThreshold(contact.private_summary_threshold ?? 30);
         setIsScheduled(contact.is_scheduled !== 0);
         setCityActionFreq(contact.city_action_frequency ?? 1);
 
@@ -229,6 +251,22 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
             console.error('Failed to update context limit', err);
         }
         setIsSavingContextLimit(false);
+    };
+
+    const handlePrivateSummaryThresholdSave = async () => {
+        setIsSavingPrivateSummaryThreshold(true);
+        try {
+            await fetch(`${apiUrl}/characters/${contact.id}`, {
+                method: 'PUT',
+                headers: authHeaders,
+                body: JSON.stringify({ private_summary_threshold: privateSummaryThreshold })
+            });
+            await refreshStats();
+            if (contact) contact.private_summary_threshold = privateSummaryThreshold;
+        } catch (err) {
+            console.error('Failed to update private summary threshold', err);
+        }
+        setIsSavingPrivateSummaryThreshold(false);
     };
 
     const toggleHistory = async (targetId) => {
@@ -583,6 +621,34 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
                         <input type="range" min="10" max="200" step="10" value={contextLimit} onChange={(e) => setContextLimit(parseInt(e.target.value, 10))} onMouseUp={handleContextLimitSave} onTouchEnd={handleContextLimitSave} style={{ flex: 1, accentColor: 'var(--accent-color)' }} />
                         <div style={{ width: '40px', textAlign: 'right', fontWeight: 'bold', color: 'var(--accent-color)', fontSize: '14px' }}>{contextLimit}</div>
                     </div>
+                </div>
+
+                <div style={{ marginTop: '10px', backgroundColor: '#fff', padding: '15px', borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <div style={{ fontSize: '12px', color: '#999', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                            {lang === 'en' ? 'Private Summary Threshold (S)' : '私聊摘要阈值 (S参数)'}
+                        </div>
+                        {isSavingPrivateSummaryThreshold && <span style={{ fontSize: '11px', color: '#aaa' }}>{lang === 'en' ? 'Saving...' : '保存中...'}</span>}
+                    </div>
+                    <div style={{ fontSize: '13px', color: '#666', marginBottom: '12px', lineHeight: '1.4' }}>
+                        {lang === 'en'
+                            ? 'When messages outside the R raw window accumulate to S, the small model must summarize them before the reply continues. The live prompt reads up to 3 summaries plus the R raw messages.'
+                            : '当 R 原文窗口外的未摘要消息积攒到 S 条时，回复前必须先调用小模型总结。实时输入只读取最多 3 轮摘要 + R 条原文；总结失败会中止本轮并提示重试。'}
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                        <input type="range" min="5" max="100" step="5" value={privateSummaryThreshold} onChange={(e) => setPrivateSummaryThreshold(parseInt(e.target.value, 10))} onMouseUp={handlePrivateSummaryThresholdSave} onTouchEnd={handlePrivateSummaryThresholdSave} style={{ flex: 1, accentColor: 'var(--accent-color)' }} />
+                        <div style={{ width: '40px', textAlign: 'right', fontWeight: 'bold', color: 'var(--accent-color)', fontSize: '14px' }}>{privateSummaryThreshold}</div>
+                    </div>
+                    <div style={{ marginTop: '10px', fontSize: '12px', color: '#666', lineHeight: 1.5 }}>
+                        {lang === 'en' ? 'Summary progress: ' : '摘要积攒：'}
+                        <strong>{contextStats?.private_summary_pending_count ?? 0} / {contextStats?.private_summary_threshold ?? privateSummaryThreshold}</strong>
+                        {lang === 'en' ? ` pending, ${contextStats?.private_summary_active_count ?? 0} active summaries.` : ` 条待总结，当前读取 ${contextStats?.private_summary_active_count ?? 0} 轮摘要。`}
+                    </div>
+                    {!!contextStats?.private_summary_last_error && (
+                        <div style={{ marginTop: '8px', padding: '8px 10px', background: '#fff1f1', border: '1px solid #ffc0c0', borderRadius: '6px', color: '#c0392b', fontSize: '12px', lineHeight: 1.5 }}>
+                            <strong>{lang === 'en' ? 'Summary Error: ' : '摘要失败：'}</strong>{contextStats.private_summary_last_error}
+                        </div>
+                    )}
                 </div>
 
                 <div style={{ marginTop: '10px', backgroundColor: '#fff', padding: '15px', borderTop: '1px solid #eee', borderBottom: '1px solid #eee' }}>
