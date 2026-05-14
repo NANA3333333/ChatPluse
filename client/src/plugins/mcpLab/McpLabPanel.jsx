@@ -139,6 +139,8 @@ function ResultList({ result }) {
 export default function McpLabPanel({ apiUrl }) {
   const headers = useMemo(() => getHeaders(), []);
   const [status, setStatus] = useState(null);
+  const [serperConfig, setSerperConfig] = useState(null);
+  const [serperKey, setSerperKey] = useState('');
   const [characters, setCharacters] = useState([]);
   const [characterId, setCharacterId] = useState('');
   const [query, setQuery] = useState('');
@@ -163,6 +165,12 @@ export default function McpLabPanel({ apiUrl }) {
         requestJson(endpoint(apiUrl, '/mcp-lab/knowledge'), { headers })
       ]);
       setStatus(statusData);
+      try {
+        const configData = await requestJson(endpoint(apiUrl, '/mcp-lab/serper-config'), { headers });
+        setSerperConfig(configData);
+      } catch (configError) {
+        setSerperConfig(null);
+      }
       setTasks(taskData.tasks || []);
       const nextCharacters = Array.isArray(characterData) ? characterData : [];
       setCharacters(nextCharacters);
@@ -188,6 +196,26 @@ export default function McpLabPanel({ apiUrl }) {
         body: JSON.stringify({ query })
       });
       setResult(data.result);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveSerperKey() {
+    setBusy(true);
+    setError('');
+    try {
+      const data = await requestJson(endpoint(apiUrl, '/mcp-lab/serper-config'), {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify({ serper_api_key: serperKey })
+      });
+      setSerperConfig(data);
+      setSerperKey('');
+      const statusData = await requestJson(endpoint(apiUrl, '/mcp-lab/status'), { headers });
+      setStatus(statusData);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -355,6 +383,18 @@ export default function McpLabPanel({ apiUrl }) {
 
           <section style={sectionStyle}>
             <div style={{ fontWeight: 700, fontSize: '13px', marginBottom: '8px' }}>联网查询</div>
+            <div style={{ display: 'grid', gap: '8px', marginBottom: '10px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#64748b', fontSize: '12px' }}>
+                <span>搜索源：{status?.search_provider === 'serper' ? 'Serper / Google' : 'DuckDuckGo Instant Answer'}</span>
+                {serperConfig?.masked && <span>({serperConfig.masked})</span>}
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input style={{ ...inputStyle, flex: 1 }} type="password" value={serperKey} onChange={(e) => setSerperKey(e.target.value)} placeholder={serperConfig?.has_key ? '输入新 Serper Key；留空保存可清除用户级 Key' : 'Serper API Key，可空'} />
+                <button style={iconButton} onClick={saveSerperKey} disabled={busy} title="保存 Serper Key">
+                  <Save size={15} />
+                </button>
+              </div>
+            </div>
             <div style={{ display: 'flex', gap: '8px' }}>
               <input style={{ ...inputStyle, flex: 1 }} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="搜索关键词" onKeyDown={(e) => { if (e.key === 'Enter') runSearch(); }} />
               <button style={primaryButton} onClick={runSearch} disabled={busy} title="搜索">

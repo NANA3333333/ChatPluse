@@ -281,7 +281,8 @@ function getUserDb(userId) {
             group_interval_max INTEGER DEFAULT 60,
             theme_config TEXT DEFAULT '{}',
             banner TEXT,
-            private_msg_limit_for_group INTEGER DEFAULT 3
+            private_msg_limit_for_group INTEGER DEFAULT 3,
+            serper_api_key TEXT DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS moment_likes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -866,6 +867,7 @@ function getUserDb(userId) {
         // Moments DLC: token limit and reaction rate
         try { db.prepare('ALTER TABLE user_profile ADD COLUMN moments_token_limit INTEGER DEFAULT 500').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE user_profile ADD COLUMN moments_reaction_rate INTEGER DEFAULT 30').run(); } catch (e) { }
+        try { db.prepare('ALTER TABLE user_profile ADD COLUMN serper_api_key TEXT DEFAULT ""').run(); } catch (e) { }
         // Track last moment posted by each character (cooldown)
         try { db.prepare('ALTER TABLE characters ADD COLUMN last_moment_at INTEGER DEFAULT 0').run(); } catch (e) { }
         // Enhanced jealousy system
@@ -1843,7 +1845,7 @@ function getUserDb(userId) {
     }
 
     function updateUserProfile(data) {
-        const allowedFields = ['name', 'avatar', 'banner', 'bio', 'theme', 'custom_css', 'theme_config', 'group_msg_limit', 'group_skip_rate', 'group_proactive_enabled', 'group_interval_min', 'group_interval_max', 'jealousy_chance', 'wallet', 'private_msg_limit_for_group', 'moments_token_limit', 'moments_reaction_rate'];
+        const allowedFields = ['name', 'avatar', 'banner', 'bio', 'theme', 'custom_css', 'theme_config', 'group_msg_limit', 'group_skip_rate', 'group_proactive_enabled', 'group_interval_min', 'group_interval_max', 'jealousy_chance', 'wallet', 'private_msg_limit_for_group', 'moments_token_limit', 'moments_reaction_rate', 'serper_api_key'];
         const fields = Object.keys(data).filter(k => allowedFields.includes(k));
         if (fields.length === 0) return;
         const normalizedData = { ...data };
