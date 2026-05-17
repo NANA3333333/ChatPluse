@@ -3,6 +3,16 @@ import { AlertCircle, ArrowRightLeft, Volume2 } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 
+let ttsPlaybackQueue = Promise.resolve();
+const ttsQueuedKeys = new Set();
+const ttsAutoplayKeys = new Set();
+
+function enqueueTtsPlayback(task) {
+    const run = ttsPlaybackQueue.catch(() => { }).then(task);
+    ttsPlaybackQueue = run.catch(() => { });
+    return run;
+}
+
 function MemoryRecallDisclosure({ memories = [], expanded = false }) {
     const { lang } = useLanguage();
 
@@ -226,30 +236,36 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
 
     const playTts = async () => {
         if (!tts?.audio_url || ttsPlaying) return;
+        const ttsKey = `${message.id || ''}:${tts.audio_url}`;
+        if (ttsQueuedKeys.has(ttsKey)) return;
+        ttsQueuedKeys.add(ttsKey);
         setTtsError('');
-        setTtsPlaying(true);
-        try {
+        await enqueueTtsPlayback(async () => {
+            setTtsPlaying(true);
+            let objectUrl = '';
             const res = await fetch(resolveTtsAudioUrl(tts.audio_url), {
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const blob = await res.blob();
-            const objectUrl = URL.createObjectURL(blob);
-            const audio = new Audio(objectUrl);
-            audio.onended = () => {
-                URL.revokeObjectURL(objectUrl);
+            objectUrl = URL.createObjectURL(blob);
+            try {
+                const audio = new Audio(objectUrl);
+                await new Promise((resolve, reject) => {
+                    audio.onended = resolve;
+                    audio.onerror = () => reject(new Error(lang === 'en' ? 'Playback failed' : '播放失败'));
+                    audio.play().catch(reject);
+                });
+            } finally {
+                if (objectUrl) URL.revokeObjectURL(objectUrl);
                 setTtsPlaying(false);
-            };
-            audio.onerror = () => {
-                URL.revokeObjectURL(objectUrl);
-                setTtsPlaying(false);
-                setTtsError(lang === 'en' ? 'Playback failed' : '播放失败');
-            };
-            await audio.play();
-        } catch (e) {
-            setTtsPlaying(false);
+            }
+        }).catch((e) => {
             setTtsError(e.message || (lang === 'en' ? 'Playback failed' : '播放失败'));
-        }
+        }).finally(() => {
+            ttsQueuedKeys.delete(ttsKey);
+            setTtsPlaying(false);
+        });
     };
 
     useEffect(() => {
@@ -263,6 +279,9 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
 
     useEffect(() => {
         if (tts?.status === 'ready' && tts?.autoplay && tts?.audio_url) {
+            const autoplayKey = `${message.id || ''}:${tts.audio_url}`;
+            if (ttsAutoplayKeys.has(autoplayKey)) return;
+            ttsAutoplayKeys.add(autoplayKey);
             playTts();
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
