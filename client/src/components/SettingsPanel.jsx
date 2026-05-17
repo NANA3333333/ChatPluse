@@ -1,5 +1,5 @@
 ﻿import React, { useState, useEffect, useCallback } from 'react';
-import { User, Trash2, Edit3, Save, RefreshCw, Palette, Download, Upload, FileText, ChevronDown, ChevronRight, Sparkles, ChevronLeft, Database } from 'lucide-react';
+import { User, Trash2, Edit3, Save, RefreshCw, Palette, Download, Upload, FileText, ChevronDown, ChevronRight, Sparkles, ChevronLeft, Database, Volume2 } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
 import { useAuth } from '../AuthContext';
@@ -40,6 +40,131 @@ const getDefaultGuidelines = (lang) => {
    - 如果你的压力被缓解，输出 [PRESSURE:0]。
    以上方括号标签都会在处理时对用户隐藏，但效果会生效。`;
 };
+
+const TTS_PROVIDERS = [
+    {
+        id: 'tencent',
+        label: '腾讯云 TTS',
+        modelHint: '大模型音色 / 精品音色',
+        voiceHint: '例如：101001 / 101016，按腾讯云音色 ID 填写',
+        keyHint: 'SecretId:SecretKey',
+        modelOptions: [
+            { value: 'large', label: '大模型音色' },
+            { value: 'premium', label: '精品音色' }
+        ],
+        voiceOptions: [
+            { value: '501001', label: '501001 智兰 - 资讯女声（大模型）' },
+            { value: '101001', label: '101001 智瑜 - 中文女声' },
+            { value: '101004', label: '101004 智云 - 通用男声' },
+            { value: '101011', label: '101011 智燕 - 新闻女声' },
+            { value: '101013', label: '101013 智辉 - 新闻男声' },
+            { value: '101016', label: '101016 智甜 - 女童声' }
+        ]
+    },
+    {
+        id: 'openai',
+        label: 'OpenAI TTS',
+        modelHint: '例如：gpt-4o-mini-tts / tts-1',
+        voiceHint: '例如：alloy / verse / shimmer',
+        keyHint: 'sk-...',
+        modelOptions: [
+            { value: 'gpt-4o-mini-tts', label: 'gpt-4o-mini-tts' },
+            { value: 'tts-1', label: 'tts-1' },
+            { value: 'tts-1-hd', label: 'tts-1-hd' }
+        ],
+        voiceOptions: [
+            { value: 'alloy', label: 'alloy' },
+            { value: 'ash', label: 'ash' },
+            { value: 'ballad', label: 'ballad' },
+            { value: 'coral', label: 'coral' },
+            { value: 'nova', label: 'nova' },
+            { value: 'shimmer', label: 'shimmer' },
+            { value: 'verse', label: 'verse' }
+        ]
+    },
+    {
+        id: 'azure',
+        label: 'Azure Speech',
+        modelHint: 'neural',
+        voiceHint: '例如：zh-CN-XiaoxiaoNeural',
+        keyHint: 'Speech key；Endpoint 可填 region 或完整地址',
+        modelOptions: [
+            { value: 'neural', label: 'Neural voice' }
+        ],
+        voiceOptions: [
+            { value: 'zh-CN-XiaoxiaoNeural', label: 'zh-CN-XiaoxiaoNeural 女声' },
+            { value: 'zh-CN-YunxiNeural', label: 'zh-CN-YunxiNeural 男声' },
+            { value: 'zh-CN-XiaoyiNeural', label: 'zh-CN-XiaoyiNeural 女声' },
+            { value: 'zh-CN-YunjianNeural', label: 'zh-CN-YunjianNeural 男声' }
+        ]
+    },
+    {
+        id: 'google',
+        label: 'Google Cloud TTS',
+        modelHint: 'neural2 / wavenet / standard',
+        voiceHint: '例如：cmn-CN-Wavenet-A',
+        keyHint: 'API key 或服务账号凭证标识',
+        modelOptions: [
+            { value: 'neural2', label: 'Neural2' },
+            { value: 'wavenet', label: 'WaveNet' },
+            { value: 'standard', label: 'Standard' }
+        ],
+        voiceOptions: [
+            { value: 'cmn-CN-Wavenet-A', label: 'cmn-CN-Wavenet-A 女声' },
+            { value: 'cmn-CN-Wavenet-B', label: 'cmn-CN-Wavenet-B 男声' },
+            { value: 'cmn-CN-Wavenet-C', label: 'cmn-CN-Wavenet-C 男声' },
+            { value: 'cmn-CN-Wavenet-D', label: 'cmn-CN-Wavenet-D 女声' }
+        ]
+    },
+    {
+        id: 'minimax',
+        label: 'MiniMax Speech',
+        modelHint: 'speech-02-turbo / speech-02-hd',
+        voiceHint: '填写 voice_id',
+        keyHint: 'API key',
+        modelOptions: [
+            { value: 'speech-02-turbo', label: 'speech-02-turbo' },
+            { value: 'speech-02-hd', label: 'speech-02-hd' }
+        ],
+        voiceOptions: [
+            { value: 'male-qn-qingse', label: 'male-qn-qingse 男声' },
+            { value: 'female-shaonv', label: 'female-shaonv 女声' }
+        ]
+    },
+    {
+        id: 'elevenlabs',
+        label: 'ElevenLabs',
+        modelHint: 'eleven_multilingual_v2',
+        voiceHint: '填写 voice_id',
+        keyHint: 'xi-api-key',
+        modelOptions: [
+            { value: 'eleven_multilingual_v2', label: 'eleven_multilingual_v2' },
+            { value: 'eleven_turbo_v2_5', label: 'eleven_turbo_v2_5' }
+        ],
+        voiceOptions: []
+    },
+    {
+        id: 'custom',
+        label: '自定义兼容接口',
+        modelHint: '由接口决定',
+        voiceHint: '由接口决定',
+        keyHint: 'Bearer token / API key'
+    }
+];
+
+function getTtsProviderConfig(providerId) {
+    return TTS_PROVIDERS.find(item => item.id === providerId) || TTS_PROVIDERS[0];
+}
+
+function getTtsSelectValue(value, options = []) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    return options.some(item => item.value === raw) ? raw : '__custom';
+}
+
+function isCustomTtsValue(value, options = []) {
+    return getTtsSelectValue(value, options) === '__custom';
+}
 
 function getLocalFallbackProfile() {
     let localUser = null;
@@ -110,6 +235,8 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const [memModels, setMemModels] = useState([]);
     const [memModelFetching, setMemModelFetching] = useState(false);
     const [memModelError, setMemModelError] = useState('');
+    const [customTtsVoiceOpen, setCustomTtsVoiceOpen] = useState(false);
+    const [customTtsModelOpen, setCustomTtsModelOpen] = useState(false);
 
     const formatCount = (value) => Number(value || 0).toLocaleString();
     const formatTime = (value) => {
@@ -1208,7 +1335,16 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                         <RefreshCw size={18} />
                                     </button>
                                     <button
-                                        onClick={() => setEditingContact({ ...c, system_prompt: c.system_prompt || getDefaultGuidelines(lang) })}
+                                        onClick={() => {
+                                            setCustomTtsVoiceOpen(false);
+                                            setCustomTtsModelOpen(false);
+                                            setEditingContact({
+                                                ...c,
+                                                system_prompt: c.system_prompt || getDefaultGuidelines(lang),
+                                                tts_provider: c.tts_provider || 'tencent',
+                                                tts_trigger_mode: c.tts_trigger_mode || 'tagged'
+                                            });
+                                        }}
                                         style={{ background: 'none', border: 'none', color: 'var(--accent-color)', cursor: 'pointer', padding: '5px' }} title={lang === 'en' ? 'Edit API endpoint, model, persona, prompt' : '编辑 API 接口、模型、人设和提示词'}>
                                         <Edit3 size={18} />
                                     </button>
@@ -1754,6 +1890,192 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                     </select>
                                 )}
                             </label>
+                        </div>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '10px', padding: '10px', background: '#f8fafc', borderRadius: '4px', border: '1px solid #e2e8f0' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
+                                <strong style={{ fontSize: '13px', color: '#4a5568', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    <Volume2 size={15} /> {lang === 'en' ? 'Private Chat TTS' : '私聊语音输出'}
+                                </strong>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#333', cursor: 'pointer' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={editingContact.tts_enabled === 1}
+                                        onChange={(e) => setEditingContact({ ...editingContact, tts_enabled: e.target.checked ? 1 : 0 })}
+                                    />
+                                    {lang === 'en' ? 'Enable' : '启用'}
+                                </label>
+                            </div>
+                            <div style={{ fontSize: '12px', color: '#64748b', lineHeight: 1.5 }}>
+                                {lang === 'en'
+                                    ? 'Only private-chat character replies can use TTS. The main model may request speech with a hidden TTS tag; group chat, city logs, web-search drafts, and system messages are ignored.'
+                                    : '只对私聊角色回复开放。主模型可以用隐藏 TTS 标签请求语音；群聊、商业街日志、联网草稿和系统消息都会忽略。'}
+                            </div>
+
+                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
+                                {lang === 'en' ? 'Provider' : '厂商'}:
+                                <select
+                                    value={editingContact.tts_provider || 'tencent'}
+                                    onChange={(e) => {
+                                        const nextProvider = e.target.value;
+                                        setCustomTtsVoiceOpen(false);
+                                        setCustomTtsModelOpen(false);
+                                        setEditingContact({
+                                            ...editingContact,
+                                            tts_provider: nextProvider,
+                                            tts_voice: '',
+                                            tts_model: ''
+                                        });
+                                    }}
+                                    style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                >
+                                    {TTS_PROVIDERS.map(provider => (
+                                        <option key={provider.id} value={provider.id}>{provider.label}</option>
+                                    ))}
+                                </select>
+                            </label>
+
+                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
+                                {lang === 'en' ? 'API Key / Credentials' : 'API Key / 凭证'}:
+                                <input
+                                    type="password"
+                                    value={editingContact.tts_api_key || ''}
+                                    onChange={(e) => setEditingContact({ ...editingContact, tts_api_key: e.target.value })}
+                                    placeholder={getTtsProviderConfig(editingContact.tts_provider).keyHint}
+                                    style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                />
+                            </label>
+
+                            <div style={{ display: 'flex', gap: '10px' }}>
+                                <label style={{ flex: 1, display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
+                                    {lang === 'en' ? 'Voice' : '音色'}:
+                                    {getTtsProviderConfig(editingContact.tts_provider).voiceOptions?.length > 0 ? (
+                                        <>
+                                            <select
+                                                value={customTtsVoiceOpen ? '__custom' : getTtsSelectValue(editingContact.tts_voice, getTtsProviderConfig(editingContact.tts_provider).voiceOptions)}
+                                                onChange={(e) => {
+                                                    if (e.target.value === '__custom') {
+                                                        setCustomTtsVoiceOpen(true);
+                                                        setEditingContact({ ...editingContact, tts_voice: '' });
+                                                        return;
+                                                    }
+                                                    setCustomTtsVoiceOpen(false);
+                                                    setEditingContact({ ...editingContact, tts_voice: e.target.value });
+                                                }}
+                                                style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                            >
+                                                <option value="">{lang === 'en' ? '-- Select voice --' : '-- 选择音色 --'}</option>
+                                                {getTtsProviderConfig(editingContact.tts_provider).voiceOptions.map(option => (
+                                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                                ))}
+                                                <option value="__custom">{lang === 'en' ? 'Custom voice id...' : '自定义音色 ID...'}</option>
+                                            </select>
+                                            {(customTtsVoiceOpen || isCustomTtsValue(editingContact.tts_voice, getTtsProviderConfig(editingContact.tts_provider).voiceOptions)) && (
+                                                <input
+                                                    type="text"
+                                                    value={editingContact.tts_voice || ''}
+                                                    onChange={(e) => setEditingContact({ ...editingContact, tts_voice: e.target.value })}
+                                                    placeholder={getTtsProviderConfig(editingContact.tts_provider).voiceHint}
+                                                    style={{ padding: '8px', marginTop: '6px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                                />
+                                            )}
+                                        </>
+                                    ) : (
+                                        <input
+                                            type="text"
+                                            value={editingContact.tts_voice || ''}
+                                            onChange={(e) => setEditingContact({ ...editingContact, tts_voice: e.target.value })}
+                                            placeholder={getTtsProviderConfig(editingContact.tts_provider).voiceHint}
+                                            style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                        />
+                                    )}
+                                </label>
+                                <label style={{ flex: 1, display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
+                                    {lang === 'en' ? 'Model / Tier' : '模型 / 档位'}:
+                                    {getTtsProviderConfig(editingContact.tts_provider).modelOptions?.length > 0 ? (
+                                        <>
+                                            <select
+                                                value={customTtsModelOpen ? '__custom' : getTtsSelectValue(editingContact.tts_model, getTtsProviderConfig(editingContact.tts_provider).modelOptions)}
+                                                onChange={(e) => {
+                                                    if (e.target.value === '__custom') {
+                                                        setCustomTtsModelOpen(true);
+                                                        setEditingContact({ ...editingContact, tts_model: '' });
+                                                        return;
+                                                    }
+                                                    setCustomTtsModelOpen(false);
+                                                    setEditingContact({ ...editingContact, tts_model: e.target.value });
+                                                }}
+                                                style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                            >
+                                                <option value="">{lang === 'en' ? '-- Select model --' : '-- 选择模型 / 档位 --'}</option>
+                                                {getTtsProviderConfig(editingContact.tts_provider).modelOptions.map(option => (
+                                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                                ))}
+                                                <option value="__custom">{lang === 'en' ? 'Custom model...' : '自定义模型 / 档位...'}</option>
+                                            </select>
+                                            {(customTtsModelOpen || isCustomTtsValue(editingContact.tts_model, getTtsProviderConfig(editingContact.tts_provider).modelOptions)) && (
+                                                <input
+                                                    type="text"
+                                                    value={editingContact.tts_model || ''}
+                                                    onChange={(e) => setEditingContact({ ...editingContact, tts_model: e.target.value })}
+                                                    placeholder={getTtsProviderConfig(editingContact.tts_provider).modelHint}
+                                                    style={{ padding: '8px', marginTop: '6px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                                />
+                                            )}
+                                        </>
+                                    ) : (
+                                        <input
+                                            type="text"
+                                            value={editingContact.tts_model || ''}
+                                            onChange={(e) => setEditingContact({ ...editingContact, tts_model: e.target.value })}
+                                            placeholder={getTtsProviderConfig(editingContact.tts_provider).modelHint}
+                                            style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                        />
+                                    )}
+                                </label>
+                            </div>
+
+                            <button
+                                type="button"
+                                disabled
+                                title={lang === 'en' ? 'Preview requires the TTS synthesis API to be connected first.' : '试听需要先接入 TTS 合成接口。'}
+                                style={{ alignSelf: 'flex-start', display: 'flex', alignItems: 'center', gap: '6px', padding: '7px 12px', border: '1px solid #d8dee8', borderRadius: '6px', background: '#eef2f7', color: '#94a3b8', cursor: 'not-allowed', fontSize: '13px' }}
+                            >
+                                <Volume2 size={14} /> {lang === 'en' ? 'Preview voice' : '试听'}
+                            </button>
+
+                            <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
+                                {lang === 'en' ? 'Endpoint / Region (optional)' : 'Endpoint / 地域（可选）'}:
+                                <input
+                                    type="text"
+                                    value={editingContact.tts_endpoint || ''}
+                                    onChange={(e) => setEditingContact({ ...editingContact, tts_endpoint: e.target.value })}
+                                    placeholder={editingContact.tts_provider === 'azure' ? 'eastasia / https://...cognitiveservices.azure.com' : 'optional'}
+                                    style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                />
+                            </label>
+
+                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                                <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
+                                    {lang === 'en' ? 'Trigger' : '触发方式'}:
+                                    <select
+                                        value={editingContact.tts_trigger_mode || 'tagged'}
+                                        onChange={(e) => setEditingContact({ ...editingContact, tts_trigger_mode: e.target.value })}
+                                        style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                    >
+                                        <option value="tagged">{lang === 'en' ? 'Main-model TTS tag only' : '仅主模型 TTS 标签'}</option>
+                                        <option value="all_private">{lang === 'en' ? 'Every private reply' : '每条私聊回复'}</option>
+                                    </select>
+                                </label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '13px', color: '#333', cursor: 'pointer', paddingTop: '23px' }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={editingContact.tts_autoplay === 1}
+                                        onChange={(e) => setEditingContact({ ...editingContact, tts_autoplay: e.target.checked ? 1 : 0 })}
+                                    />
+                                    {lang === 'en' ? 'Auto-play when ready' : '生成后自动播放'}
+                                </label>
+                            </div>
                         </div>
 
                         <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666', marginTop: '10px' }}>

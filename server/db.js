@@ -152,6 +152,14 @@ function getUserDb(userId) {
             memory_api_endpoint TEXT,
             memory_api_key TEXT,
             memory_model_name TEXT,
+            tts_enabled INTEGER DEFAULT 0,
+            tts_provider TEXT DEFAULT 'tencent',
+            tts_api_key TEXT DEFAULT '',
+            tts_voice TEXT DEFAULT '',
+            tts_model TEXT DEFAULT '',
+            tts_endpoint TEXT DEFAULT '',
+            tts_trigger_mode TEXT DEFAULT 'tagged',
+            tts_autoplay INTEGER DEFAULT 0,
             interval_min INTEGER DEFAULT 10,
             interval_max INTEGER DEFAULT 120,
             affinity INTEGER DEFAULT 50,
@@ -743,6 +751,16 @@ function getUserDb(userId) {
         try { db.prepare('ALTER TABLE characters ADD COLUMN memory_api_key TEXT').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN memory_model_name TEXT').run(); } catch (e) { }
 
+        // Add per-character private-chat TTS config
+        try { db.prepare('ALTER TABLE characters ADD COLUMN tts_enabled INTEGER DEFAULT 0').run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_provider TEXT DEFAULT 'tencent'").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_api_key TEXT DEFAULT ''").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_voice TEXT DEFAULT ''").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_model TEXT DEFAULT ''").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_endpoint TEXT DEFAULT ''").run(); } catch (e) { }
+        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_trigger_mode TEXT DEFAULT 'tagged'").run(); } catch (e) { }
+        try { db.prepare('ALTER TABLE characters ADD COLUMN tts_autoplay INTEGER DEFAULT 0').run(); } catch (e) { }
+
         // Add sender_name and sender_avatar to group_messages (so deleted chars still display)
         try {
             db.prepare('ALTER TABLE group_messages ADD COLUMN sender_name TEXT').run();
@@ -954,7 +972,8 @@ function getUserDb(userId) {
     const characterColumns = [
         'id', 'name', 'avatar', 'persona', 'world_info', 'api_endpoint',
         'api_key', 'model_name', 'memory_api_endpoint', 'memory_api_key',
-        'memory_model_name', 'interval_min', 'interval_max', 'affinity', 'initial_affinity',
+        'memory_model_name', 'tts_enabled', 'tts_provider', 'tts_api_key', 'tts_voice', 'tts_model', 'tts_endpoint', 'tts_trigger_mode', 'tts_autoplay',
+        'interval_min', 'interval_max', 'affinity', 'initial_affinity',
         'status', 'pressure_level', 'last_user_msg_time', 'is_blocked', 'system_prompt', 'max_tokens',
         'sys_proactive', 'sys_timer', 'sys_pressure', 'sys_jealousy', 'is_diary_unlocked', 'diary_password', 'wallet', 'emoji', 'last_moment_at',
         'jealousy_level', 'jealousy_target', 'city_reply_pending', 'city_ignore_streak', 'city_last_outreach_at', 'city_post_ignore_reaction',
