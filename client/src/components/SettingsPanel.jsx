@@ -47,7 +47,7 @@ const TTS_PROVIDERS = [
         label: '腾讯云 TTS',
         modelHint: '大模型音色 / 精品音色',
         voiceHint: '例如：101001 / 101016，按腾讯云音色 ID 填写',
-        keyHint: 'SecretId:SecretKey',
+        keyHint: '可直接粘贴腾讯云弹窗里的 SecretId / SecretKey 两行',
         modelOptions: [
             { value: 'large', label: '大模型音色' },
             { value: 'premium', label: '精品音色' }
@@ -1937,13 +1937,22 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
 
                             <label style={{ display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
                                 {lang === 'en' ? 'API Key / Credentials' : 'API Key / 凭证'}:
-                                <input
-                                    type="password"
-                                    value={editingContact.tts_api_key || ''}
-                                    onChange={(e) => setEditingContact({ ...editingContact, tts_api_key: e.target.value })}
-                                    placeholder={getTtsProviderConfig(editingContact.tts_provider).keyHint}
-                                    style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
-                                />
+                                {editingContact.tts_provider === 'tencent' ? (
+                                    <textarea
+                                        value={editingContact.tts_api_key || ''}
+                                        onChange={(e) => setEditingContact({ ...editingContact, tts_api_key: e.target.value })}
+                                        placeholder={'SecretId 这里粘贴第一行\nSecretKey 这里粘贴第二行'}
+                                        style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px', minHeight: '58px', resize: 'vertical', fontFamily: 'monospace', fontSize: '12px' }}
+                                    />
+                                ) : (
+                                    <input
+                                        type="password"
+                                        value={editingContact.tts_api_key || ''}
+                                        onChange={(e) => setEditingContact({ ...editingContact, tts_api_key: e.target.value })}
+                                        placeholder={getTtsProviderConfig(editingContact.tts_provider).keyHint}
+                                        style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                    />
+                                )}
                             </label>
 
                             <div style={{ display: 'flex', gap: '10px' }}>

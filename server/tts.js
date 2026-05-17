@@ -41,11 +41,31 @@ function sha256(data, encoding = 'hex') {
 
 function parseTencentCredentials(value) {
     const raw = String(value || '').trim();
-    const separator = raw.includes(':') ? ':' : '|';
-    const [secretId, ...rest] = raw.split(separator);
+    if (!raw) return { secretId: '', secretKey: '' };
+
+    const secretIdMatch = raw.match(/SecretId\s*[:：]?\s*([A-Za-z0-9_-]+)/i);
+    const secretKeyMatch = raw.match(/SecretKey\s*[:：]?\s*([A-Za-z0-9_-]+)/i);
+    if (secretIdMatch?.[1] && secretKeyMatch?.[1]) {
+        return {
+            secretId: secretIdMatch[1].trim(),
+            secretKey: secretKeyMatch[1].trim()
+        };
+    }
+
+    const compact = raw.replace(/\r?\n/g, ' ').trim();
+    const separator = compact.includes(':') ? ':' : (compact.includes('|') ? '|' : '');
+    if (separator) {
+        const [secretId, ...rest] = compact.split(separator);
+        return {
+            secretId: String(secretId || '').trim(),
+            secretKey: rest.join(separator).trim()
+        };
+    }
+
+    const parts = compact.split(/\s+/).filter(Boolean);
     return {
-        secretId: String(secretId || '').trim(),
-        secretKey: rest.join(separator).trim()
+        secretId: parts[0] || '',
+        secretKey: parts[1] || ''
     };
 }
 
@@ -61,7 +81,7 @@ function resolveTencentEndpoint(endpoint = '') {
 
 async function synthesizeTencent({ character, text, intent }) {
     const { secretId, secretKey } = parseTencentCredentials(character.tts_api_key);
-    if (!secretId || !secretKey) throw new Error('腾讯云 TTS 需要按 SecretId:SecretKey 填写凭证。');
+    if (!secretId || !secretKey) throw new Error('腾讯云 TTS 需要粘贴 SecretId 和 SecretKey，可直接使用腾讯云弹窗里的两行格式。');
 
     const endpoint = resolveTencentEndpoint(character.tts_endpoint);
     const timestamp = Math.floor(Date.now() / 1000);
