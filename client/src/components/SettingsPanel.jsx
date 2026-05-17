@@ -237,6 +237,17 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
     const [memModelError, setMemModelError] = useState('');
     const [customTtsVoiceOpen, setCustomTtsVoiceOpen] = useState(false);
     const [customTtsModelOpen, setCustomTtsModelOpen] = useState(false);
+    const [tencentVoiceOptions, setTencentVoiceOptions] = useState([]);
+    const [tencentVoiceSource, setTencentVoiceSource] = useState('');
+    const [tencentVoiceError, setTencentVoiceError] = useState('');
+
+    const getEditingTtsProviderConfig = useCallback((providerId) => {
+        const config = getTtsProviderConfig(providerId);
+        if (config.id === 'tencent' && tencentVoiceOptions.length) {
+            return { ...config, voiceOptions: tencentVoiceOptions };
+        }
+        return config;
+    }, [tencentVoiceOptions]);
 
     const formatCount = (value) => Number(value || 0).toLocaleString();
     const formatTime = (value) => {
@@ -492,6 +503,26 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
         setFetching(false);
     };
 
+    const loadTencentVoices = useCallback(async (forceRefresh = false) => {
+        try {
+            setTencentVoiceError('');
+            const res = await fetch(`${apiUrl}/tts/tencent/voices${forceRefresh ? '?refresh=1' : ''}`, {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            const voices = Array.isArray(data.voices) ? data.voices : [];
+            if (!voices.length) throw new Error('没有拉到腾讯云音色列表');
+            setTencentVoiceOptions(voices.map(voice => ({
+                value: String(voice.value || voice.id || '').trim(),
+                label: voice.label || `${voice.id || voice.value} ${voice.name || ''} - ${voice.scene || ''}`.trim()
+            })).filter(voice => voice.value));
+            setTencentVoiceSource(data.source || '');
+        } catch (e) {
+            setTencentVoiceError(e.message || String(e));
+        }
+    }, [apiUrl]);
+
     useEffect(() => {
         // Fetch user profile
         const headers = { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` };
@@ -574,6 +605,10 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
             window.removeEventListener('refresh_contacts', fetchCharacters);
         };
     }, [apiUrl, loadMemoryStatus, loadBackgroundQueueStats]);
+
+    useEffect(() => {
+        loadTencentVoices(false);
+    }, [loadTencentVoices]);
 
     const handleSaveProfile = async () => {
         const updated = { ...profile, name: editName, avatar: editAvatar, banner: editBanner, bio: editBio };
@@ -1949,7 +1984,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                         type="password"
                                         value={editingContact.tts_api_key || ''}
                                         onChange={(e) => setEditingContact({ ...editingContact, tts_api_key: e.target.value })}
-                                        placeholder={getTtsProviderConfig(editingContact.tts_provider).keyHint}
+                                        placeholder={getEditingTtsProviderConfig(editingContact.tts_provider).keyHint}
                                         style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
                                     />
                                 )}
@@ -1958,33 +1993,50 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                             <div style={{ display: 'flex', gap: '10px' }}>
                                 <label style={{ flex: 1, display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
                                     {lang === 'en' ? 'Voice' : '音色'}:
-                                    {getTtsProviderConfig(editingContact.tts_provider).voiceOptions?.length > 0 ? (
+                                    {getEditingTtsProviderConfig(editingContact.tts_provider).voiceOptions?.length > 0 ? (
                                         <>
-                                            <select
-                                                value={customTtsVoiceOpen ? '__custom' : getTtsSelectValue(editingContact.tts_voice, getTtsProviderConfig(editingContact.tts_provider).voiceOptions)}
-                                                onChange={(e) => {
-                                                    if (e.target.value === '__custom') {
-                                                        setCustomTtsVoiceOpen(true);
-                                                        setEditingContact({ ...editingContact, tts_voice: '' });
-                                                        return;
-                                                    }
-                                                    setCustomTtsVoiceOpen(false);
-                                                    setEditingContact({ ...editingContact, tts_voice: e.target.value });
-                                                }}
-                                                style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
-                                            >
-                                                <option value="">{lang === 'en' ? '-- Select voice --' : '-- 选择音色 --'}</option>
-                                                {getTtsProviderConfig(editingContact.tts_provider).voiceOptions.map(option => (
-                                                    <option key={option.value} value={option.value}>{option.label}</option>
-                                                ))}
-                                                <option value="__custom">{lang === 'en' ? 'Custom voice id...' : '自定义音色 ID...'}</option>
-                                            </select>
-                                            {(customTtsVoiceOpen || isCustomTtsValue(editingContact.tts_voice, getTtsProviderConfig(editingContact.tts_provider).voiceOptions)) && (
+                                            <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginTop: '5px' }}>
+                                                <select
+                                                    value={customTtsVoiceOpen ? '__custom' : getTtsSelectValue(editingContact.tts_voice, getEditingTtsProviderConfig(editingContact.tts_provider).voiceOptions)}
+                                                    onChange={(e) => {
+                                                        if (e.target.value === '__custom') {
+                                                            setCustomTtsVoiceOpen(true);
+                                                            setEditingContact({ ...editingContact, tts_voice: '' });
+                                                            return;
+                                                        }
+                                                        setCustomTtsVoiceOpen(false);
+                                                        setEditingContact({ ...editingContact, tts_voice: e.target.value });
+                                                    }}
+                                                    style={{ flex: 1, minWidth: 0, padding: '8px', border: '1px solid #ddd', borderRadius: '4px' }}
+                                                >
+                                                    <option value="">{lang === 'en' ? '-- Select voice --' : '-- 选择音色 --'}</option>
+                                                    {getEditingTtsProviderConfig(editingContact.tts_provider).voiceOptions.map(option => (
+                                                        <option key={option.value} value={option.value}>{option.label}</option>
+                                                    ))}
+                                                    <option value="__custom">{lang === 'en' ? 'Custom voice id...' : '自定义音色 ID...'}</option>
+                                                </select>
+                                                {editingContact.tts_provider === 'tencent' && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => loadTencentVoices(true)}
+                                                        title={lang === 'en' ? 'Refresh Tencent voice list' : '重新拉取腾讯云官方音色列表'}
+                                                        style={{ width: '34px', height: '34px', display: 'grid', placeItems: 'center', border: '1px solid #d8dee8', borderRadius: '6px', background: '#fff', color: '#475569', cursor: 'pointer' }}
+                                                    >
+                                                        <RefreshCw size={15} />
+                                                    </button>
+                                                )}
+                                            </div>
+                                            {editingContact.tts_provider === 'tencent' && (
+                                                <div style={{ fontSize: '12px', color: tencentVoiceError ? '#b91c1c' : '#64748b', marginTop: '4px' }}>
+                                                    {tencentVoiceError ? `音色列表拉取失败，已使用内置列表：${tencentVoiceError}` : (tencentVoiceSource ? `音色列表：${tencentVoiceSource === 'tencent-docs' ? '腾讯官方文档' : tencentVoiceSource}` : '')}
+                                                </div>
+                                            )}
+                                            {(customTtsVoiceOpen || isCustomTtsValue(editingContact.tts_voice, getEditingTtsProviderConfig(editingContact.tts_provider).voiceOptions)) && (
                                                 <input
                                                     type="text"
                                                     value={editingContact.tts_voice || ''}
                                                     onChange={(e) => setEditingContact({ ...editingContact, tts_voice: e.target.value })}
-                                                    placeholder={getTtsProviderConfig(editingContact.tts_provider).voiceHint}
+                                                    placeholder={getEditingTtsProviderConfig(editingContact.tts_provider).voiceHint}
                                                     style={{ padding: '8px', marginTop: '6px', border: '1px solid #ddd', borderRadius: '4px' }}
                                                 />
                                             )}
@@ -1994,17 +2046,17 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                             type="text"
                                             value={editingContact.tts_voice || ''}
                                             onChange={(e) => setEditingContact({ ...editingContact, tts_voice: e.target.value })}
-                                            placeholder={getTtsProviderConfig(editingContact.tts_provider).voiceHint}
+                                            placeholder={getEditingTtsProviderConfig(editingContact.tts_provider).voiceHint}
                                             style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
                                         />
                                     )}
                                 </label>
                                 <label style={{ flex: 1, display: 'flex', flexDirection: 'column', fontSize: '14px', color: '#666' }}>
                                     {lang === 'en' ? 'Model / Tier' : '模型 / 档位'}:
-                                    {getTtsProviderConfig(editingContact.tts_provider).modelOptions?.length > 0 ? (
+                                    {getEditingTtsProviderConfig(editingContact.tts_provider).modelOptions?.length > 0 ? (
                                         <>
                                             <select
-                                                value={customTtsModelOpen ? '__custom' : getTtsSelectValue(editingContact.tts_model, getTtsProviderConfig(editingContact.tts_provider).modelOptions)}
+                                                value={customTtsModelOpen ? '__custom' : getTtsSelectValue(editingContact.tts_model, getEditingTtsProviderConfig(editingContact.tts_provider).modelOptions)}
                                                 onChange={(e) => {
                                                     if (e.target.value === '__custom') {
                                                         setCustomTtsModelOpen(true);
@@ -2017,17 +2069,17 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                                 style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
                                             >
                                                 <option value="">{lang === 'en' ? '-- Select model --' : '-- 选择模型 / 档位 --'}</option>
-                                                {getTtsProviderConfig(editingContact.tts_provider).modelOptions.map(option => (
+                                                {getEditingTtsProviderConfig(editingContact.tts_provider).modelOptions.map(option => (
                                                     <option key={option.value} value={option.value}>{option.label}</option>
                                                 ))}
                                                 <option value="__custom">{lang === 'en' ? 'Custom model...' : '自定义模型 / 档位...'}</option>
                                             </select>
-                                            {(customTtsModelOpen || isCustomTtsValue(editingContact.tts_model, getTtsProviderConfig(editingContact.tts_provider).modelOptions)) && (
+                                            {(customTtsModelOpen || isCustomTtsValue(editingContact.tts_model, getEditingTtsProviderConfig(editingContact.tts_provider).modelOptions)) && (
                                                 <input
                                                     type="text"
                                                     value={editingContact.tts_model || ''}
                                                     onChange={(e) => setEditingContact({ ...editingContact, tts_model: e.target.value })}
-                                                    placeholder={getTtsProviderConfig(editingContact.tts_provider).modelHint}
+                                                    placeholder={getEditingTtsProviderConfig(editingContact.tts_provider).modelHint}
                                                     style={{ padding: '8px', marginTop: '6px', border: '1px solid #ddd', borderRadius: '4px' }}
                                                 />
                                             )}
@@ -2037,7 +2089,7 @@ function SettingsPanel({ apiUrl, onCharactersUpdate, onProfileUpdate, onBack }) 
                                             type="text"
                                             value={editingContact.tts_model || ''}
                                             onChange={(e) => setEditingContact({ ...editingContact, tts_model: e.target.value })}
-                                            placeholder={getTtsProviderConfig(editingContact.tts_provider).modelHint}
+                                            placeholder={getEditingTtsProviderConfig(editingContact.tts_provider).modelHint}
                                             style={{ padding: '8px', marginTop: '5px', border: '1px solid #ddd', borderRadius: '4px' }}
                                         />
                                     )}

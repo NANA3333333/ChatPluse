@@ -5,6 +5,21 @@ const path = require('path');
 const DATA_DIR = path.join(__dirname, '..', 'data', 'tts');
 const TTS_INTENT_REGEX = /\[TTS_INTENT:\s*([\s\S]*?)\]/i;
 const TTS_INTENT_GLOBAL_REGEX = /\[TTS_INTENT:\s*[\s\S]*?\]/gi;
+const TENCENT_VOICE_LIST_URL = 'https://cloud.tencent.com/document/product/1073/92668';
+const TENCENT_VOICE_CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+let tencentVoiceCache = { voices: null, fetchedAt: 0 };
+
+const TENCENT_FALLBACK_VOICES = [
+    { value: '502007', id: '502007', name: '智小虎', scene: '演绎童声', type: '超自然大模型音色', language: '中英文', sampleRate: '8k/16k/24k', emotion: '中性' },
+    { value: '502006', id: '502006', name: '智小悟', scene: '阳光男声', type: '超自然大模型音色', language: '中英文', sampleRate: '8k/16k/24k', emotion: '中性' },
+    { value: '502008', id: '502008', name: '智小柔', scene: '温柔亲和', type: '超自然大模型音色', language: '中英文', sampleRate: '8k/16k/24k', emotion: '中性' },
+    { value: '603006', id: '603006', name: '沉稳青叔', scene: '聊天男声', type: '超自然大模型音色', language: '中英文', sampleRate: '8k/16k/24k', emotion: '中性' },
+    { value: '603007', id: '603007', name: '邻家女孩', scene: '聊天女声', type: '超自然大模型音色', language: '中英文', sampleRate: '8k/16k/24k', emotion: '中性' },
+    { value: '501001', id: '501001', name: '智兰', scene: '资讯女声', type: '大模型音色', language: '中文', sampleRate: '8k/16k/24k', emotion: '中性' },
+    { value: '101001', id: '101001', name: '智瑜', scene: '通用女声', type: '精品音色', language: '中文', sampleRate: '8k/16k', emotion: '中性' },
+    { value: '101004', id: '101004', name: '智云', scene: '通用男声', type: '精品音色', language: '中文', sampleRate: '8k/16k', emotion: '中性' },
+    { value: '101016', id: '101016', name: '智甜', scene: '女童声', type: '精品音色', language: '中文', sampleRate: '8k/16k', emotion: '中性' }
+];
 
 function parseJsonPayload(text) {
     const raw = String(text || '').trim();
@@ -37,6 +52,68 @@ function hmacSha256(key, data, encoding) {
 
 function sha256(data, encoding = 'hex') {
     return crypto.createHash('sha256').update(data).digest(encoding);
+}
+
+function decodeHtml(text) {
+    return String(text || '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+}
+
+function parseTencentVoiceList(html) {
+    const lines = decodeHtml(html)
+        .replace(/<script[\s\S]*?<\/script>/gi, '\n')
+        .replace(/<style[\s\S]*?<\/style>/gi, '\n')
+        .replace(/<[^>]+>/g, '\n')
+        .split(/\r?\n/)
+        .map(line => line.trim())
+        .filter(Boolean);
+    const voices = [];
+    const seen = new Set();
+    for (let i = 0; i < lines.length - 6; i += 1) {
+        const id = lines[i];
+        if (!/^\d{6}$/.test(id) || seen.has(id)) continue;
+        const [name, scene, type, language, sampleRate, emotion] = lines.slice(i + 1, i + 7);
+        if (!name || !/(音色|模型)/.test(type || '') || !/\d+k/i.test(sampleRate || '')) continue;
+        seen.add(id);
+        voices.push({
+            value: id,
+            id,
+            name,
+            scene,
+            type,
+            language,
+            sampleRate,
+            emotion,
+            label: `${id} ${name} - ${scene}（${type.replace('音色', '')}）`
+        });
+    }
+    return voices;
+}
+
+async function getTencentVoiceList({ forceRefresh = false } = {}) {
+    const now = Date.now();
+    if (!forceRefresh && Array.isArray(tencentVoiceCache.voices) && now - tencentVoiceCache.fetchedAt < TENCENT_VOICE_CACHE_TTL_MS) {
+        return { voices: tencentVoiceCache.voices, source: 'cache' };
+    }
+    try {
+        const res = await fetch(TENCENT_VOICE_LIST_URL, {
+            headers: { 'User-Agent': 'ChatPulse TTS voice loader' }
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const html = await res.text();
+        const voices = parseTencentVoiceList(html);
+        if (!voices.length) throw new Error('Tencent voice list was empty.');
+        tencentVoiceCache = { voices, fetchedAt: now };
+        return { voices, source: 'tencent-docs' };
+    } catch (e) {
+        console.warn(`[TTS] Failed to fetch Tencent voice list: ${e.message}`);
+        return { voices: TENCENT_FALLBACK_VOICES.map(v => ({ ...v, label: `${v.id} ${v.name} - ${v.scene}（${v.type.replace('音色', '')}）` })), source: 'fallback', error: e.message };
+    }
 }
 
 function parseTencentCredentials(value) {
@@ -303,5 +380,6 @@ module.exports = {
     stripTtsIntentTags,
     shouldSynthesizePrivateTts,
     synthesizeAndStoreMessage,
-    synthesizeSpeech
+    synthesizeSpeech,
+    getTencentVoiceList
 };

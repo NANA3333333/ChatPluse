@@ -40,7 +40,7 @@ const { getEngine } = require('./engine');
 const { getMemory, extractMemoryFromContext, setWsClientsResolver, getEmbeddingDebugStatus } = require('./memory');
 const { getTokenCount } = require('./utils/tokenizer');
 const { getBackgroundQueueStats } = require('./backgroundQueue');
-const { synthesizeSpeech } = require('./tts');
+const { synthesizeSpeech, getTencentVoiceList } = require('./tts');
 const qdrant = require('./qdrant');
 const crypto = require('crypto');
 
@@ -1101,6 +1101,15 @@ app.get('/api/tts/audio/:messageId', authMiddleware, (req, res) => {
         res.setHeader('Content-Type', row.mime_type || 'audio/mpeg');
         res.setHeader('Cache-Control', 'private, max-age=86400');
         res.sendFile(path.resolve(row.audio_path));
+    } catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.get('/api/tts/tencent/voices', authMiddleware, async (req, res) => {
+    try {
+        const result = await getTencentVoiceList({ forceRefresh: req.query.refresh === '1' });
+        res.json({ success: true, ...result });
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
