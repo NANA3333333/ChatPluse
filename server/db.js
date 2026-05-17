@@ -1196,7 +1196,7 @@ function getUserDb(userId) {
             if (tts) {
                 normalizedMetadata.tts = {
                     status: tts.status || 'pending',
-                    audio_url: tts.status === 'ready' ? `/api/tts/audio/${row.id}` : '',
+                    audio_url: tts.status === 'ready' ? `/tts/audio/${row.id}` : '',
                     provider: tts.provider || '',
                     voice: tts.voice || '',
                     model: tts.model || '',

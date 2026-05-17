@@ -338,7 +338,7 @@ async function synthesizeAndStoreMessage({ db, userId, character, messageId, tex
                 message_id: id,
                 character_id: character.id,
                 status: 'ready',
-                audio_url: `/api/tts/audio/${id}`,
+                audio_url: `/tts/audio/${id}`,
                 provider: character.tts_provider || 'tencent',
                 voice: character.tts_voice || '',
                 model: character.tts_model || '',

@@ -215,12 +215,21 @@ function MessageBubble({ message, avatar, characterName, apiUrl, onRetry, contac
     const [ttsPlaying, setTtsPlaying] = useState(false);
     const [ttsError, setTtsError] = useState('');
 
+    const resolveTtsAudioUrl = (audioUrl) => {
+        const raw = String(audioUrl || '').trim();
+        if (!raw) return '';
+        if (/^https?:\/\//i.test(raw)) return raw;
+        const cleanApiUrl = String(apiUrl || '').replace(/\/+$/, '');
+        const cleanAudioUrl = raw.replace(/^\/api(?=\/)/, '').replace(/^\/?/, '/');
+        return `${cleanApiUrl}${cleanAudioUrl}`;
+    };
+
     const playTts = async () => {
         if (!tts?.audio_url || ttsPlaying) return;
         setTtsError('');
         setTtsPlaying(true);
         try {
-            const res = await fetch(`${apiUrl}${tts.audio_url}`, {
+            const res = await fetch(resolveTtsAudioUrl(tts.audio_url), {
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
