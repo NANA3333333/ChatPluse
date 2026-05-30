@@ -49,7 +49,6 @@ const commercialV2BehaviorInteractionDistance = 170;
 const commercialV2BehaviorAutonomousInitialDelayMs = 2500;
 const commercialV2BehaviorAutonomousCooldownMs = 8500;
 const commercialV2BehaviorNearbyCooldownMs = 4200;
-const commercialV2BehaviorBaseBubbleMs = 850;
 const commercialV2BehaviorBaseWaitMs = 550;
 const commercialV2BehaviorBaseFallbackMs = 550;
 const commercialV2BehaviorActions = [
@@ -88,23 +87,6 @@ const commercialV2BehaviorMovementActions = [
   { id: 'walk_with_player', label: '陪玩家走', needs: ['to_place_id?'], description: '和玩家一起向某个表内地点走，地点可选。' },
   { id: 'idle_at_place', label: '地点停留', needs: ['place_id'], description: '在某个表内地点附近站立、等待、转向或说话。' }
 ];
-const commercialV2BehaviorTreeSkeleton = {
-  version: 'single-character-street-runtime-v1',
-  root: {
-    id: 'street_character_root',
-    type: 'PrioritySelector',
-    children: [
-      { id: 'player_interaction', branch_kind: 'special', priority: 100, trigger: 'player_event.active', branches: ['greet', 'small_talk', 'ask_current_action', 'suggest_destination', 'treat_food', 'comfort'] },
-      { id: 'hard_needs', branch_kind: 'base', priority: 82, trigger: 'runtime_state.need_high', branches: ['base_needs_cafe_snack', 'base_needs_home_rest'] },
-      { id: 'routine_goal', branch_kind: 'base', priority: 76, trigger: 'runtime_state.routine_tick', branches: ['base_routine_home_agency', 'base_routine_sign_check'] },
-      { id: 'place_affordance', branch_kind: 'base', priority: 68, trigger: 'location.has_affordance', branches: ['base_affordance_agency_window', 'base_affordance_cafe_pause'] },
-      { id: 'background_mood', branch_kind: 'base', priority: 60, trigger: 'runtime_state.mood_idle', branches: ['base_background_walk_cafe', 'base_background_slow_down'] },
-      { id: 'curiosity', branch_kind: 'base', priority: 52, trigger: 'nearby_place_or_player', branches: ['base_curiosity_player_glance', 'base_curiosity_window_watch'] },
-      { id: 'wander', branch_kind: 'base', priority: 36, trigger: 'otherwise', branches: ['base_wander_convenience_cafe', 'base_loop_cafe_front', 'base_patrol_agency_shop'] },
-      { id: 'idle_micro', branch_kind: 'base', priority: 20, trigger: 'idle', branches: ['base_idle_watch_street', 'base_idle_turn_pause'] }
-    ]
-  }
-};
 const commercialV2BehaviorSpecialNodeIds = [
   'player_interaction'
 ];
@@ -890,7 +872,7 @@ function readStoredCommercialBehaviorConfig() {
       api_endpoint: String(parsed.api_endpoint || ''),
       model_name: String(parsed.model_name || '')
     };
-  } catch (error) {
+  } catch {
     localStorage.removeItem(commercialV2BehaviorConfigStorageKey);
     return commercialV2BehaviorDefaultConfig;
   }
@@ -945,7 +927,7 @@ function readStoredCommercialBehaviorTreeState() {
       memory: parsed.memory && typeof parsed.memory === 'object' ? parsed.memory : {},
       patch_history: Array.isArray(parsed.patch_history) ? parsed.patch_history.slice(0, 24) : []
     };
-  } catch (error) {
+  } catch {
     localStorage.removeItem(commercialV2BehaviorTreeStorageKey);
     return fallback;
   }
@@ -3629,6 +3611,9 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
   const autonomousBehaviorCooldownRef = useRef(Date.now() + commercialV2BehaviorAutonomousInitialDelayMs);
   const autonomousBehaviorCursorRef = useRef(0);
   const autonomousBehaviorRecentRef = useRef([]);
+  const pickAutonomousBehaviorBranchRef = useRef(() => null);
+  const activateBehaviorBranchRef = useRef(() => {});
+  const advanceBehaviorRuntimeRef = useRef(() => {});
   const [initialLayout] = useState(() => readStoredCommercialLayout());
   const [items, setItemsState] = useState(initialLayout.items);
   const itemsRef = useRef(initialLayout.items);
@@ -3942,7 +3927,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
         api_endpoint: behaviorConfig.api_endpoint || '',
         model_name: behaviorConfig.model_name || ''
       }));
-    } catch (error) {
+    } catch {
       // Ignore storage failures; the API key is intentionally never persisted here.
     }
   }, [behaviorConfig.api_endpoint, behaviorConfig.model_name]);
@@ -3954,7 +3939,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
   useEffect(() => {
     try {
       localStorage.setItem(commercialV2BehaviorTreeStorageKey, JSON.stringify(behaviorTreeState));
-    } catch (error) {
+    } catch {
       // The tree can still live in memory if browser storage is full or unavailable.
     }
   }, [behaviorTreeState]);
@@ -3965,12 +3950,12 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
       if (behaviorLoading || activeBehaviorDialog || interactionMenuOpen) return;
       if (behaviorChoicePendingRef.current || behaviorRuntimeRef.current) return;
       if (Date.now() < autonomousBehaviorCooldownRef.current) return;
-      const branch = pickAutonomousBehaviorBranch({ nearby: behaviorInteractionState.nearby });
+      const branch = pickAutonomousBehaviorBranchRef.current({ nearby: behaviorInteractionState.nearby });
       if (!branch) return;
       autonomousBehaviorCooldownRef.current = Date.now() + (behaviorInteractionState.nearby
         ? commercialV2BehaviorNearbyCooldownMs
         : commercialV2BehaviorAutonomousCooldownMs);
-      activateBehaviorBranch(branch, 'base');
+      activateBehaviorBranchRef.current(branch, 'base');
       setBehaviorStatus(`基础枝丫自动执行：${branch.title}`);
     }, 700);
     return () => window.clearInterval(intervalId);
@@ -3986,7 +3971,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
 
   useEffect(() => {
     let cancelled = false;
-    const token = localStorage.getItem('cp_token') || localStorage.getItem('token') || '';
+    const token = localStorage.getItem('cp_token') || '';
     fetch(`${apiUrl}/city/characters`, {
       headers: { Authorization: token ? `Bearer ${token}` : '' }
     })
@@ -4068,7 +4053,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
   }
 
   function getBehaviorAuthHeaders() {
-    const token = localStorage.getItem('cp_token') || localStorage.getItem('token') || '';
+    const token = localStorage.getItem('cp_token') || '';
     return {
       'Content-Type': 'application/json',
       Authorization: token ? `Bearer ${token}` : ''
@@ -4219,7 +4204,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
   function formatBehaviorJson(value, fallback = '{}') {
     try {
       return JSON.stringify(value || JSON.parse(fallback), null, 2);
-    } catch (error) {
+    } catch {
       return fallback;
     }
   }
@@ -4249,10 +4234,12 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     setBehaviorStatus('正在拉取模型列表...');
     try {
       const url = customComplete
-        ? `${apiUrl}/models?endpoint=${encodeURIComponent(customEndpoint)}&key=${encodeURIComponent(customKey)}`
+        ? `${apiUrl}/models`
         : `${apiUrl}/city/characters/${encodeURIComponent(behaviorCharacterId)}/behavior-models`;
       const { response, data } = await fetchBehaviorJsonWithTimeout(url, {
-        headers: customComplete ? undefined : getBehaviorAuthHeaders()
+        method: customComplete ? 'POST' : 'GET',
+        headers: getBehaviorAuthHeaders(),
+        body: customComplete ? JSON.stringify({ endpoint: customEndpoint, key: customKey }) : undefined
       });
       if (!response.ok) throw new Error(data?.error || `模型列表读取失败 ${response.status}`);
       const models = Array.isArray(data?.models) ? data.models : [];
@@ -6376,6 +6363,10 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     runtime.stepIndex += 1;
   }
 
+  pickAutonomousBehaviorBranchRef.current = pickAutonomousBehaviorBranch;
+  activateBehaviorBranchRef.current = activateBehaviorBranch;
+  advanceBehaviorRuntimeRef.current = advanceBehaviorRuntime;
+
   useEffect(() => {
     if (playerSpawnedRef.current) return;
     spawnPlayersOnStage(playersRef.current);
@@ -6508,7 +6499,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
       window.removeEventListener('keyup', onKeyUp);
       pressedKeys.clear();
     };
-  }, [cancelAutoTravel, resolvePlayerGroundMove]);
+  }, [cancelAutoTravel, resolvePlayerGroundMove, setPlayer]);
 
   useEffect(() => {
     let frameId = 0;
@@ -6583,7 +6574,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     const tick = (time) => {
       const delta = Math.min(0.05, (time - previousTime) / 1000);
       previousTime = time;
-      advanceBehaviorRuntime();
+      advanceBehaviorRuntimeRef.current();
       const keys = pressedKeysRef.current;
       let dx = 0;
       let dy = 0;
@@ -6787,7 +6778,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     };
     frameId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(frameId);
-  }, [buildAutoTravelPath, buildStreetCruiseSegment, resolvePlayerGroundMove, stageSize.width]);
+  }, [buildAutoTravelPath, buildStreetCruiseSegment, resolvePlayerGroundMove, setPlayer, setPlayerById, stageSize.width]);
 
   useEffect(() => {
     centerPlayerInView(!player.moving);

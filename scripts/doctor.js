@@ -1,7 +1,9 @@
 const fs = require('fs');
+const { createRequire } = require('module');
 const path = require('path');
 
 const root = path.join(__dirname, '..');
+const serverRequire = createRequire(path.join(root, 'server', 'package.json'));
 
 function exists(relPath) {
   return fs.existsSync(path.join(root, relPath));
@@ -28,6 +30,22 @@ function printCheck(label, ok, detail) {
   console.log(`[${ok ? 'OK  ' : 'WARN'}] ${label} - ${detail}`);
 }
 
+function checkServerModule(packageName, fixHint, validate) {
+  try {
+    const loaded = serverRequire(packageName);
+    if (typeof validate === 'function') {
+      validate(loaded);
+    }
+    return { ok: true, detail: 'loadable from server/node_modules' };
+  } catch (e) {
+    const message = String(e && e.message ? e.message : e).replace(/\s+/g, ' ').trim();
+    return {
+      ok: false,
+      detail: `${message}; ${fixHint || `run \`npm --prefix server rebuild ${packageName}\``}`
+    };
+  }
+}
+
 async function main() {
   const nodeMajor = Number(process.versions.node.split('.')[0] || 0);
   printCheck('Node.js', nodeMajor >= 18, `detected ${process.versions.node}, recommended >= 18`);
@@ -37,6 +55,19 @@ async function main() {
   printCheck('Data directory', exists('data'), exists('data') ? 'present' : 'missing; it will be created automatically');
   printCheck('Uploads directory', exists('server/public/uploads'), exists('server/public/uploads') ? 'present' : 'missing; it will be created automatically');
   printCheck('Server env file', exists('server/.env'), exists('server/.env') ? 'present' : 'missing; copy from server/.env.example if you need fixed local defaults');
+  const sqlite = checkServerModule(
+    'better-sqlite3',
+    'run `npm run setup` or `npm --prefix server rebuild better-sqlite3` with the Node.js version used to start the server',
+    (Database) => {
+      const db = new Database(':memory:');
+      try {
+        db.prepare('SELECT 1 AS ok').get();
+      } finally {
+        db.close();
+      }
+    }
+  );
+  printCheck('SQLite native module', sqlite.ok, sqlite.detail);
 
   const qdrant = await checkQdrant();
   printCheck('Qdrant', qdrant.ok, qdrant.detail);

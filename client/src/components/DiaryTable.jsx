@@ -10,10 +10,18 @@ function DiaryTable({ contact, apiUrl, onClose }) {
     const [passwordInput, setPasswordInput] = useState('');
     const [pwError, setPwError] = useState('');
     const [pwLoading, setPwLoading] = useState(false);
+    const authToken = localStorage.getItem('cp_token') || '';
+    const authOnlyHeaders = React.useMemo(() => ({
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
+    const authJsonHeaders = React.useMemo(() => ({
+        ...authOnlyHeaders,
+        'Content-Type': 'application/json'
+    }), [authOnlyHeaders]);
 
     useEffect(() => {
         if (!contact) return;
-        fetch(`${apiUrl}/diaries/${contact.id}`)
+        fetch(`${apiUrl}/diaries/${contact.id}`, { headers: authOnlyHeaders })
             .then(res => res.json())
             .then(data => {
                 if (data.entries !== undefined) {
@@ -29,7 +37,7 @@ function DiaryTable({ contact, apiUrl, onClose }) {
                 console.error('Failed to load diaries:', err);
                 setLoading(false);
             });
-    }, [apiUrl, contact, contact?.id]);
+    }, [apiUrl, contact, contact?.id, authOnlyHeaders]);
 
     useEffect(() => {
         const handleCharacterDataWiped = (event) => {
@@ -52,7 +60,7 @@ function DiaryTable({ contact, apiUrl, onClose }) {
         try {
             const res = await fetch(`${apiUrl}/diaries/${contact.id}/unlock`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders,
                 body: JSON.stringify({ password: passwordInput.trim() })
             });
             const data = await res.json();
@@ -73,7 +81,7 @@ function DiaryTable({ contact, apiUrl, onClose }) {
         try {
             const res = await fetch(`${apiUrl}/diaries/${diaryId}`, {
                 method: 'DELETE',
-                headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                headers: authOnlyHeaders
             });
             if (res.ok) {
                 setDiaries(prev => prev.filter(d => d.id !== diaryId));

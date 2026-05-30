@@ -21,6 +21,11 @@ function AddCharacterModal({ isOpen, onClose, onAdd, apiUrl }) {
     const [modelList, setModelList] = useState([]);
     const [fetchingModels, setFetchingModels] = useState(false);
     const [modelFetchError, setModelFetchError] = useState('');
+    const authToken = localStorage.getItem('cp_token') || '';
+    const authJsonHeaders = React.useMemo(() => ({
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
 
     if (!isOpen) return null;
 
@@ -34,7 +39,7 @@ function AddCharacterModal({ isOpen, onClose, onAdd, apiUrl }) {
         try {
             const res = await fetch(`${apiUrl}/characters`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders,
                 body: JSON.stringify(payload)
             });
             const data = await res.json();
@@ -59,7 +64,7 @@ function AddCharacterModal({ isOpen, onClose, onAdd, apiUrl }) {
         try {
             const res = await fetch(`${apiUrl}/characters/generate`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders,
                 body: JSON.stringify({
                     query: genQuery,
                     api_endpoint: formData.api_endpoint,
@@ -95,9 +100,11 @@ function AddCharacterModal({ isOpen, onClose, onAdd, apiUrl }) {
         setModelFetchError('');
         setModelList([]);
         try {
-            const res = await fetch(
-                `${apiUrl}/models?endpoint=${encodeURIComponent(formData.api_endpoint)}&key=${encodeURIComponent(formData.api_key)}`
-            );
+            const res = await fetch(`${apiUrl}/models`, {
+                method: 'POST',
+                headers: authJsonHeaders,
+                body: JSON.stringify({ endpoint: formData.api_endpoint, key: formData.api_key })
+            });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
             setModelList(data.models || []);

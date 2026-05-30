@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 const text = {
   title: '住房与社交',
@@ -170,7 +170,7 @@ export default function HousingSocialPanel() {
   const [districts, setDistricts] = useState([]);
   const [agencyModelOptions, setAgencyModelOptions] = useState([]);
   const [agencyAds, setAgencyAds] = useState([]);
-  const [publicAgencyAnnouncements, setPublicAgencyAnnouncements] = useState([]);
+  const [, setPublicAgencyAnnouncements] = useState([]);
   const [agencyForm, setAgencyForm] = useState(emptyAgency);
   const [homeForm, setHomeForm] = useState(emptyHome);
   const [classForm, setClassForm] = useState(emptyClass);
@@ -209,14 +209,14 @@ export default function HousingSocialPanel() {
       }));
   }, [agencyModelOptions, characters]);
 
-  async function requestJson(url, options = {}) {
+  const requestJson = useCallback(async (url, options = {}) => {
     const response = await fetch(url, options);
     const data = await response.json().catch(() => ({}));
     if (!response.ok || data.success === false) throw new Error(data.error || `${text.requestFailed}${response.status}`);
     return data;
-  }
+  }, []);
 
-  async function loadAll() {
+  const loadAll = useCallback(async () => {
     setLoading(true);
     try {
       const data = await requestJson('/api/social-housing/bootstrap', { headers });
@@ -232,9 +232,9 @@ export default function HousingSocialPanel() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [headers, requestJson]);
 
-  useEffect(() => { loadAll().catch((e) => { console.error(e); alert(e.message || text.loadFailed); }); }, []);
+  useEffect(() => { loadAll().catch((e) => { console.error(e); alert(e.message || text.loadFailed); }); }, [loadAll]);
 
   const saveHome = async (payload = homeForm) => {
     const data = await requestJson('/api/social-housing/housing', { method: 'POST', headers, body: JSON.stringify(payload) });
@@ -245,7 +245,6 @@ export default function HousingSocialPanel() {
     const data = await requestJson('/api/social-housing/classes', { method: 'POST', headers, body: JSON.stringify({ ...payload, common_locations: payload.common_locations }) });
     setClasses(data.classes || []); setClassForm(emptyClass); setEditingClassId('');
   };
-  const deleteHome = async (id) => { await requestJson(`/api/social-housing/housing/${id}`, { method: 'DELETE', headers }); await loadAll(); };
   const deleteClass = async (id) => { await requestJson(`/api/social-housing/classes/${id}`, { method: 'DELETE', headers }); await loadAll(); };
   const deleteAgencyAd = async (id) => { await requestJson(`/api/social-housing/agency/ads/${id}`, { method: 'DELETE', headers }); await loadAll(); };
   const updateBinding = async (id, binding) => { setSavingBindingId(id); try { const data = await requestJson(`/api/social-housing/characters/${id}/binding`, { method: 'POST', headers, body: JSON.stringify(binding) }); setCharacters(data.characters || []); } finally { setSavingBindingId(''); } };

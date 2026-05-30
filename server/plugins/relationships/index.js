@@ -51,7 +51,7 @@ module.exports = function initRelationships(app, context) {
                                 console.warn(`[Social] LLM returned empty for ${fromChar.name}→${toChar.name} (withSystem = ${withSystem})`);
                                 return null;
                             }
-                            console.log(`[Social] Raw LLM output for ${fromChar.name}→${toChar.name}: ${result.substring(0, 300)} `);
+                            console.log(`[Social] LLM returned ${result.length} chars for ${fromChar.name}→${toChar.name}`);
                             const cleaned = (result || '').replace(/```[a - z] *\n ? /gi, '').replace(/```/g, '').trim();
                             const m = cleaned.match(/\{[\s\S]*\}/);
                             if (m) {
@@ -90,7 +90,7 @@ module.exports = function initRelationships(app, context) {
 
                             if (result) {
                                 db.initCharRelationship(fromChar.id, toChar.id, result.affinity, result.impression, 'recommend');
-                                console.log(`[Social] ${fromChar.name}→${toChar.name}: affinity = ${result.affinity}, "${result.impression}"`);
+                                console.log(`[Social] ${fromChar.name}→${toChar.name}: affinity = ${result.affinity}, impressionLength = ${result.impression.length}`);
                             } else {
                                 console.warn(`[Social] Both attempts failed for ${fromChar.name}→${toChar.name}, storing empty impression`);
                                 db.initCharRelationship(fromChar.id, toChar.id, 50, '', 'recommend');
@@ -184,8 +184,7 @@ module.exports = function initRelationships(app, context) {
                     console.warn(`[Social / Regen] LLM returned empty for ${fromChar.name}→${toChar.name} (withSystem = ${withSystem})`);
                     return null;
                 }
-                console.log(`[Social / Regen] Raw LLM output for ${fromChar.name}→${toChar.name}: ${result.substring(0, 400)} `);
-                try { require('fs').writeFileSync(require('path').join(__dirname, '..', 'data', 'debug_regen.txt'), `[${new Date().toISOString()}] ${fromChar.name}→${toChar.name} (withSystem = ${withSystem}): \n${result} \n-- -\n`, { flag: 'a' }); } catch (e) { }
+                console.log(`[Social / Regen] LLM returned ${result.length} chars for ${fromChar.name}→${toChar.name}`);
                 const cleaned = (result || '').replace(/```[a - z] *\n ? /gi, '').replace(/```/g, '').trim();
 
                 // Strategy 1: standard JSON.parse on the largest {...} block
@@ -194,30 +193,30 @@ module.exports = function initRelationships(app, context) {
                     try {
                         const parsed = JSON.parse(m[0]);
                         if (parsed.impression) {
-                            return { affinity: Math.max(1, Math.min(100, parseInt(parsed.affinity) || 50)), impression: String(parsed.impression).substring(0, 200), _raw: cleaned };
+                            return { affinity: Math.max(1, Math.min(100, parseInt(parsed.affinity) || 50)), impression: String(parsed.impression).substring(0, 200) };
                         }
                     } catch (e) {
-                        console.log('[Social/Regen] JSON.parse failed:', e.message, 'Input:', m[0].substring(0, 150));
+                        console.log('[Social/Regen] JSON.parse failed:', e.message);
                     }
                 }
 
                 // Strategy 2: simple number + text extraction
                 const aNum = cleaned.match(/affinity\D*(\d+)/i);
                 const iText = cleaned.match(/impression\D{0,5}["'](.+?)["']/is) || cleaned.match(/impression\D{0,5}(.+)/is);
-                console.log('[Social/Regen] Strategy 2:', 'aNum=', aNum?.[1], 'iText=', iText?.[1]?.substring(0, 80));
+                console.log('[Social/Regen] Strategy 2:', 'hasAffinity=', !!aNum, 'hasImpression=', !!iText);
                 if (aNum && iText) {
                     const imp = iText[1].replace(/["'}\]]+\s*$/, '').trim();
                     if (imp.length > 2) {
-                        return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: imp.substring(0, 200), _raw: cleaned };
+                        return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: imp.substring(0, 200) };
                     }
                 }
 
                 // Strategy 3: if affinity number found, use any remaining text as impression
                 if (aNum) {
                     const leftover = cleaned.replace(/[{}]/g, '').replace(/affinity\D*\d+/i, '').replace(/impression/i, '').replace(/["':,]/g, ' ').trim();
-                    console.log('[Social/Regen] Strategy 3 leftover:', leftover.substring(0, 100));
+                    console.log('[Social/Regen] Strategy 3 leftover length:', leftover.length);
                     if (leftover.length > 3) {
-                        return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: leftover.substring(0, 200), _raw: cleaned };
+                        return { affinity: Math.max(1, Math.min(100, parseInt(aNum[1]) || 50)), impression: leftover.substring(0, 200) };
                     }
                 }
                 // Strategy 4: affinity found but absolutely no impression text — generate a default one
@@ -227,10 +226,10 @@ module.exports = function initRelationships(app, context) {
                         : aVal >= 40 ? 'No strong feelings yet.'
                             : 'Not sure about this person.';
                     console.log(`[Social / Regen] Strategy 4: using default impression for affinity = ${aVal}`);
-                    return { affinity: aVal, impression: defaultImp, _raw: cleaned };
+                    return { affinity: aVal, impression: defaultImp };
                 }
 
-                console.warn('[Social/Regen] All strategies failed. Cleaned:', cleaned.substring(0, 300));
+                console.warn('[Social/Regen] All strategies failed. Cleaned response length:', cleaned.length);
                 return null;
             };
 

@@ -288,6 +288,28 @@ function getUserDb(userId) {
         }
     }
 
+    function quoteSqlIdentifier(identifier) {
+        const value = String(identifier || '');
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+            throw new Error(`Invalid SQLite identifier: ${value}`);
+        }
+        return `"${value}"`;
+    }
+
+    function getTableColumnNames(tableName) {
+        const safeTableName = quoteSqlIdentifier(tableName);
+        return new Set(db.prepare(`PRAGMA table_info(${safeTableName})`).all().map((col) => col.name));
+    }
+
+    function addColumnIfMissing(tableName, columnName, definition) {
+        const columns = getTableColumnNames(tableName);
+        if (columns.has(columnName)) return false;
+        const safeTableName = quoteSqlIdentifier(tableName);
+        const safeColumnName = quoteSqlIdentifier(columnName);
+        db.prepare(`ALTER TABLE ${safeTableName} ADD COLUMN ${safeColumnName} ${definition}`).run();
+        return true;
+    }
+
     function getSqliteSizeStats() {
         try {
             const pageCount = Number(db.prepare('PRAGMA page_count').get()?.page_count || 0);
@@ -872,10 +894,8 @@ function getUserDb(userId) {
         } catch (e) { }
 
         // Add initial_affinity for existing DBs (migration for the chat wipe bug)
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN initial_affinity INTEGER').run();
-            db.prepare('UPDATE characters SET initial_affinity = affinity WHERE initial_affinity IS NULL').run();
-        } catch (e) { }
+        addColumnIfMissing('characters', 'initial_affinity', 'INTEGER');
+        db.prepare('UPDATE characters SET initial_affinity = affinity WHERE initial_affinity IS NULL').run();
 
         // Add max_tokens for existing DBs
         try {
@@ -902,13 +922,10 @@ function getUserDb(userId) {
         }
 
         // Add master toggles for systems
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN sys_proactive INTEGER DEFAULT 1').run();
-            db.prepare('ALTER TABLE characters ADD COLUMN sys_timer INTEGER DEFAULT 1').run();
-            db.prepare('ALTER TABLE characters ADD COLUMN sys_pressure INTEGER DEFAULT 1').run();
-            db.prepare('ALTER TABLE characters ADD COLUMN sys_jealousy INTEGER DEFAULT 1').run();
-        } catch (e) {
-        }
+        addColumnIfMissing('characters', 'sys_proactive', 'INTEGER DEFAULT 1');
+        addColumnIfMissing('characters', 'sys_timer', 'INTEGER DEFAULT 1');
+        addColumnIfMissing('characters', 'sys_pressure', 'INTEGER DEFAULT 1');
+        addColumnIfMissing('characters', 'sys_jealousy', 'INTEGER DEFAULT 1');
 
         // Add is_diary_unlocked to characters
         try {
@@ -923,10 +940,8 @@ function getUserDb(userId) {
         }
 
         // Existing characters should start W from zero after upgrade; new characters default to initialized
-        try {
-            db.prepare('ALTER TABLE characters ADD COLUMN sweep_initialized INTEGER DEFAULT 1').run();
+        if (addColumnIfMissing('characters', 'sweep_initialized', 'INTEGER DEFAULT 1')) {
             db.prepare('UPDATE characters SET sweep_initialized = 0').run();
-        } catch (e) {
         }
         try {
             db.prepare("ALTER TABLE characters ADD COLUMN sweep_last_error TEXT DEFAULT ''").run();
@@ -1010,49 +1025,43 @@ function getUserDb(userId) {
         }
 
         // Add is_summarized for overflow memory feature
-        try {
-            db.prepare('ALTER TABLE messages ADD COLUMN is_summarized INTEGER DEFAULT 0').run();
-            db.prepare('ALTER TABLE group_messages ADD COLUMN is_summarized INTEGER DEFAULT 0').run();
-        } catch (e) {
-        }
+        addColumnIfMissing('messages', 'is_summarized', 'INTEGER DEFAULT 0');
+        addColumnIfMissing('group_messages', 'is_summarized', 'INTEGER DEFAULT 0');
 
         // Add memory API config for existing DBs
-        try { db.prepare('ALTER TABLE characters ADD COLUMN memory_api_endpoint TEXT').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN memory_api_key TEXT').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN memory_model_name TEXT').run(); } catch (e) { }
+        addColumnIfMissing('characters', 'memory_api_endpoint', 'TEXT');
+        addColumnIfMissing('characters', 'memory_api_key', 'TEXT');
+        addColumnIfMissing('characters', 'memory_model_name', 'TEXT');
 
         // Add per-character private-chat TTS config
-        try { db.prepare('ALTER TABLE characters ADD COLUMN tts_enabled INTEGER DEFAULT 0').run(); } catch (e) { }
-        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_provider TEXT DEFAULT 'tencent'").run(); } catch (e) { }
-        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_api_key TEXT DEFAULT ''").run(); } catch (e) { }
-        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_voice TEXT DEFAULT ''").run(); } catch (e) { }
-        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_model TEXT DEFAULT ''").run(); } catch (e) { }
-        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_endpoint TEXT DEFAULT ''").run(); } catch (e) { }
-        try { db.prepare("ALTER TABLE characters ADD COLUMN tts_trigger_mode TEXT DEFAULT 'tagged'").run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN tts_autoplay INTEGER DEFAULT 0').run(); } catch (e) { }
+        addColumnIfMissing('characters', 'tts_enabled', 'INTEGER DEFAULT 0');
+        addColumnIfMissing('characters', 'tts_provider', "TEXT DEFAULT 'tencent'");
+        addColumnIfMissing('characters', 'tts_api_key', "TEXT DEFAULT ''");
+        addColumnIfMissing('characters', 'tts_voice', "TEXT DEFAULT ''");
+        addColumnIfMissing('characters', 'tts_model', "TEXT DEFAULT ''");
+        addColumnIfMissing('characters', 'tts_endpoint', "TEXT DEFAULT ''");
+        addColumnIfMissing('characters', 'tts_trigger_mode', "TEXT DEFAULT 'tagged'");
+        addColumnIfMissing('characters', 'tts_autoplay', 'INTEGER DEFAULT 0');
 
         // Add sender_name and sender_avatar to group_messages (so deleted chars still display)
-        try {
-            db.prepare('ALTER TABLE group_messages ADD COLUMN sender_name TEXT').run();
-            db.prepare('ALTER TABLE group_messages ADD COLUMN sender_avatar TEXT').run();
-            // Backfill existing records
-            const msgs = db.prepare('SELECT DISTINCT sender_id FROM group_messages WHERE sender_name IS NULL').all();
-            for (const m of msgs) {
-                if (m.sender_id === 'user') {
-                    const profile = db.prepare('SELECT name, avatar FROM user_profile WHERE id = ?').get('default');
-                    if (profile) {
-                        db.prepare('UPDATE group_messages SET sender_name = ?, sender_avatar = ? WHERE sender_id = ? AND sender_name IS NULL')
-                            .run(profile.name || 'User', profile.avatar || '', 'user');
-                    }
-                } else {
-                    const char = db.prepare('SELECT name, avatar FROM characters WHERE id = ?').get(m.sender_id);
-                    if (char) {
-                        db.prepare('UPDATE group_messages SET sender_name = ?, sender_avatar = ? WHERE sender_id = ? AND sender_name IS NULL')
-                            .run(char.name, char.avatar || '', m.sender_id);
-                    }
+        addColumnIfMissing('group_messages', 'sender_name', 'TEXT');
+        addColumnIfMissing('group_messages', 'sender_avatar', 'TEXT');
+        // Backfill existing records
+        const msgs = db.prepare('SELECT DISTINCT sender_id FROM group_messages WHERE sender_name IS NULL').all();
+        for (const m of msgs) {
+            if (m.sender_id === 'user') {
+                const profile = db.prepare('SELECT name, avatar FROM user_profile WHERE id = ?').get('default');
+                if (profile) {
+                    db.prepare('UPDATE group_messages SET sender_name = ?, sender_avatar = ? WHERE sender_id = ? AND sender_name IS NULL')
+                        .run(profile.name || 'User', profile.avatar || '', 'user');
+                }
+            } else {
+                const char = db.prepare('SELECT name, avatar FROM characters WHERE id = ?').get(m.sender_id);
+                if (char) {
+                    db.prepare('UPDATE group_messages SET sender_name = ?, sender_avatar = ? WHERE sender_id = ? AND sender_name IS NULL')
+                        .run(char.name, char.avatar || '', m.sender_id);
                 }
             }
-        } catch (e) {
         }
 
         ensureAllDiaryPasswords();
@@ -1254,7 +1263,7 @@ function getUserDb(userId) {
         try { db.prepare('ALTER TABLE characters ADD COLUMN stomach_load INTEGER DEFAULT 0').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN work_distraction INTEGER DEFAULT 0').run(); } catch (e) { }
         try { db.prepare('ALTER TABLE characters ADD COLUMN sleep_disruption INTEGER DEFAULT 0').run(); } catch (e) { }
-        try { db.prepare('ALTER TABLE characters ADD COLUMN llm_debug_capture INTEGER DEFAULT 0').run(); } catch (e) { }
+        addColumnIfMissing('characters', 'llm_debug_capture', 'INTEGER DEFAULT 1');
         try { db.prepare("ALTER TABLE llm_cache ADD COLUMN cache_scope TEXT DEFAULT ''").run(); } catch (e) { }
         try { db.prepare("ALTER TABLE llm_cache ADD COLUMN character_id TEXT DEFAULT ''").run(); } catch (e) { }
         try { db.prepare('CREATE INDEX IF NOT EXISTS idx_llm_cache_character ON llm_cache(character_id, expires_at)').run(); } catch (e) { }
@@ -2645,10 +2654,14 @@ function getUserDb(userId) {
         db.prepare('DELETE FROM memories WHERE group_id = ?').run(groupId);
     }
 
-    function deleteGroupMessages(messageIds) {
-        if (!messageIds || messageIds.length === 0) return 0;
-        const placeholders = messageIds.map(() => '?').join(',');
-        const info = db.prepare(`DELETE FROM group_messages WHERE id IN (${placeholders})`).run(...messageIds);
+    function deleteGroupMessages(groupId, messageIds) {
+        const ids = Array.from(new Set((Array.isArray(messageIds) ? messageIds : [])
+            .map(id => Number(id || 0))
+            .filter(id => Number.isSafeInteger(id) && id > 0)))
+            .slice(0, 500);
+        if (!groupId || ids.length === 0) return 0;
+        const placeholders = ids.map(() => '?').join(',');
+        const info = db.prepare(`DELETE FROM group_messages WHERE group_id = ? AND id IN (${placeholders})`).run(groupId, ...ids);
         return info.changes;
     }
 
@@ -2912,31 +2925,40 @@ function getUserDb(userId) {
     }
 
     function createRedPacket({ groupId, senderId, type, totalAmount, perAmount, count, note }) {
+        const packetType = String(type || '').trim().toLowerCase();
+        const packetCount = Number.parseInt(count, 10);
+        const packetTotal = Number(totalAmount);
+        const packetPerAmount = perAmount == null ? null : Number(perAmount);
+        if (!['fixed', 'lucky'].includes(packetType)) throw new Error('红包类型无效');
+        if (!Number.isFinite(packetTotal) || packetTotal <= 0) throw new Error('红包金额无效');
+        if (!Number.isSafeInteger(packetCount) || packetCount < 1 || packetCount > 100) throw new Error('红包个数无效');
+        if (packetType === 'fixed' && (!Number.isFinite(packetPerAmount) || packetPerAmount <= 0)) throw new Error('红包金额无效');
+
         // Deduct from sender wallet
         if (senderId === 'user') {
             const profile = db.prepare('SELECT wallet FROM user_profile WHERE id = ?').get('default');
             const bal = profile?.wallet ?? 520;
-            if (bal < totalAmount) throw new Error('余额不足');
-            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal - totalAmount).toFixed(2), 'default');
+            if (bal < packetTotal) throw new Error('余额不足');
+            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal - packetTotal).toFixed(2), 'default');
         } else {
             const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(senderId);
             const bal = char?.wallet ?? 0;
-            if (bal < totalAmount) throw new Error('余额不足');
-            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal - totalAmount).toFixed(2), senderId);
+            if (bal < packetTotal) throw new Error('余额不足');
+            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal - packetTotal).toFixed(2), senderId);
         }
 
         // Pre-generate amounts
         let amounts;
-        if (type === 'lucky') {
-            amounts = generateLuckyAmounts(totalAmount, count);
+        if (packetType === 'lucky') {
+            amounts = generateLuckyAmounts(packetTotal, packetCount);
         } else {
-            const each = perAmount ?? +(totalAmount / count).toFixed(2);
-            amounts = Array(count).fill(each);
+            const each = packetPerAmount ?? +(packetTotal / packetCount).toFixed(2);
+            amounts = Array(packetCount).fill(each);
         }
 
         const info = db.prepare(
             'INSERT INTO group_red_packets (group_id, sender_id, type, total_amount, per_amount, count, remaining_count, amounts, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).run(groupId, senderId, type, totalAmount, perAmount ?? null, count, count, JSON.stringify(amounts), note || '', Date.now());
+        ).run(groupId, senderId, packetType, packetTotal, packetPerAmount ?? null, packetCount, packetCount, JSON.stringify(amounts), note || '', Date.now());
         return info.lastInsertRowid;
     }
 

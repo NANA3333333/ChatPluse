@@ -24,7 +24,11 @@ function normalizeMessages(list = []) {
             if (aId !== bId) return aId.localeCompare(bId, 'en', { numeric: true });
             return (a.__fallbackIndex || 0) - (b.__fallbackIndex || 0);
         })
-        .map(({ __fallbackIndex, ...msg }) => msg);
+        .map((entry) => {
+            const msg = { ...entry };
+            delete msg.__fallbackIndex;
+            return msg;
+        });
 }
 
 function collapseRepeatedApiErrors(list = []) {
@@ -188,8 +192,7 @@ function RagHeaderProgress({ progress, lang }) {
 
 function ChatWindow({
     contact, allContacts, apiUrl, incomingMessageQueue, engineState,
-    onToggleMemo, onToggleDiary, onToggleSettings, userAvatar, onBack,
-    onSwitchTab, isGeneratingSchedule, onMessagesChange
+    onToggleMemo, onToggleDiary, onToggleSettings, userAvatar, onBack
 }) {
     const { t, lang } = useLanguage();
     const [messages, setMessages] = useState([]);

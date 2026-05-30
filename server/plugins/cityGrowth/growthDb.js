@@ -1,5 +1,21 @@
 module.exports = function initCityGrowthDb(rawDb) {
     const db = rawDb?.prepare ? rawDb : (typeof rawDb?.getRawDb === 'function' ? rawDb.getRawDb() : rawDb);
+    function quoteSqlIdentifier(identifier) {
+        const value = String(identifier || '');
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+            throw new Error(`Invalid SQLite identifier: ${value}`);
+        }
+        return `"${value}"`;
+    }
+
+    function addColumnIfMissing(tableName, columnName, definition) {
+        const safeTableName = quoteSqlIdentifier(tableName);
+        const columns = new Set(db.prepare(`PRAGMA table_info(${safeTableName})`).all().map((col) => col.name));
+        if (columns.has(columnName)) return false;
+        db.prepare(`ALTER TABLE ${safeTableName} ADD COLUMN ${quoteSqlIdentifier(columnName)} ${definition}`).run();
+        return true;
+    }
+
     const builtInPromptEffects = {
         psychology: {
             basic: '在难受、烦躁或委屈时，更容易先找能让自己缓下来的做法。',
@@ -32,8 +48,8 @@ module.exports = function initCityGrowthDb(rawDb) {
             is_enabled INTEGER DEFAULT 1
         );
     `);
-    try { db.exec("ALTER TABLE city_school_courses ADD COLUMN prompt_effect_basic TEXT DEFAULT '';"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_school_courses ADD COLUMN prompt_effect_advanced TEXT DEFAULT '';"); } catch (e) { }
+    addColumnIfMissing('city_school_courses', 'prompt_effect_basic', "TEXT DEFAULT ''");
+    addColumnIfMissing('city_school_courses', 'prompt_effect_advanced', "TEXT DEFAULT ''");
 
     db.exec(`
         CREATE TABLE IF NOT EXISTS city_character_courses (

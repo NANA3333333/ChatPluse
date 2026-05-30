@@ -281,21 +281,21 @@ function initGroupChatPlugin(app, context) {
             if (!messageIds || !Array.isArray(messageIds) || messageIds.length === 0) {
                 return res.status(400).json({ error: 'messageIds array required' });
             }
-            const deleted = db.deleteGroupMessages(messageIds);
+            const deleted = db.deleteGroupMessages(req.params.id, messageIds);
             res.json({ success: true, deleted });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
     });
 
-    // 鈹€鈹€鈹€ Group Chat Debounce System 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // Group Chat Debounce System
     // When user sends multiple messages quickly, we wait until they stop, then fire ONE AI reply chain.
     const groupDebounceTimers = {}; // { groupId: timeoutHandle }
     const groupReplyLock = {};
-    const groupInterrupt = {};     // { groupId: true } 鈥?prevent overlapping chains
+    const groupInterrupt = {};     // { groupId: true } prevents overlapping chains
     const pausedGroups = new Set(); // groups where AI replies are paused by user
-    const noChainGroups = new Set(); // groups where AI鈫扐I secondary @-mention chains are blocked
-    const groupPendingMentions = {}; // { groupId: { ids: Set, isAtAll: bool } } 鈥?accumulates mentions across debounce resets
+    const noChainGroups = new Set(); // groups where AI-to-AI secondary @-mention chains are blocked
+    const groupPendingMentions = {}; // { groupId: { ids: Set, isAtAll: bool } } accumulates mentions across debounce resets
 
     // 14.10 Set AI pause for a group
     app.post('/api/groups/:id/ai-pause', authMiddleware, (req, res) => {
@@ -330,7 +330,7 @@ function initGroupChatPlugin(app, context) {
         res.json({ paused: pausedGroups.has(req.params.id) });
     });
 
-    // 14.11 Toggle AI鈫扐I secondary @-mention chain for a group
+    // 14.11 Toggle AI-to-AI secondary @-mention chain for a group
     app.post('/api/groups/:id/no-chain', authMiddleware, (req, res) => {
         const db = getUserDb(req.user.id);
         const engine = getEngine(req.user.id);
@@ -553,7 +553,7 @@ function initGroupChatPlugin(app, context) {
                         // List char's own recent messages to prevent repetition
                         const noRepeatNote = buildCompactGroupAntiRepeat(char, recentGroupMsgs);
                         const mentionNote = isMentioned
-                            ? `\n[MENTION]: Someone just @mentioned you directly! You MUST reply to this message 鈥?don't ignore it.`
+                            ? `\n[MENTION]: Someone just @mentioned you directly! You MUST reply to this message; don't ignore it.`
                             : '';
 
                         const emotionGuidance = getEmotionBehaviorGuidance(char);
@@ -641,8 +641,8 @@ function initGroupChatPlugin(app, context) {
 
                         if (reply && reply.trim()) {
                             let cleanReply = reply.trim();
-                            // Strip AI's own name prefix 鈥?AI sometimes mimics the history format
-                            // Handles: [Name]:, 銆怤ame銆?, Name:, [Name]锛? etc.
+                            // Strip AI's own name prefix; AI sometimes mimics the history format.
+                            // Handles: [Name]:, 【Name】:, Name:, [Name]:, etc.
                             const nameEscaped = char.name.replace(/[.*+?^()|[\]\\{}$]/g, '\\$&');
                             const namePrefixRegex = new RegExp('^(?:\\[)?' + nameEscaped + '(?:\\])?[:：]\\s*', 'i');
                             cleanReply = cleanReply.replace(namePrefixRegex, '').trim();
@@ -657,7 +657,7 @@ function initGroupChatPlugin(app, context) {
                                 live_tail_count: recentGroupMsgs.length
                             });
 
-                            // 鈹€鈹€ Parse [CHAR_AFFINITY:targetId:delta] 鈥?inter-char affinity changes 鈹€鈹€
+                            // Parse [CHAR_AFFINITY:targetId:delta] inter-character affinity changes.
                             const charAffinityRegex = /\[CHAR_AFFINITY:([^:]+):([+-]?\d+)\]/gi;
                             let affinityMatch;
                             while ((affinityMatch = charAffinityRegex.exec(cleanReply)) !== null) {
@@ -674,14 +674,14 @@ function initGroupChatPlugin(app, context) {
                                 }
                             }
 
-                            // 鈹€鈹€ Parse [MOMENT:content] 鈥?char posts to their Moments feed 鈹€鈹€
+                            // Parse [MOMENT:content] char posts to their Moments feed.
                             const momentMatch = cleanReply.match(/\[MOMENT:\s*([\s\S]*?)\s*\]/i);
                             if (momentMatch?.[1]) {
                                 db.addMoment(char.id, momentMatch[1].trim());
                                 console.log('[GroupChat] ' + char.name + ' posted a Moment from group chat.');
                             }
 
-                            // 鈹€鈹€ Parse [MOMENT_LIKE:id] 鈥?char likes a Moment 鈹€鈹€
+                            // Parse [MOMENT_LIKE:id] char likes a Moment.
                             const momentLikeRegex = /\[MOMENT_LIKE:\s*(\d+)\s*\]/gi;
                             let mLikeMatch;
                             while ((mLikeMatch = momentLikeRegex.exec(cleanReply)) !== null) {
@@ -691,7 +691,7 @@ function initGroupChatPlugin(app, context) {
                                 }
                             }
 
-                            // 鈹€鈹€ Parse [MOMENT_COMMENT:id:content] 鈥?char comments on a Moment 鈹€鈹€
+                            // Parse [MOMENT_COMMENT:id:content] char comments on a Moment.
                             const momentCommentRegex = /\[MOMENT_COMMENT:\s*(\d+)\s*:\s*([^\]]+)\]/gi;
                             let mCommentMatch;
                             while ((mCommentMatch = momentCommentRegex.exec(cleanReply)) !== null) {
@@ -701,14 +701,14 @@ function initGroupChatPlugin(app, context) {
                                 }
                             }
 
-                            // 鈹€鈹€ Parse [DIARY:content] 鈥?char writes a diary entry 鈹€鈹€
+                            // Parse [DIARY:content] char writes a diary entry.
                             const diaryMatch = cleanReply.match(/\[DIARY:\s*([\s\S]*?)\s*\]/i);
                             if (diaryMatch?.[1]) {
                                 db.addDiary(char.id, diaryMatch[1].trim(), 'neutral');
                                 console.log('[GroupChat] ' + char.name + ' wrote a Diary entry from group chat.');
                             }
 
-                            // 鈹€鈹€ Parse [AFFINITY:卤N] 鈥?char's affinity toward user changes 鈹€鈹€
+                            // Parse [AFFINITY:+/-N] char's affinity toward user changes.
                             const affinityUserMatch = cleanReply.match(/\[AFFINITY:\s*([+-]?\d+)\s*\]/i);
                             if (affinityUserMatch?.[1]) {
                                 const delta = parseInt(affinityUserMatch[1], 10);
@@ -720,7 +720,7 @@ function initGroupChatPlugin(app, context) {
                                 }
                             }
 
-                            // 鈹€鈹€ Parse [REDPACKET_SEND:type|amount|count|note] 鈥?char sends a red packet 鈹€鈹€
+                            // Parse [REDPACKET_SEND:type|amount|count|note] char sends a red packet.
                             const rpSendMatch = cleanReply.match(/\[REDPACKET_SEND:([^|]+)\|([\d.]+)\|(\d+)\|([^\]]*)\]/i);
                             if (rpSendMatch) {
                                 try {
@@ -746,7 +746,7 @@ function initGroupChatPlugin(app, context) {
                                 } catch (rpErr) { console.error('[GroupChat] REDPACKET_SEND error:', rpErr.message); }
                             }
 
-                            // 鈹€鈹€ Strip ALL action tags before saving/broadcasting 鈹€鈹€
+                            // Strip ALL action tags before saving/broadcasting.
                             const globalStripRegex = /\[(?:CHAR_AFFINITY|AFFINITY|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|PRESSURE|TIMER|TRANSFER|DIARY_PASSWORD|Red Packet|REDPACKET_SEND)[^\]]*\]/gi;
                             cleanReply = cleanReply.replace(globalStripRegex, '').trim();
 
@@ -807,7 +807,7 @@ function initGroupChatPlugin(app, context) {
                                         .catch(err => console.error('[GroupChat] Group digest update err for ' + char.name + ':', err.message));
                                 }
 
-                                // 鈹€鈹€ Claim-on-success: auto-claim unclaimed red packets after successful API reply 鈹€鈹€
+                                // Claim-on-success: auto-claim unclaimed red packets after successful API reply.
                                 try {
                                     const unclaimedPackets = db.getUnclaimedRedPacketsForGroup(groupId, char.id);
                                     for (const pkt of unclaimedPackets) {
@@ -857,7 +857,7 @@ function initGroupChatPlugin(app, context) {
             } finally {
                 delete groupReplyLock[groupId];
 
-                // Fire secondary chains sequentially 鈥?preserve duplicate @mentions
+                // Fire secondary chains sequentially; preserve duplicate @mentions
                 // so the same char can reply multiple times if mentioned by different members
                 if (pendingSecondaryChains.length > 0 && !interruptedByRedPacket) {
                     let chainDelay = 2500;
@@ -872,7 +872,7 @@ function initGroupChatPlugin(app, context) {
                 if (interruptedByRedPacket) {
                     setTimeout(() => triggerGroupAIChain(userId, groupId, wsClients, remainingMembers, false, false, pendingRedPacketFeedback), 1500);
                 } else {
-                    // 鈹€鈹€ Post-chain red packet sender feedback 鈹€鈹€
+                    // Post-chain red packet sender feedback.
                     for (const { packetId, senderId } of pendingRedPacketFeedback) {
                         setTimeout(async () => {
                             try {
@@ -1026,7 +1026,7 @@ function initGroupChatPlugin(app, context) {
             mentionedIds.forEach(id => groupPendingMentions[groupId].ids.add(id));
             if (isAtAll) groupPendingMentions[groupId].isAtAll = true;
 
-            // Debounce: reset timer each time user sends a message 鈥?AI chain fires after LAST message
+            // Debounce: reset timer each time user sends a message; AI chain fires after LAST message.
             if (groupDebounceTimers[groupId]) {
                 clearTimeout(groupDebounceTimers[groupId]);
             }

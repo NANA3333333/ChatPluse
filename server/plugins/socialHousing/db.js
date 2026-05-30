@@ -46,6 +46,22 @@ const DEFAULT_AGENCY = {
 };
 
 module.exports = function initSocialHousingDb(db) {
+    function quoteSqlIdentifier(identifier) {
+        const value = String(identifier || '');
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+            throw new Error(`Invalid SQLite identifier: ${value}`);
+        }
+        return `"${value}"`;
+    }
+
+    function addColumnIfMissing(tableName, columnName, definition) {
+        const safeTableName = quoteSqlIdentifier(tableName);
+        const columns = new Set(db.prepare(`PRAGMA table_info(${safeTableName})`).all().map((col) => col.name));
+        if (columns.has(columnName)) return false;
+        db.prepare(`ALTER TABLE ${safeTableName} ADD COLUMN ${quoteSqlIdentifier(columnName)} ${definition}`).run();
+        return true;
+    }
+
     db.exec(`
         CREATE TABLE IF NOT EXISTS social_housing_classes (
             id TEXT PRIMARY KEY,
@@ -78,7 +94,7 @@ module.exports = function initSocialHousingDb(db) {
             sort_order INTEGER DEFAULT 0
         );
     `);
-    try { db.exec("ALTER TABLE social_housing_homes ADD COLUMN sale_price REAL DEFAULT 0;"); } catch (e) { }
+    addColumnIfMissing('social_housing_homes', 'sale_price', 'REAL DEFAULT 0');
 
     db.exec(`
         CREATE TABLE IF NOT EXISTS social_housing_bindings (
@@ -97,10 +113,10 @@ module.exports = function initSocialHousingDb(db) {
             FOREIGN KEY (character_id) REFERENCES characters(id) ON DELETE CASCADE
         );
     `);
-    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN rent_due_at INTEGER DEFAULT 0;"); } catch (e) { }
-    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN rent_last_paid_at INTEGER DEFAULT 0;"); } catch (e) { }
-    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN deposit_paid REAL DEFAULT 0;"); } catch (e) { }
-    try { db.exec("ALTER TABLE social_housing_bindings ADD COLUMN missed_rent_count INTEGER DEFAULT 0;"); } catch (e) { }
+    addColumnIfMissing('social_housing_bindings', 'rent_due_at', 'INTEGER DEFAULT 0');
+    addColumnIfMissing('social_housing_bindings', 'rent_last_paid_at', 'INTEGER DEFAULT 0');
+    addColumnIfMissing('social_housing_bindings', 'deposit_paid', 'REAL DEFAULT 0');
+    addColumnIfMissing('social_housing_bindings', 'missed_rent_count', 'INTEGER DEFAULT 0');
 
     db.exec(`
         CREATE TABLE IF NOT EXISTS social_housing_agency (
@@ -123,10 +139,10 @@ module.exports = function initSocialHousingDb(db) {
         );
     `);
 
-    try { db.exec("ALTER TABLE social_housing_agency ADD COLUMN decision_interval_hours INTEGER DEFAULT 6;"); } catch (e) { }
-    try { db.exec("ALTER TABLE social_housing_agency ADD COLUMN model_char_id TEXT DEFAULT 'auto';"); } catch (e) { }
-    try { db.exec("ALTER TABLE social_housing_agency ADD COLUMN last_error TEXT DEFAULT '';"); } catch (e) { }
-    try { db.exec("ALTER TABLE social_housing_agency ADD COLUMN last_error_at INTEGER DEFAULT 0;"); } catch (e) { }
+    addColumnIfMissing('social_housing_agency', 'decision_interval_hours', 'INTEGER DEFAULT 6');
+    addColumnIfMissing('social_housing_agency', 'model_char_id', "TEXT DEFAULT 'auto'");
+    addColumnIfMissing('social_housing_agency', 'last_error', "TEXT DEFAULT ''");
+    addColumnIfMissing('social_housing_agency', 'last_error_at', 'INTEGER DEFAULT 0');
 
     db.exec(`
         CREATE TABLE IF NOT EXISTS social_housing_ads (

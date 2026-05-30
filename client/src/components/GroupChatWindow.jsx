@@ -19,7 +19,11 @@ function normalizeGroupMessages(list = []) {
             if (aId !== bId) return aId.localeCompare(bId, 'en', { numeric: true });
             return (a.__fallbackIndex || 0) - (b.__fallbackIndex || 0);
         })
-        .map(({ __fallbackIndex, ...msg }) => msg);
+        .map((entry) => {
+            const msg = { ...entry };
+            delete msg.__fallbackIndex;
+            return msg;
+        });
 }
 
 const quickEmojis = [
@@ -119,7 +123,7 @@ function RedPacketModal({ group, apiUrl, onClose, userWallet }) {
 }
 
 /* ─── Red Packet Card (parsed from [REDPACKET:id] in content) ─── */
-function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender, claimEvent }) {
+function RedPacketCard({ packetId, apiUrl, groupId, resolveSender, claimEvent }) {
     const { lang } = useLanguage();
     const [pkt, setPkt] = useState(null);
     const [showDetail, setShowDetail] = useState(false);
@@ -141,7 +145,7 @@ function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender, claim
             await fetch(`${apiUrl}/groups/${groupId}/redpackets/${packetId}/claim`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ claimer_id: 'user' })
+                body: JSON.stringify({})
             });
             loadPkt();
         } catch (e) { console.error(e); }
@@ -199,7 +203,7 @@ function RedPacketCard({ packetId, apiUrl, groupId, isUser, resolveSender, claim
 }
 
 /* ─── Right-side Group Management Drawer ─── */
-function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, messages, allContacts, onAddMember, onRename }) {
+function GroupManageDrawer({ group, apiUrl, resolveSender, onClose, lang, allContacts, onAddMember, onRename }) {
     const [noChain, setNoChain] = useState(false);
     const [injectLimit, setInjectLimit] = useState(group?.inject_limit ?? 5);
     const [contextLimit, setContextLimit] = useState(group?.context_msg_limit ?? 60);
@@ -443,11 +447,11 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
         reader.readAsText(file, 'utf-8');
     };
 
-    const resolveSender = (senderId) => {
+    const resolveSender = useCallback((senderId) => {
         if (senderId === 'user') return { name: userProfile?.name || 'User', avatar: resolveAvatarUrl(userProfile?.avatar, apiUrl, userProfile?.name || 'User') };
         const char = allContacts?.find(c => String(c.id) === String(senderId));
         return char ? { ...char, avatar: resolveAvatarUrl(char.avatar, apiUrl, char.name || senderId || 'User') } : { name: senderId, avatar: defaultAvatarUrl(senderId || 'User') };
-    };
+    }, [allContacts, apiUrl, userProfile?.avatar, userProfile?.name]);
 
     const addEmoji = (emoji) => { setInput(prev => prev + emoji); setShowEmojiPicker(false); };
 
@@ -462,7 +466,7 @@ function GroupChatWindow({ group, apiUrl, allContacts, userProfile, incomingGrou
             });
         }
         return base.filter(m => m.name.toLowerCase().includes(mentionFilter.toLowerCase()));
-    }, [group, mentionFilter, allContacts, lang]);
+    }, [group, mentionFilter, lang, resolveSender]);
 
     const handleInputChange = (e) => {
         const val = e.target.value;

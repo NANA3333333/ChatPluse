@@ -12,9 +12,12 @@ if (!fs.existsSync(dataDir)) {
 // master.db is intended strictly for authentication and tracking which user maps to which personal db file
 const dbPath = path.join(dataDir, 'master.db');
 const db = new Database(dbPath);
-const DEFAULT_ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '12345';
 
 db.pragma('journal_mode = WAL');
+
+function generateInitialAdminPassword() {
+    return crypto.randomBytes(18).toString('base64url');
+}
 
 function initAuthDb() {
     db.exec(`
@@ -84,10 +87,10 @@ function initAuthDb() {
     // Auto-seed root admin account "Nana"
     const rootUser = db.prepare('SELECT id FROM users WHERE username = ?').get('Nana');
     if (!rootUser) {
-        const adminPw = DEFAULT_ADMIN_PASSWORD;
+        const adminPw = process.env.ADMIN_PASSWORD || generateInitialAdminPassword();
         if (!process.env.ADMIN_PASSWORD) {
             console.log(`[AuthDB] ⚠️  No ADMIN_PASSWORD env var set. Generated random admin password: ${adminPw}`);
-            console.log('[AuthDB] Set ADMIN_PASSWORD in server/.env if you want a different first-run password.');
+            console.log('[AuthDB] Save this password now, then set ADMIN_PASSWORD in server/.env before the next fresh initialization if you want a fixed first-run password.');
         }
         const id = generateId();
         const hash = bcrypt.hashSync(adminPw, 10);

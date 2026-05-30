@@ -1,31 +1,55 @@
 const fs = require('fs');
 const path = require('path');
-const jwt = require('jsonwebtoken');
 const multer = require('multer');
 const archiver = require('archiver');
 const unzipper = require('unzipper');
 
 module.exports = function (app, pluginContext) {
-    const { getMemory, getUserDb, getEngine, getWsClients, authMiddleware, JWT_SECRET } = pluginContext;
+    const { getMemory, getUserDb, getEngine, getWsClients, authMiddleware } = pluginContext;
     const { clearMemoryCache } = require('../../memory');
     const { closeSchedulerDb } = require('../scheduler/db');
 
     // Resolve path to the shared uploads directory (server/public/uploads)
     const uploadsDir = path.join(__dirname, '..', '..', 'public', 'uploads');
     const tempUploadsDir = path.join(uploadsDir, 'temp');
+    const publicRoot = path.resolve(__dirname, '..', '..', 'public');
+    const uploadsRoot = path.resolve(uploadsDir);
 
     const toUploadRelativePath = (value) => {
         const raw = String(value || '').trim();
         if (!raw) return null;
         const marker = '/uploads/';
         const markerIdx = raw.indexOf(marker);
+        let rel = null;
         if (markerIdx >= 0) {
-            return raw.slice(markerIdx + 1).replaceAll('/', path.sep);
+            rel = raw.slice(markerIdx + 1);
+        } else if (/^uploads[\\/]/.test(raw)) {
+            rel = raw;
+        } else {
+            return null;
         }
-        if (raw.startsWith('uploads/')) {
-            return raw.replaceAll('/', path.sep);
+
+        rel = rel.split(/[?#]/, 1)[0].replace(/\\/g, '/');
+        if (!rel || rel.includes('\0') || rel.startsWith('/') || /^[a-zA-Z]:/.test(rel)) {
+            return null;
         }
-        return null;
+        const normalizedPath = path.posix.normalize(rel);
+        if (normalizedPath === '.' || normalizedPath === '..' || normalizedPath.startsWith('../')) {
+            return null;
+        }
+        if (!normalizedPath.startsWith('uploads/')) {
+            return null;
+        }
+        return normalizedPath.replaceAll('/', path.sep);
+    };
+
+    const resolveUploadReferencePath = (relPath) => {
+        if (!relPath) return null;
+        const fullPath = path.resolve(publicRoot, relPath);
+        if (fullPath !== uploadsRoot && !fullPath.startsWith(uploadsRoot + path.sep)) {
+            return null;
+        }
+        return fullPath;
     };
 
     const collectUploadReferences = (userDb, sql, mapper = (row) => Object.values(row || {})) => {
@@ -89,14 +113,10 @@ module.exports = function (app, pluginContext) {
 
 
     // ─── EXPORT: Download backup as .zip (DB + uploads) ──────────────────
-    app.get('/api/system/export', async (req, res) => {
+    app.get('/api/system/export', authMiddleware, async (req, res) => {
         try {
-            const token = req.query.token;
-            if (!token) return res.status(401).send('Unauthorized');
-            const decoded = jwt.verify(token, JWT_SECRET);
-            const userId = decoded.id;
-
-            const db = getUserDb(userId);
+            const userId = req.user.id;
+            const db = req.db || getUserDb(userId);
             const dbPath = db.getDbPath(); // Use the correct path from db instance
 
             if (!fs.existsSync(dbPath)) return res.status(404).send('Database not found');
@@ -138,7 +158,8 @@ module.exports = function (app, pluginContext) {
 
             // Add only the current user's referenced upload files.
             for (const relPath of getReferencedUploadsForUser(db)) {
-                const fullPath = path.join(__dirname, '..', '..', 'public', relPath);
+                const fullPath = resolveUploadReferencePath(relPath);
+                if (!fullPath) continue;
                 if (!fs.existsSync(fullPath)) continue;
                 archive.file(fullPath, { name: relPath.replaceAll(path.sep, '/') });
             }
@@ -203,13 +224,7 @@ module.exports = function (app, pluginContext) {
                 // Extract zip to a temp directory
                 extractedDir = uploadedPath + '_extracted';
                 if (!fs.existsSync(extractedDir)) fs.mkdirSync(extractedDir, { recursive: true });
-
-                await new Promise((resolve, reject) => {
-                    fs.createReadStream(uploadedPath)
-                        .pipe(unzipper.Extract({ path: extractedDir }))
-                        .on('close', resolve)
-                        .on('error', reject);
-                });
+                await extractZipSafely(uploadedPath, extractedDir);
 
                 // Find the .db file inside the extracted directory
                 const extractedDbPath = path.join(extractedDir, 'chatpulse.db');
@@ -311,9 +326,9 @@ module.exports = function (app, pluginContext) {
     function removeReferencedUploads(relPaths = []) {
         for (const relPath of relPaths) {
             if (!relPath) continue;
-            const fullPath = path.join(__dirname, '..', '..', 'public', relPath);
+            const fullPath = resolveUploadReferencePath(relPath);
             try {
-                if (fs.existsSync(fullPath) && fullPath !== tempUploadsDir && !fullPath.startsWith(tempUploadsDir + path.sep)) {
+                if (fullPath && fs.existsSync(fullPath) && fullPath !== tempUploadsDir && !fullPath.startsWith(tempUploadsDir + path.sep)) {
                     fs.rmSync(fullPath, { recursive: true, force: true });
                 }
             } catch (e) { }
@@ -323,6 +338,46 @@ module.exports = function (app, pluginContext) {
         }
         if (!fs.existsSync(tempUploadsDir)) {
             fs.mkdirSync(tempUploadsDir, { recursive: true });
+        }
+    }
+
+    function resolveSafeZipEntryPath(outputDir, entryPath) {
+        const rawPath = String(entryPath || '').replace(/\\/g, '/');
+        if (!rawPath || rawPath.includes('\0') || rawPath.startsWith('/') || /^[a-zA-Z]:/.test(rawPath)) {
+            throw new Error('Unsafe zip entry path in backup archive.');
+        }
+
+        const normalizedPath = path.posix.normalize(rawPath);
+        if (normalizedPath === '.' || normalizedPath === '..' || normalizedPath.startsWith('../')) {
+            throw new Error('Unsafe zip entry path in backup archive.');
+        }
+
+        const outputRoot = path.resolve(outputDir);
+        const fullPath = path.resolve(outputRoot, ...normalizedPath.split('/'));
+        if (fullPath !== outputRoot && !fullPath.startsWith(outputRoot + path.sep)) {
+            throw new Error('Unsafe zip entry path in backup archive.');
+        }
+        return fullPath;
+    }
+
+    async function extractZipSafely(zipPath, outputDir) {
+        const directory = await unzipper.Open.file(zipPath);
+        for (const entry of directory.files) {
+            const targetPath = resolveSafeZipEntryPath(outputDir, entry.path);
+            if (entry.type === 'Directory') {
+                fs.mkdirSync(targetPath, { recursive: true });
+                continue;
+            }
+
+            fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+            await new Promise((resolve, reject) => {
+                const readStream = entry.stream();
+                const writeStream = fs.createWriteStream(targetPath);
+                readStream.on('error', reject);
+                writeStream.on('error', reject);
+                writeStream.on('finish', resolve);
+                readStream.pipe(writeStream);
+            });
         }
     }
 

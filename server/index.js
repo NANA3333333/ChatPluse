@@ -215,6 +215,58 @@ app.use('/uploads', (req, res, next) => {
     next();
 }, express.static(path.join(__dirname, 'public/uploads')));
 
+const allowedImageMimeTypes = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const allowedImageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+
+function isAllowedImageUploadMetadata(file) {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const mime = String(file.mimetype || '').toLowerCase();
+    return allowedImageExtensions.has(ext) && allowedImageMimeTypes.has(mime);
+}
+
+function isValidImageUploadContent(file) {
+    const ext = path.extname(file.originalname || file.filename || '').toLowerCase();
+    const header = fs.readFileSync(file.path).subarray(0, 16);
+
+    if ((ext === '.jpg' || ext === '.jpeg') && header[0] === 0xff && header[1] === 0xd8 && header[2] === 0xff) {
+        return true;
+    }
+    if (ext === '.png' && header.length >= 8 && header.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+        return true;
+    }
+    if (ext === '.gif' && header.length >= 6 && (header.subarray(0, 6).toString('ascii') === 'GIF87a' || header.subarray(0, 6).toString('ascii') === 'GIF89a')) {
+        return true;
+    }
+    if (ext === '.webp' && header.length >= 12 && header.subarray(0, 4).toString('ascii') === 'RIFF' && header.subarray(8, 12).toString('ascii') === 'WEBP') {
+        return true;
+    }
+    return false;
+}
+
+function cleanupUploadedFile(file) {
+    try {
+        if (file?.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
+    } catch (e) { }
+}
+
+const ttsAudioRoot = path.resolve(__dirname, '..', 'data', 'tts');
+
+function resolveTtsAudioPath(userId, audioPath) {
+    if (!audioPath) return null;
+    const userAudioRoot = path.resolve(ttsAudioRoot, String(userId || 'default'));
+    const resolvedPath = path.resolve(String(audioPath));
+    if (resolvedPath !== userAudioRoot && !resolvedPath.startsWith(userAudioRoot + path.sep)) {
+        return null;
+    }
+    return resolvedPath;
+}
+
+function sanitizeTtsMimeType(value) {
+    const mime = String(value || '').trim().toLowerCase();
+    if (/^audio\/[a-z0-9.+-]+$/i.test(mime)) return mime;
+    return 'audio/mpeg';
+}
+
 // Configure Multer for local image uploads
 const storage = multer.diskStorage({
     destination: function (req, file, cb) {
@@ -226,23 +278,22 @@ const storage = multer.diskStorage({
     },
     filename: function (req, file, cb) {
         const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        const ext = path.extname(file.originalname);
+        const ext = path.extname(file.originalname).toLowerCase();
         cb(null, file.fieldname + '-' + uniqueSuffix + ext);
     }
 });
 
 const fileFilter = (req, file, cb) => {
-    // accept images or sqlite databases
-    if (file.mimetype.startsWith('image/') || file.originalname.endsWith('.db') || file.mimetype === 'application/octet-stream' || file.mimetype === 'application/x-sqlite3') {
+    if (file.fieldname === 'image' && isAllowedImageUploadMetadata(file)) {
         cb(null, true);
     } else {
-        cb(new Error('Invalid file type. Only images and .db backups are allowed.'), false);
+        cb(new Error('Invalid file type. Upload a PNG, JPEG, GIF, or WebP image.'), false);
     }
 };
 
 const upload = multer({
     storage: storage,
-    limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit for db backups
+    limits: { fileSize: 10 * 1024 * 1024, files: 1 },
     fileFilter: fileFilter
 });
 
@@ -1589,13 +1640,13 @@ function ensureImportedCharacter(db, name, profile = {}, settings = {}) {
 }
 
 function sanitizeDownloadName(value, fallback = 'character') {
-    const safe = String(value || fallback)
+    const clean = (input) => String(input || '')
         .trim()
         .replace(/[\\/:*?"<>|]+/g, '_')
         .replace(/\s+/g, '_')
         .replace(/[^A-Za-z0-9_.-]+/g, '_')
         .slice(0, 80);
-    return safe || fallback;
+    return clean(value) || clean(fallback) || 'character';
 }
 
 function normalizeCharacterArchivePayload(payload) {
@@ -5036,17 +5087,19 @@ wss.on('connection', (ws) => {
         try {
             const data = JSON.parse(message);
             if (data.type === 'auth') {
-                const decoded = jwt.verify(data.token, JWT_SECRET);
-                ws.userId = decoded.id;
-                const clients = getWsClients(decoded.id);
+                const { user } = verifyAuthToken(data.token);
+                ws.userId = user.id;
+                authDb.updateLastActive(user.id);
+                const clients = getWsClients(user.id);
                 clients.add(ws);
-                const engine = getEngineWithPluginHooks(decoded.id);
+                const engine = getEngineWithPluginHooks(user.id);
                 engine.startEngine(clients);
                 engine.startGroupProactiveTimers(clients);
-                console.log(`[WS] Authenticated frontend socket for user: ${decoded.username}`);
+                console.log(`[WS] Authenticated frontend socket for user: ${user.username}`);
             }
         } catch (e) {
             console.error('[WS] Auth or Engine Start Error:', e.message);
+            try { ws.close(1008, 'Unauthorized'); } catch { /* ignore */ }
         }
     });
 
@@ -5060,8 +5113,36 @@ wss.on('connection', (ws) => {
 
 
 
-// 鈹€鈹€鈹€ AUTHENTICATION MIDDLEWARE 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// AUTHENTICATION MIDDLEWARE
 authDb.initAuthDb();
+
+function createAuthError(message, statusCode = 401) {
+    const error = new Error(message);
+    error.statusCode = statusCode;
+    return error;
+}
+
+function verifyAuthToken(token) {
+    if (!token) throw createAuthError('Unauthorized');
+    const decoded = jwt.verify(token, JWT_SECRET);
+    const authUser = authDb.getUserById(decoded.id);
+    if (!authUser) throw createAuthError('Invalid token');
+    if (authUser.status === 'banned') throw createAuthError('Account banned', 403);
+    if (Number(decoded.tokenVersion ?? 0) !== Number(authUser.token_version ?? 0)) {
+        throw createAuthError('Session expired');
+    }
+    return {
+        decoded,
+        authUser,
+        user: {
+            id: authUser.id,
+            username: authUser.username,
+            role: authUser.role || decoded.role || 'user',
+            status: authUser.status || 'active',
+            tokenVersion: authUser.token_version || 0
+        }
+    };
+}
 
 const authMiddleware = (req, res, next) => {
     const authHeader = req.headers.authorization;
@@ -5070,24 +5151,8 @@ const authMiddleware = (req, res, next) => {
     }
     const token = authHeader.split(' ')[1];
     try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        const authUser = authDb.getUserById(decoded.id);
-        if (!authUser) {
-            return res.status(401).json({ error: 'Invalid token' });
-        }
-        if (authUser.status === 'banned') {
-            return res.status(403).json({ error: 'Account banned' });
-        }
-        if (Number(decoded.tokenVersion ?? 0) !== Number(authUser.token_version ?? 0)) {
-            return res.status(401).json({ error: 'Session expired' });
-        }
-        req.user = {
-            id: authUser.id,
-            username: authUser.username,
-            role: authUser.role || decoded.role || 'user',
-            status: authUser.status || 'active',
-            tokenVersion: authUser.token_version || 0
-        };
+        const { user } = verifyAuthToken(token);
+        req.user = user;
         authDb.updateLastActive(req.user.id);
         req.db = getUserDb(req.user.id);
         Object.defineProperty(req, 'engine', {
@@ -5120,13 +5185,13 @@ const authMiddleware = (req, res, next) => {
         });
         next();
     } catch (e) {
-        return res.status(401).json({ error: 'Invalid token' });
+        return res.status(e.statusCode || 401).json({ error: e.statusCode ? e.message : 'Invalid token' });
     }
 };
 
-// 0. Upload a file (image or any file)
+// 0. Upload a profile/avatar image
 app.post('/api/upload', authMiddleware, (req, res) => {
-    upload.any()(req, res, function (err) {
+    upload.single('image')(req, res, function (err) {
         if (err instanceof multer.MulterError) {
             // A Multer error occurred when uploading (e.g. file too large)
             return res.status(400).json({ error: err.message });
@@ -5136,9 +5201,13 @@ app.post('/api/upload', authMiddleware, (req, res) => {
         }
 
         try {
-            const file = req.files?.[0];
+            const file = req.file;
             if (!file) {
                 return res.status(400).json({ error: 'No file uploaded' });
+            }
+            if (!isValidImageUploadContent(file)) {
+                cleanupUploadedFile(file);
+                return res.status(400).json({ error: 'Invalid image content. Upload a PNG, JPEG, GIF, or WebP image.' });
             }
             // Return relative path so frontend can construct absolute URL or use it directly
             const fileUrl = `/uploads/${file.filename}`;
@@ -5149,7 +5218,7 @@ app.post('/api/upload', authMiddleware, (req, res) => {
     });
 });
 
-// 鈹€鈹€鈹€ AUTH ROUTES 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// AUTH ROUTES
 app.post('/api/auth/register', authLimiter, (req, res) => {
     try {
         const { username, password, inviteCode } = req.body;
@@ -5204,7 +5273,7 @@ app.put('/api/auth/account', authMiddleware, (req, res) => {
     }
 });
 
-// 鈹€鈹€鈹€ SYSTEM ROUTES 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// SYSTEM ROUTES
 app.get('/api/system/announcement', authMiddleware, (req, res) => {
     try {
         const ann = authDb.getLatestAnnouncement();
@@ -5215,7 +5284,7 @@ app.get('/api/system/announcement', authMiddleware, (req, res) => {
 });
 
 
-// 鈹€鈹€鈹€ PLUGIN MANAGER 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// PLUGIN MANAGER
 pluginContext = {
     wss,
     getWsClients,
@@ -5247,7 +5316,7 @@ if (fs.existsSync(pluginsDir)) {
 }
 
 // REST API ROUTES
-// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// ---------------------------------------------------------------------------
 
 // 0.5 Get User Profile
 app.get('/api/user', authMiddleware, (req, res) => {
@@ -5660,8 +5729,8 @@ app.post('/api/characters', authMiddleware, (req, res) => {
                 db.updateCharacter(data.id, { private_summary_baseline_message_id: Number(overflowMessages[overflowMessages.length - 1]?.id || 0) });
             }
         }
-        // Reset proactive timer after settings change (do NOT call handleUserMessage 鈥?
-        // that would echo the character's own last message back to the AI as user input)
+        // Reset proactive timer after settings change. Do NOT call handleUserMessage here;
+        // that would echo the character's own last message back to the AI as user input.
         engine.stopTimer(data.id);
 
         res.json({ success: true, character: db.getCharacter(data.id) });
@@ -5728,10 +5797,9 @@ app.post('/api/characters/:id/reset-physical-state', authMiddleware, (req, res) 
     }
 });
 
-// 2.5 Fetch available models from a given API endpoint (proxy to avoid CORS + key exposure in browser)
-app.get('/api/models', async (req, res) => {
+async function handleModelListProxy(req, res, source) {
     try {
-        const { endpoint, key } = req.query;
+        const { endpoint, key } = source || {};
         if (!endpoint || !key) return res.status(400).json({ error: 'Missing endpoint or key' });
 
         let baseUrl = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
@@ -5762,6 +5830,16 @@ app.get('/api/models', async (req, res) => {
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
+}
+
+// 2.5 Fetch available models from a given API endpoint (proxy to avoid CORS + key exposure in browser)
+app.post('/api/models', authMiddleware, async (req, res) => {
+    return handleModelListProxy(req, res, req.body);
+});
+
+// Legacy GET shape kept for compatibility, but it is still authenticated.
+app.get('/api/models', authMiddleware, async (req, res) => {
+    return handleModelListProxy(req, res, req.query);
 });
 
 // 3. Get messages for a character (supports ?limit=N and ?before=msgId for pagination)
@@ -5944,12 +6022,16 @@ app.get('/api/tts/audio/:messageId', authMiddleware, (req, res) => {
         if (messageCharId && String(messageCharId) !== String(row.character_id)) {
             return res.status(403).json({ error: 'TTS audio does not match message.' });
         }
-        if (!fs.existsSync(row.audio_path)) {
+        const audioPath = resolveTtsAudioPath(req.user.id, row.audio_path);
+        if (!audioPath) {
+            return res.status(404).json({ error: 'TTS audio not found.' });
+        }
+        if (!fs.existsSync(audioPath)) {
             return res.status(404).json({ error: 'TTS audio file is missing.' });
         }
-        res.setHeader('Content-Type', row.mime_type || 'audio/mpeg');
+        res.setHeader('Content-Type', sanitizeTtsMimeType(row.mime_type));
         res.setHeader('Cache-Control', 'private, max-age=86400');
-        res.sendFile(path.resolve(row.audio_path));
+        res.sendFile(audioPath);
     } catch (e) {
         res.status(500).json({ error: e.message });
     }
@@ -6144,10 +6226,10 @@ The JSON MUST have the EXACT following keys:
             temperature: 0.7
         });
 
-        console.log(`[Generator Raw Output]`, generatedText);
+        console.log(`[Character Generator] LLM returned ${String(generatedText || '').length} chars.`);
 
         // Aggressively strip markdown formatting
-        let cleanText = generatedText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        let cleanText = String(generatedText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
 
         const startIdx = cleanText.indexOf('{');
         const endIdx = cleanText.lastIndexOf('}');
@@ -6157,7 +6239,7 @@ The JSON MUST have the EXACT following keys:
             try {
                 parsed = JSON.parse(jsonText);
             } catch (err) {
-                console.error('JSON.parse failed on this string:\n', jsonText);
+                console.error(`[Character Generator] JSON.parse failed. responseLength=${jsonText.length}`);
                 throw new Error('LLM JSON Syntax Error: ' + err.message);
             }
 
@@ -6173,7 +6255,7 @@ The JSON MUST have the EXACT following keys:
 
             return res.json({ success: true, character: parsed });
         } else {
-            console.error('Failed to find JSON brackets in cleanText:', cleanText);
+            console.error(`[Character Generator] Failed to find JSON brackets. responseLength=${cleanText.length}`);
             throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
         }
     } catch (e) {
@@ -6286,10 +6368,11 @@ app.get('/api/data/:characterId/export', authMiddleware, (req, res) => {
             ...data
         };
         const filenameBase = sanitizeDownloadName(data.character?.name || req.params.characterId, req.params.characterId);
+        const filenameId = sanitizeDownloadName(req.params.characterId, 'character');
 
         // Return as a downloadable JSON file
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}_${req.params.characterId}_character_export.json"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}_${filenameId}_character_export.json"`);
         res.send(JSON.stringify(archive, null, 2));
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -6662,8 +6745,9 @@ app.get('/api/memories/:characterId/export', authMiddleware, (req, res) => {
             memories
         };
         const filenameBase = sanitizeDownloadName(charObj.name || characterId, characterId);
+        const filenameId = sanitizeDownloadName(characterId, 'character');
         res.setHeader('Content-Type', 'application/json');
-        res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}_${characterId}_memories_export.json"`);
+        res.setHeader('Content-Disposition', `attachment; filename="${filenameBase}_${filenameId}_memories_export.json"`);
         res.send(JSON.stringify(archive, null, 2));
     } catch (e) {
         res.status(500).json({ error: e.message });
@@ -9116,12 +9200,11 @@ app.post('/api/moments/:id/like', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const { liker_id } = req.body;  // 'user' or character id
-        const liked = db.toggleLike(req.params.id, liker_id || 'user');
+        const liked = db.toggleLike(req.params.id, 'user');
         const likers = db.getLikesForMoment(req.params.id).map(l => l.liker_id);
 
         // If the user liked it, potentially trigger a reaction from the AI
-        if (liked && (liker_id === 'user' || !liker_id)) {
+        if (liked) {
             const allMoments = db.getMoments();
             const moment = allMoments.find(m => m.id.toString() === req.params.id);
             if (moment && moment.character_id !== 'user') {
@@ -9165,37 +9248,35 @@ app.post('/api/moments/:id/comment', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const { author_id, content } = req.body;
+        const { content } = req.body;
         if (!content) return res.status(400).json({ error: 'content required' });
-        const commentId = db.addComment(req.params.id, author_id || 'user', content);
+        const commentId = db.addComment(req.params.id, 'user', content);
 
         // If the user commented, potentially trigger a reaction
-        if (author_id === 'user' || !author_id) {
-            const allMoments = db.getMoments();
-            const moment = allMoments.find(m => m.id.toString() === req.params.id);
-            if (moment && moment.character_id !== 'user') {
-                const userProfile = db.getUserProfile();
-                const reactionRate = userProfile?.moments_reaction_rate ?? 30;
-                if (Math.random() * 100 < reactionRate) {
-                    const char = db.getCharacter(moment.character_id);
-                    if (char && !char.is_blocked) {
-                        const userName = userProfile?.name || 'User';
-                        const contextContent = '[System] ' + userName + ' 刚刚评论了你的朋友圈动态：“' + moment.content.substring(0, 50) + '”，评论说：“' + content + '”。你可以在私聊中回应。';
-                        db.addMessage(char.id, 'system', contextContent);
-                        console.log(`[Moments] User commented on ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
-                        setTimeout(() => {
-                            try {
-                                engine.handleUserMessage(char.id, wsClients, {
-                                    triggerSource: 'moment_comment_reaction',
-                                    triggerRoute: 'POST /api/moments/:momentId/comment',
-                                    requestId: createRequestTraceId('moment-comment'),
-                                    triggerNote: `moment_comment_${moment.id}`
-                                });
-                            } catch (err) {
-                                console.error('[Moments] Error triggering reaction for comment:', err.message);
-                            }
-                        }, 2000);
-                    }
+        const allMoments = db.getMoments();
+        const moment = allMoments.find(m => m.id.toString() === req.params.id);
+        if (moment && moment.character_id !== 'user') {
+            const userProfile = db.getUserProfile();
+            const reactionRate = userProfile?.moments_reaction_rate ?? 30;
+            if (Math.random() * 100 < reactionRate) {
+                const char = db.getCharacter(moment.character_id);
+                if (char && !char.is_blocked) {
+                    const userName = userProfile?.name || 'User';
+                    const contextContent = '[System] ' + userName + ' 刚刚评论了你的朋友圈动态：“' + moment.content.substring(0, 50) + '”，评论说：“' + content + '”。你可以在私聊中回应。';
+                    db.addMessage(char.id, 'system', contextContent);
+                    console.log(`[Moments] User commented on ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
+                    setTimeout(() => {
+                        try {
+                            engine.handleUserMessage(char.id, wsClients, {
+                                triggerSource: 'moment_comment_reaction',
+                                triggerRoute: 'POST /api/moments/:momentId/comment',
+                                requestId: createRequestTraceId('moment-comment'),
+                                triggerNote: `moment_comment_${moment.id}`
+                            });
+                        } catch (err) {
+                            console.error('[Moments] Error triggering reaction for comment:', err.message);
+                        }
+                    }, 2000);
                 }
             }
         }
@@ -9280,7 +9361,7 @@ app.put('/api/user', authMiddleware, (req, res) => {
 });
 
 // 11.5 Theme Generation Helper & 11.6 AI Theme Generation
-// 鈹€鈹€ MOVED TO DLC: server/plugins/theme/index.js 鈹€鈹€
+// MOVED TO DLC: server/plugins/theme/index.js
 
 // 11.8 Context Token Stats
 app.get('/api/characters/:id/context-stats', authMiddleware, async (req, res) => {
@@ -10070,15 +10151,13 @@ app.delete('/api/characters/:id', authMiddleware, async (req, res) => {
 });
 
 // 13. Friendships & Relationships
-// 鈹€鈹€ MOVED TO DLC: server/plugins/relationships/index.js 鈹€鈹€
+// MOVED TO DLC: server/plugins/relationships/index.js
 
-// 鈹€鈹€鈹€ Economy System (Transfers, Wallet, Red Packets) 鈹€鈹€ MOVED TO DLC 鈹€鈹€鈹€鈹€鈹€
+// Economy System (Transfers, Wallet, Red Packets) MOVED TO DLC
 // See: server/plugins/economy/index.js
 
 
-// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // Serve React Frontend (Production)
-// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 const clientDistPath = path.join(__dirname, '..', 'client', 'dist');
 app.use(express.static(clientDistPath, {
     index: false,
@@ -10108,7 +10187,6 @@ app.use((req, res, next) => {
 });
 
 
-// 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 // Start listening
 console.log('[Express] Attempting to listen on port 8000...');
 const PORT = process.env.PORT || 8000;

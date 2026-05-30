@@ -1,15 +1,8 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import ContactList from './components/ContactList';
 import ChatWindow from './components/ChatWindow';
-import GroupChatWindow from './components/GroupChatWindow';
 import CreateGroupModal from './components/CreateGroupModal';
-import MemoTable from './components/MemoTable';
-import DiaryTable from './components/DiaryTable';
-import MomentsFeed from './components/MomentsFeed';
-import SettingsPanel from './components/SettingsPanel';
-import ChatSettingsDrawer from './components/ChatSettingsDrawer';
 import AddCharacterModal from './components/AddCharacterModal';
-import MemoryLibraryPanel from './components/MemoryLibraryPanel';
 
 import './App.css';
 import { MessageSquare, Users, Compass, Settings, UserPlus, Globe, UsersRound, LogOut, Database, LibraryBig } from 'lucide-react';
@@ -27,6 +20,22 @@ const defaultWsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
 const defaultWsHost = `${HOST}:8000`;
 const API_URL = import.meta.env.VITE_API_URL || `${defaultApiOrigin}/api`;
 const WS_URL = import.meta.env.VITE_WS_URL || `${defaultWsProtocol}//${defaultWsHost}`;
+
+const GroupChatWindow = lazy(() => import('./components/GroupChatWindow'));
+const MemoTable = lazy(() => import('./components/MemoTable'));
+const DiaryTable = lazy(() => import('./components/DiaryTable'));
+const MomentsFeed = lazy(() => import('./components/MomentsFeed'));
+const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
+const ChatSettingsDrawer = lazy(() => import('./components/ChatSettingsDrawer'));
+const MemoryLibraryPanel = lazy(() => import('./components/MemoryLibraryPanel'));
+
+function PanelFallback() {
+  return (
+    <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8a8f98', fontSize: '13px' }}>
+      Loading...
+    </div>
+  );
+}
 
 function App() {
   const { token, logout, user: authUser } = useAuth();
@@ -54,16 +63,16 @@ function App() {
   const [hasNewMoments, setHasNewMoments] = useState(false); // Moments notification
   const [generatingSchedules, setGeneratingSchedules] = useState({});
   const [hiddenMessagesCount, setHiddenMessagesCount] = useState(0);
-  const effectiveUser = { ...(authUser || {}), ...(userProfile || {}) };
+  const effectiveUser = useMemo(() => ({ ...(authUser || {}), ...(userProfile || {}) }), [authUser, userProfile]);
   const visiblePlugins = plugins.filter(p => !p.condition || p.condition(effectiveUser));
   const experimentalPlugins = visiblePlugins.filter(p => p.position === 'experiment');
   const regularPlugins = visiblePlugins.filter(p => p.position !== 'experiment');
 
-  console.log('App render hiddenCount:', hiddenMessagesCount);
-
   // Use a ref to track the active contact ID without causing useEffect re-renders when it changes.
   const activeContactRef = useRef(activeContactId);
   useEffect(() => { activeContactRef.current = activeContactId; }, [activeContactId]);
+  const activeGroupRef = useRef(activeGroupId);
+  useEffect(() => { activeGroupRef.current = activeGroupId; }, [activeGroupId]);
   const activeTabRef = useRef(activeTab);
   useEffect(() => { activeTabRef.current = activeTab; }, [activeTab]);
 
@@ -190,7 +199,6 @@ function App() {
   }, []);
 
   // 1. Fetch Contacts (Characters) and Profile on mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => {
     if (!token) {
       setIsLoaded(true);
@@ -202,7 +210,7 @@ function App() {
     };
 
     fetchContacts().then((loadedContacts) => {
-      if (!activeContactRef.current && !activeGroupId && Array.isArray(loadedContacts) && loadedContacts.length > 0) {
+      if (!activeContactRef.current && !activeGroupRef.current && Array.isArray(loadedContacts) && loadedContacts.length > 0) {
         const first = loadedContacts[0];
         setActiveContactId(first.id);
         setActiveContactSnapshot(first);
@@ -244,7 +252,7 @@ function App() {
         })
         .catch(err => console.error('Failed to load announcement:', err));
     });
-  }, [token]);
+  }, [token, fetchContacts]);
 
   // Listen for iframe postMessage from SillyTavern parent
   useEffect(() => {
@@ -273,7 +281,7 @@ function App() {
 
     const connectWs = () => {
       reconnectTimer = null;
-      ws = new WebSocket(`${WS_URL}/?token=${token}`);
+      ws = new WebSocket(WS_URL);
 
       ws.onopen = () => {
         ws.send(JSON.stringify({ type: 'auth', token: token }));
@@ -434,7 +442,6 @@ function App() {
         return contactsChanged ? updatedContacts : prev;
       });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [incomingMessageQueue]);
 
   // Apply Dynamic Theme & Custom CSS
@@ -711,104 +718,106 @@ function App() {
       {/* 3. Right Column (Chat Area / Content) — hidden on contacts tab */}
       {activeTab !== 'contacts' && (
         <div className="right-column" style={{ flexDirection: 'row', backgroundColor: activeTab === 'settings' ? '#f5f5f5' : '#fff' }}>
-          {(visiblePlugins.find(p => p.id === activeTab)) ? (() => {
-            const Plugin = visiblePlugins.find(p => p.id === activeTab);
-            const PluginComponent = Plugin.component;
-            return (
+          <Suspense fallback={<PanelFallback />}>
+            {(visiblePlugins.find(p => p.id === activeTab)) ? (() => {
+              const Plugin = visiblePlugins.find(p => p.id === activeTab);
+              const PluginComponent = Plugin.component;
+              return (
+                <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
+                  <PluginComponent apiUrl={API_URL} userProfile={effectiveUser} />
+                </div>
+              );
+            })() : activeTab === 'settings' ? (
               <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
-                <PluginComponent apiUrl={API_URL} userProfile={effectiveUser} />
-              </div>
-            );
-          })() : activeTab === 'settings' ? (
-            <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
-              <SettingsPanel
-                apiUrl={API_URL}
-                contacts={contacts}
-                onCharactersUpdate={(event) => {
-                  if (event?.type === 'deleted') {
-                    removeDeletedContact(event.id);
-                  }
-                  fetchContacts(); // Refetch after create/update/delete
-                }}
-                onProfileUpdate={setUserProfile}
-                onBack={() => setActiveTab('chats')}
-              />
-            </div>
-          ) : activeTab === 'discover' ? (
-            <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
-              <MomentsFeed apiUrl={API_URL} userProfile={effectiveUser} onBack={() => setActiveTab('chats')} />
-            </div>
-          ) : activeTab === 'memory_library' ? (
-            <MemoryLibraryPanel apiUrl={API_URL} contacts={contacts} />
-          ) : activeContactId && activeTab === 'chats' ? (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'row', height: '100%', minWidth: 0 }}>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
-                <ChatWindow
-                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                  allContacts={contacts}
-                  userAvatar={effectiveUser?.avatar}
+                <SettingsPanel
                   apiUrl={API_URL}
-                  incomingMessageQueue={incomingMessageQueue}
-                  engineState={engineState}
-                  onToggleMemo={() => setActiveDrawer(activeDrawer === 'memo' ? null : 'memo')}
-                  onToggleDiary={() => setActiveDrawer(activeDrawer === 'diary' ? null : 'diary')}
-                  onToggleSettings={() => setActiveDrawer(activeDrawer === 'settings' ? null : 'settings')}
-                  onBack={() => { setActiveContactId(null); setActiveContactSnapshot(null); activeContactRef.current = null; }}
-                  onSwitchTab={setActiveTab}
-                  isGeneratingSchedule={generatingSchedules[activeContactId]}
-                  onMessagesChange={setHiddenMessagesCount}
-                />
-              </div>
-              {activeDrawer === 'memo' && (
-                <MemoTable
-                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                  apiUrl={API_URL}
-                  onClose={() => setActiveDrawer(null)}
-                />
-              )}
-              {activeDrawer === 'diary' && (
-                <DiaryTable
-                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                  apiUrl={API_URL}
-                  onClose={() => setActiveDrawer(null)}
-                />
-              )}
-              {activeDrawer === 'settings' && (
-                <ChatSettingsDrawer
-                  contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                  apiUrl={API_URL}
-                  onClose={() => setActiveDrawer(null)}
-                  onClearHistory={() => {
-                    setActiveDrawer(null);
-                    fetchContacts(); // Re-pull character data so stats show as reset immediately
+                  contacts={contacts}
+                  onCharactersUpdate={(event) => {
+                    if (event?.type === 'deleted') {
+                      removeDeletedContact(event.id);
+                    }
+                    fetchContacts(); // Refetch after create/update/delete
                   }}
-                  isGeneratingSchedule={!!generatingSchedules[activeContactId]}
-                  messagesHideStateCount={hiddenMessagesCount}
+                  onProfileUpdate={setUserProfile}
+                  onBack={() => setActiveTab('chats')}
                 />
-              )}
-            </div>
-          ) : activeGroupId && activeTab === 'chats' ? (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'row', height: '100%', minWidth: 0 }}>
-              <GroupChatWindow
-                group={groups.find(g => g.id === activeGroupId)}
-                apiUrl={API_URL}
-                allContacts={contacts}
-                userProfile={effectiveUser}
-                incomingGroupMessageQueue={incomingGroupMessageQueue}
-                typingIndicators={groupTyping[activeGroupId] || []}
-                redpacketClaimEvent={redpacketClaimEvent}
-                onBack={() => setActiveGroupId(null)}
-                onGroupUpdated={(updatedGroup) => {
-                  setGroups(prev => prev.map(g => g.id === updatedGroup.id ? updatedGroup : g));
-                }}
-              />
-            </div>
-          ) : (
-            <div className="empty-chat-state">
-              <MessageSquare size={64} className="empty-icon" />
-              <p>ChatPulse</p>
-            </div>
-          )}
+              </div>
+            ) : activeTab === 'discover' ? (
+              <div style={{ flex: 1, height: '100%', overflowY: 'auto', minWidth: 0, minHeight: 0 }}>
+                <MomentsFeed apiUrl={API_URL} userProfile={effectiveUser} onBack={() => setActiveTab('chats')} />
+              </div>
+            ) : activeTab === 'memory_library' ? (
+              <MemoryLibraryPanel apiUrl={API_URL} contacts={contacts} />
+            ) : activeContactId && activeTab === 'chats' ? (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'row', height: '100%', minWidth: 0 }}>
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+                  <ChatWindow
+                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
+                    allContacts={contacts}
+                    userAvatar={effectiveUser?.avatar}
+                    apiUrl={API_URL}
+                    incomingMessageQueue={incomingMessageQueue}
+                    engineState={engineState}
+                    onToggleMemo={() => setActiveDrawer(activeDrawer === 'memo' ? null : 'memo')}
+                    onToggleDiary={() => setActiveDrawer(activeDrawer === 'diary' ? null : 'diary')}
+                    onToggleSettings={() => setActiveDrawer(activeDrawer === 'settings' ? null : 'settings')}
+                    onBack={() => { setActiveContactId(null); setActiveContactSnapshot(null); activeContactRef.current = null; }}
+                    onSwitchTab={setActiveTab}
+                    isGeneratingSchedule={generatingSchedules[activeContactId]}
+                    onMessagesChange={setHiddenMessagesCount}
+                  />
+                </div>
+                {activeDrawer === 'memo' && (
+                  <MemoTable
+                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
+                    apiUrl={API_URL}
+                    onClose={() => setActiveDrawer(null)}
+                  />
+                )}
+                {activeDrawer === 'diary' && (
+                  <DiaryTable
+                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
+                    apiUrl={API_URL}
+                    onClose={() => setActiveDrawer(null)}
+                  />
+                )}
+                {activeDrawer === 'settings' && (
+                  <ChatSettingsDrawer
+                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
+                    apiUrl={API_URL}
+                    onClose={() => setActiveDrawer(null)}
+                    onClearHistory={() => {
+                      setActiveDrawer(null);
+                      fetchContacts(); // Re-pull character data so stats show as reset immediately
+                    }}
+                    isGeneratingSchedule={!!generatingSchedules[activeContactId]}
+                    messagesHideStateCount={hiddenMessagesCount}
+                  />
+                )}
+              </div>
+            ) : activeGroupId && activeTab === 'chats' ? (
+              <div style={{ flex: 1, display: 'flex', flexDirection: 'row', height: '100%', minWidth: 0 }}>
+                <GroupChatWindow
+                  group={groups.find(g => g.id === activeGroupId)}
+                  apiUrl={API_URL}
+                  allContacts={contacts}
+                  userProfile={effectiveUser}
+                  incomingGroupMessageQueue={incomingGroupMessageQueue}
+                  typingIndicators={groupTyping[activeGroupId] || []}
+                  redpacketClaimEvent={redpacketClaimEvent}
+                  onBack={() => setActiveGroupId(null)}
+                  onGroupUpdated={(updatedGroup) => {
+                    setGroups(prev => prev.map(g => g.id === updatedGroup.id ? updatedGroup : g));
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="empty-chat-state">
+                <MessageSquare size={64} className="empty-icon" />
+                <p>ChatPulse</p>
+              </div>
+            )}
+          </Suspense>
         </div>
       )}
 

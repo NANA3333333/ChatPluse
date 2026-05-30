@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState, useMemo, useCallback } from 'react';
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 
 const SocialGraph = ({ userProfile, contacts, apiUrl, onClose }) => {
@@ -43,7 +43,7 @@ const SocialGraph = ({ userProfile, contacts, apiUrl, onClose }) => {
             });
 
             // 3. Fetch relationships for all contacts to build Links
-            const token = localStorage.getItem('token');
+            const token = localStorage.getItem('cp_token') || '';
             const linkSet = new Set(); // Prevent duplicates A->B and B->A
 
             for (const c of contacts) {

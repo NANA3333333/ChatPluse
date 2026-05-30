@@ -264,12 +264,6 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
             setContacts(parentContacts);
         }
     }, [parentContacts]);
-    const formatTime = (value) => {
-        const ts = Number(value || 0);
-        if (!ts) return lang === 'en' ? 'No record yet' : '暂无记录';
-        return new Date(ts).toLocaleString();
-    };
-
     const getMemoryBackendLabel = (backend) => {
         const labels = {
             'qdrant-primary-with-vectra-fallback': { en: 'Qdrant primary / vectra fallback', zh: 'Qdrant 主检索 / vectra 兜底' },
@@ -508,7 +502,14 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
         if (!endpoint || !key) { setError('请先填写 Endpoint 和 Key'); return; }
         setFetching(true); setError(''); setList([]);
         try {
-            const res = await fetch(`${apiUrl}/models?endpoint=${encodeURIComponent(endpoint)}&key=${encodeURIComponent(key)}`);
+            const res = await fetch(`${apiUrl}/models`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
+                },
+                body: JSON.stringify({ endpoint, key })
+            });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error);
             setList(data.models || []);
@@ -589,7 +590,7 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                     try {
                         const parsed = typeof data.theme_config === 'string' ? JSON.parse(data.theme_config) : data.theme_config;
                         setEditThemeConfig(parsed || {});
-                    } catch (e) {
+                    } catch {
                         setEditThemeConfig({});
                     }
                 }
@@ -709,7 +710,7 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
             let data = null;
             try {
                 data = raw ? JSON.parse(raw) : {};
-            } catch (parseErr) {
+            } catch {
                 const preview = raw.trim().slice(0, 120);
                 throw new Error(
                     lang === 'en'
@@ -755,6 +756,31 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
         }
     };
 
+    const handleDownloadThemeGuide = async () => {
+        try {
+            const res = await fetch(`${apiUrl}/theme-guide`, {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
+            });
+            if (!res.ok) {
+                const message = await res.text();
+                throw new Error(message || `Download failed with status ${res.status}`);
+            }
+
+            const blob = await res.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.href = objectUrl;
+            downloadAnchorNode.download = 'chatpulse-theme-prompt.txt';
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+            URL.revokeObjectURL(objectUrl);
+        } catch (e) {
+            console.error('Theme guide download error:', e);
+            alert(lang === 'en' ? `Theme guide download failed: ${e.message}` : `主题提示词下载失败：${e.message}`);
+        }
+    };
+
     const handleImportTheme = (event) => {
         const file = event.target.files[0];
         if (!file) return;
@@ -769,7 +795,7 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                     setEditThemeConfig(json);
                 }
                 alert(lang === 'en' ? 'Theme imported successfully! Please click "Save" to apply.' : '主题导入成功，请点击“保存”生效。');
-            } catch (err) {
+            } catch {
                 alert(lang === 'en' ? 'Invalid theme JSON file. Import failed.' : '无效的主题 JSON 文件，导入失败。');
             }
         };
@@ -926,17 +952,13 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
     const handleFileUpload = async (event, setAvatarCallback) => {
         const targetInput = event.target;
         const file = targetInput.files[0];
-        console.log("DEBUG: File selected:", file ? file.name : "null", "size:", file ? file.size : 0);
 
         if (!file) {
-            console.log("DEBUG: No file detected by input!");
             return;
         }
 
         const formData = new FormData();
         formData.append('image', file);
-
-        console.log("DEBUG: Sending POST to", `${apiUrl}/upload`);
 
         try {
             const res = await fetch(`${apiUrl}/upload`, {
@@ -944,10 +966,8 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                 headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` },
                 body: formData
             });
-            console.log("DEBUG: Fetch resolved with status", res.status);
 
             const data = await res.json();
-            console.log("DEBUG: Server JSON response:", data);
 
             if (data.success) {
                 setAvatarCallback(data.url);
@@ -956,11 +976,10 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                 alert(lang === 'en' ? 'Failed to save: ' + data.error : '保存失败: ' + data.error);
             }
         } catch (e) {
-            console.error('DEBUG Upload Error Exception:', e);
+            console.error('Upload failed:', e);
             alert('上传过程中发生错误 / Upload Exception: ' + e.message);
         } finally {
             if (targetInput) targetInput.value = null;
-            console.log("DEBUG: Upload process finished.");
         }
     };
 
@@ -993,6 +1012,34 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
             alert('Upload failed.');
         } finally {
             event.target.value = null;
+        }
+    };
+
+    const handleExportDatabase = async () => {
+        try {
+            const res = await fetch(`${apiUrl}/system/export`, {
+                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
+            });
+            if (!res.ok) {
+                const message = await res.text();
+                throw new Error(message || `Export failed with status ${res.status}`);
+            }
+
+            const disposition = res.headers.get('Content-Disposition') || '';
+            const filenameMatch = disposition.match(/filename="?([^"]+)"?/i);
+            const filename = filenameMatch ? filenameMatch[1] : 'chatpulse_backup.zip';
+            const blob = await res.blob();
+            const objectUrl = URL.createObjectURL(blob);
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.href = objectUrl;
+            downloadAnchorNode.download = filename;
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+            URL.revokeObjectURL(objectUrl);
+        } catch (e) {
+            console.error('Export Error:', e);
+            alert(lang === 'en' ? `Backup download failed: ${e.message}` : `备份下载失败：${e.message}`);
         }
     };
 
@@ -1157,7 +1204,9 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                             style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '4px', fontSize: '14px' }}
                         />
                         <div style={{ fontSize: '12px', color: '#999' }}>
-                            {lang === 'en' ? 'Minimum password length: 5. Default root password is 12345 on a fresh install.' : '密码最少 5 位。全新部署时默认 root 密码为 12345。'}
+                            {lang === 'en'
+                                ? 'Minimum password length: 5. On a fresh install, change the initial root password on the server before sharing accounts.'
+                                : '密码最少 5 位。全新部署后，请先在服务器环境中修改初始 root 密码，再分发账号。'}
                         </div>
                         {accountError ? <div style={{ color: '#d63031', fontSize: '13px' }}>{accountError}</div> : null}
                         {accountMessage ? <div style={{ color: '#2d8a34', fontSize: '13px' }}>{accountMessage}</div> : null}
@@ -1345,9 +1394,9 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
 
                     <div style={{ marginTop: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '10px' }}>
                         <div style={{ display: 'flex', gap: '10px' }}>
-                            <a href={`${apiUrl}/theme-guide`} download="chatpulse-theme-prompt.txt" style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '8px 12px', backgroundColor: '#f0f0f0', color: '#555', textDecoration: 'none', borderRadius: '6px', fontSize: '13px', fontWeight: '500' }}>
+                            <button type="button" onClick={handleDownloadThemeGuide} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '8px 12px', backgroundColor: '#f0f0f0', color: '#555', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}>
                                 <FileText size={16} /> {lang === 'en' ? 'AI Theme Prompt' : '下载 AI 主题生成提示词'}
-                            </a>
+                            </button>
                             <button onClick={handleExportTheme} style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '8px 12px', backgroundColor: '#f0f0f0', color: '#555', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}>
                                 <Download size={16} /> {lang === 'en' ? 'Export JSON' : '导出配置'}
                             </button>
@@ -1452,7 +1501,7 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                         </div>
                     </div>
 
-                    {/* Proactive Group Messaging 鈥?frequency slider */}
+                    {/* Proactive Group Messaging frequency slider */}
                     <div style={{ marginBottom: '18px' }}>
                         <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', marginBottom: '6px' }}>
                             <span>{lang === 'en' ? 'Proactive Messaging Frequency' : '群聊主动发消息频率'}</span>
@@ -1810,9 +1859,9 @@ function SettingsPanel({ apiUrl, contacts: parentContacts = [], onCharactersUpda
                         {lang === 'en' ? 'Download a full account backup as a ZIP package containing the latest database snapshot plus referenced uploaded assets, or restore from a previous ZIP/DB backup.' : '下载当前账号的完整 ZIP 备份，内含最新数据库快照和被引用的上传资源；也可以从之前的 ZIP / DB 备份恢复。'}
                     </p>
                     <div style={{ display: 'flex', gap: '15px', flexWrap: 'wrap', alignItems: 'center' }}>
-                        <a href={`${apiUrl}/system/export?token=${localStorage.getItem('cp_token') || ''}`} download="chatpulse_backup.zip" style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: 'var(--accent-color)', color: '#fff', textDecoration: 'none', borderRadius: '6px', fontSize: '14px', fontWeight: 'bold' }}>
+                        <button type="button" onClick={handleExportDatabase} style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: 'var(--accent-color)', color: '#fff', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
                             <Download size={18} /> {lang === 'en' ? 'Download Full Backup (.zip)' : '下载完整备份（.zip）'}
-                        </a>
+                        </button>
                         <label style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '10px 16px', backgroundColor: '#f0f0f0', color: '#333', border: '1px solid #ddd', borderRadius: '6px', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}>
                             <Upload size={18} /> {lang === 'en' ? 'Restore from Backup' : '上传并恢复存档'}
                             <input type="file" accept=".zip,.db,application/zip,application/x-sqlite3,application/octet-stream" style={{ display: 'none' }} onChange={handleImportDatabase} />

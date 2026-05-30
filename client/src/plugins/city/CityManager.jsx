@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useCallback } from 'react';
+﻿import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Plus, Trash2, ToggleLeft, ToggleRight, Save, DollarSign, Heart, Edit3, X, Power, Package, ShoppingBag, AlertTriangle } from 'lucide-react';
 import { defaultAvatarUrl, resolveAvatarUrl } from '../../utils/avatar';
 import { deriveEmotion, derivePhysicalState } from '../../utils/emotion';
@@ -26,18 +26,6 @@ const inputStyle = {
     fontSize: '13px', boxSizing: 'border-box'
 };
 const labelStyle = { fontSize: '12px', color: '#666', marginBottom: '4px', display: 'block', fontWeight: '500' };
-
-const stateColor = (value, inverted = false) => {
-    const normalized = Number(value ?? 0);
-    if (inverted) {
-        if (normalized <= 30) return '#2e7d32';
-        if (normalized <= 60) return '#ef6c00';
-        return '#c62828';
-    }
-    if (normalized >= 70) return '#2e7d32';
-    if (normalized >= 40) return '#ef6c00';
-    return '#c62828';
-};
 
 const CONFIG_LABELS = {
     dlc_enabled: 'DLC 总开关',
@@ -160,8 +148,8 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
     const [isSkippingTime, setIsSkippingTime] = useState(false);
     const refreshTimerRef = React.useRef(null);
     const actionNoticeTimerRef = React.useRef(null);
-    const token = localStorage.getItem('token');
-    const headers = { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' };
+    const token = localStorage.getItem('cp_token') || '';
+    const headers = useMemo(() => ({ 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }), [token]);
 
     const showActionNotice = useCallback((kind, message) => {
         setActionNotice({ kind, message });
@@ -209,7 +197,7 @@ export default function CityManager({ apiUrl, onRefreshLogs }) {
             if (qData.success) setQuests(qData.quests);
         } catch (e) { console.error('CityManager Error:', e); }
         finally { setLoading(false); }
-    }, [apiUrl, token]);
+    }, [apiUrl, headers, mayorPromptLocal]);
 
     useEffect(() => {
         fetchAll();

@@ -1,20 +1,42 @@
 module.exports = function initCityDb(db) {
+    function quoteSqlIdentifier(identifier) {
+        const value = String(identifier || '');
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(value)) {
+            throw new Error(`Invalid SQLite identifier: ${value}`);
+        }
+        return `"${value}"`;
+    }
+
+    function getTableColumnNames(tableName) {
+        const safeTableName = quoteSqlIdentifier(tableName);
+        return new Set(db.prepare(`PRAGMA table_info(${safeTableName})`).all().map((col) => col.name));
+    }
+
+    function addColumnIfMissing(tableName, columnName, definition) {
+        const columns = getTableColumnNames(tableName);
+        if (columns.has(columnName)) return false;
+        const safeTableName = quoteSqlIdentifier(tableName);
+        const safeColumnName = quoteSqlIdentifier(columnName);
+        db.prepare(`ALTER TABLE ${safeTableName} ADD COLUMN ${safeColumnName} ${definition}`).run();
+        return true;
+    }
+
     // Disable FK enforcement — city_logs uses 'system' as character_id for mayor/system actions
     try { db.pragma('foreign_keys = OFF'); } catch (e) { }
     // ═══════════════════════════════════════════════════════════════════════
     //  1. Extend characters table for survival mechanics
     // ═══════════════════════════════════════════════════════════════════════
-    try { db.exec("ALTER TABLE characters ADD COLUMN calories INTEGER DEFAULT 2000;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN city_status TEXT DEFAULT 'idle';"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN location TEXT DEFAULT 'home';"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN education TEXT DEFAULT 'none';"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN sys_survival INTEGER DEFAULT 1;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN sys_city_social INTEGER DEFAULT 1;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN is_scheduled INTEGER DEFAULT 1;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN city_action_frequency INTEGER DEFAULT 1;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN city_status_started_at INTEGER DEFAULT 0;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN city_status_until_at INTEGER DEFAULT 0;"); } catch (e) { }
-    try { db.exec("ALTER TABLE characters ADD COLUMN city_medical_last_recovery_at INTEGER DEFAULT 0;"); } catch (e) { }
+    addColumnIfMissing('characters', 'calories', 'INTEGER DEFAULT 2000');
+    addColumnIfMissing('characters', 'city_status', "TEXT DEFAULT 'idle'");
+    addColumnIfMissing('characters', 'location', "TEXT DEFAULT 'home'");
+    addColumnIfMissing('characters', 'education', "TEXT DEFAULT 'none'");
+    addColumnIfMissing('characters', 'sys_survival', 'INTEGER DEFAULT 1');
+    addColumnIfMissing('characters', 'sys_city_social', 'INTEGER DEFAULT 1');
+    addColumnIfMissing('characters', 'is_scheduled', 'INTEGER DEFAULT 1');
+    addColumnIfMissing('characters', 'city_action_frequency', 'INTEGER DEFAULT 1');
+    addColumnIfMissing('characters', 'city_status_started_at', 'INTEGER DEFAULT 0');
+    addColumnIfMissing('characters', 'city_status_until_at', 'INTEGER DEFAULT 0');
+    addColumnIfMissing('characters', 'city_medical_last_recovery_at', 'INTEGER DEFAULT 0');
 
     // ═══════════════════════════════════════════════════════════════════════
     //  2. City Action Logs
@@ -32,21 +54,9 @@ module.exports = function initCityDb(db) {
             is_summarized INTEGER DEFAULT 0
         );
     `);
-    try {
-        const cols = db.prepare("PRAGMA table_info(city_logs)").all();
-        const hasSummarized = cols.some(col => col.name === 'is_summarized');
-        if (!hasSummarized) {
-            db.exec("ALTER TABLE city_logs ADD COLUMN is_summarized INTEGER DEFAULT 0;");
-            db.prepare('UPDATE city_logs SET is_summarized = 1').run();
-        }
-    } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN target_district TEXT DEFAULT 'street';"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN source_announcement_id INTEGER DEFAULT 0;"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN quest_type TEXT DEFAULT 'errand';"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN completion_target INTEGER DEFAULT 2;"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN status TEXT DEFAULT 'open';"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN completed_by TEXT DEFAULT '';"); } catch (e) { }
-    try { db.exec("ALTER TABLE city_quests ADD COLUMN difficulty_reason TEXT DEFAULT '';"); } catch (e) { }
+    if (addColumnIfMissing('city_logs', 'is_summarized', 'INTEGER DEFAULT 0')) {
+        db.prepare('UPDATE city_logs SET is_summarized = 1').run();
+    }
     db.exec(`
         CREATE TABLE IF NOT EXISTS city_quest_claims (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -81,7 +91,7 @@ module.exports = function initCityDb(db) {
             UNIQUE(log_id)
         );
     `);
-    try { db.exec("ALTER TABLE city_logs ADD COLUMN location TEXT DEFAULT '';"); } catch (e) { }
+    addColumnIfMissing('city_logs', 'location', "TEXT DEFAULT ''");
 
     db.exec(`
         CREATE TABLE IF NOT EXISTS city_announcements (
@@ -242,6 +252,13 @@ module.exports = function initCityDb(db) {
             expires_at INTEGER NOT NULL
         );
     `);
+    addColumnIfMissing('city_quests', 'target_district', "TEXT DEFAULT 'street'");
+    addColumnIfMissing('city_quests', 'source_announcement_id', 'INTEGER DEFAULT 0');
+    addColumnIfMissing('city_quests', 'quest_type', "TEXT DEFAULT 'errand'");
+    addColumnIfMissing('city_quests', 'completion_target', 'INTEGER DEFAULT 2');
+    addColumnIfMissing('city_quests', 'status', "TEXT DEFAULT 'open'");
+    addColumnIfMissing('city_quests', 'completed_by', "TEXT DEFAULT ''");
+    addColumnIfMissing('city_quests', 'difficulty_reason', "TEXT DEFAULT ''");
 
     // ═══════════════════════════════════════════════════════════════════════
     //  SEED: Default Districts, Items, and Config
@@ -343,10 +360,10 @@ module.exports = function initCityDb(db) {
     }
 
     // Migration: add stock to city_items for existing users
-    try { db.prepare("ALTER TABLE city_items ADD COLUMN stock INTEGER DEFAULT -1").run(); } catch (e) { }
+    addColumnIfMissing('city_items', 'stock', 'INTEGER DEFAULT -1');
 
     // Migration: delete deprecated clock settings that pollute the UI
-    try { db.prepare("DELETE FROM city_config WHERE key IN ('tick_label', 'tick_interval_minutes')").run(); } catch (e) { }
+    db.prepare("DELETE FROM city_config WHERE key IN ('tick_label', 'tick_interval_minutes')").run();
 
     console.log('[City DB] 已添加并清理过时配置');
 
@@ -368,7 +385,7 @@ module.exports = function initCityDb(db) {
         console.log('[City DB] 已添加日记/记忆概率配置');
     }
 
-    try { db.prepare("DELETE FROM city_config WHERE key = 'city_memory_probability'").run(); } catch (e) { }
+    db.prepare("DELETE FROM city_config WHERE key = 'city_memory_probability'").run();
 
     // Migration: rename old English district names to Chinese
     const districtNameMap = {

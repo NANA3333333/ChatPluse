@@ -2,6 +2,12 @@
 import { Trash2, RefreshCw, Wand2, Download, Upload, X } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 
+function buildAuthHeaders() {
+    return {
+        'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
+    };
+}
+
 function MemoTable({ contact, apiUrl, onClose }) {
     const { t, lang } = useLanguage();
     const [memories, setMemories] = useState([]);
@@ -10,14 +16,11 @@ function MemoTable({ contact, apiUrl, onClose }) {
     const [isImporting, setIsImporting] = useState(false);
     const [isExporting, setIsExporting] = useState(false);
     const importFileInputRef = React.useRef(null);
-    const authOnlyHeaders = {
-        'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
-    };
 
     const fetchMemories = React.useCallback(() => {
         if (!contact) return;
         setLoading(true);
-        fetch(`${apiUrl}/memories/${contact.id}`)
+        fetch(`${apiUrl}/memories/${contact.id}`, { headers: buildAuthHeaders() })
             .then(res => res.json())
             .then(data => {
                 if (!Array.isArray(data)) {
@@ -38,7 +41,6 @@ function MemoTable({ contact, apiUrl, onClose }) {
 
         const handleMemoryUpdate = (event) => {
             if (contact && event.detail.characterId === contact.id) {
-                console.log(`[MemoTable] Real-time memory update for ${contact.name}`);
                 fetchMemories();
             }
         };
@@ -61,7 +63,7 @@ function MemoTable({ contact, apiUrl, onClose }) {
 
     const handleDelete = async (id) => {
         try {
-            const res = await fetch(`${apiUrl}/memories/${id}`, { method: 'DELETE' });
+            const res = await fetch(`${apiUrl}/memories/${id}`, { method: 'DELETE', headers: buildAuthHeaders() });
             const data = await res.json().catch(() => ({}));
             if (!res.ok || !data?.success) {
                 alert(lang === 'en' ? `Delete failed:\n${data?.error || 'Unknown error'}` : `删除失败:\n${data?.error || '未知错误'}`);
@@ -79,7 +81,7 @@ function MemoTable({ contact, apiUrl, onClose }) {
         if (!contact) return;
         setIsExtracting(true);
         try {
-            const res = await fetch(`${apiUrl}/memories/${contact.id}/extract`, { method: 'POST' });
+            const res = await fetch(`${apiUrl}/memories/${contact.id}/extract`, { method: 'POST', headers: buildAuthHeaders() });
             const data = await res.json();
 
             if (!res.ok) {
@@ -112,7 +114,7 @@ function MemoTable({ contact, apiUrl, onClose }) {
             formData.append('mode', 'replace');
             const res = await fetch(`${apiUrl}/data/${contact.id}/import?mode=replace`, {
                 method: 'POST',
-                headers: authOnlyHeaders,
+                headers: buildAuthHeaders(),
                 body: formData
             });
             const data = await res.json().catch(() => ({}));
@@ -145,7 +147,7 @@ function MemoTable({ contact, apiUrl, onClose }) {
         setIsExporting(true);
         try {
             const res = await fetch(`${apiUrl}/data/${contact.id}/export`, {
-                headers: authOnlyHeaders
+                headers: buildAuthHeaders()
             });
             if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
@@ -175,7 +177,6 @@ function MemoTable({ contact, apiUrl, onClose }) {
 
     if (!contact) return null;
 
-    console.log('MemoTable rendering:', { contact: contact?.name, memoriesLength: memories.length, loading });
     const isBusy = isExporting || isImporting || isExtracting;
 
     return (

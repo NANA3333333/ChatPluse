@@ -9,10 +9,14 @@ function RecommendModal({ apiUrl, currentContact, allContacts, onClose, onRecomm
     const [loading, setLoading] = useState(true);
     const [searchQuery, setSearchQuery] = useState('');
     const [selectedCharId, setSelectedCharId] = useState(null);
+    const authToken = localStorage.getItem('cp_token') || '';
+    const authOnlyHeaders = React.useMemo(() => ({
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
 
     useEffect(() => {
         if (!currentContact) return;
-        fetch(`${apiUrl}/characters/${currentContact.id}/friends`)
+        fetch(`${apiUrl}/characters/${currentContact.id}/friends`, { headers: authOnlyHeaders })
             .then(res => res.json())
             .then(data => {
                 setFriends(data.map(f => f.id));
@@ -22,7 +26,7 @@ function RecommendModal({ apiUrl, currentContact, allContacts, onClose, onRecomm
                 console.error('Failed to load friends:', err);
                 setLoading(false);
             });
-    }, [apiUrl, currentContact]);
+    }, [apiUrl, currentContact, authOnlyHeaders]);
 
     const handleConfirm = () => {
         if (selectedCharId) {

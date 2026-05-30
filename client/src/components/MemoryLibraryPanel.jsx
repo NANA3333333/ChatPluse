@@ -1046,7 +1046,7 @@ function MemoryLibraryPanel({ apiUrl, contacts = [] }) {
             console.warn('Failed to load active memory maintenance run:', e.message);
             return false;
         }
-    }, [adoptRunSnapshot, apiUrl, headers, selectedCharacterId]);
+    }, [adoptRunSnapshot, apiUrl, headers]);
 
     useEffect(() => {
         loadData();
@@ -1180,7 +1180,14 @@ function MemoryLibraryPanel({ apiUrl, contacts = [] }) {
         setModelError('');
         setModels([]);
         try {
-            const res = await fetch(`${apiUrl}/models?endpoint=${encodeURIComponent(settings.api_endpoint)}&key=${encodeURIComponent(settings.api_key)}`);
+            const res = await fetch(`${apiUrl}/models`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
+                },
+                body: JSON.stringify({ endpoint: settings.api_endpoint, key: settings.api_key })
+            });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
             const nextModels = data.models || [];

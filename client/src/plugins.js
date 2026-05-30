@@ -1,9 +1,11 @@
-import AdminDashboard from './components/AdminDashboard';
-import CityLog from './plugins/city/CityLog';
-import HousingSocialPanel from './plugins/socialHousing/HousingSocialPanel';
-import McpLabPanel from './plugins/mcpLab/McpLabPanel';
-import PixelWorldPanel from './plugins/pixelWorld/PixelWorldPanel';
+import { lazy } from 'react';
 import { Shield, Activity, Building2, FlaskConical, Map } from 'lucide-react';
+
+const AdminDashboard = lazy(() => import('./components/AdminDashboard'));
+const CityLog = lazy(() => import('./plugins/city/CityLog'));
+const HousingSocialPanel = lazy(() => import('./plugins/socialHousing/HousingSocialPanel'));
+const McpLabPanel = lazy(() => import('./plugins/mcpLab/McpLabPanel'));
+const PixelWorldPanel = lazy(() => import('./plugins/pixelWorld/PixelWorldPanel'));
 
 export const plugins = [
   {

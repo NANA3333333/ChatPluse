@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect } from 'react';
+﻿import React, { useMemo, useState, useEffect } from 'react';
 import { X, Trash2, Settings, RefreshCw, Download, Upload } from 'lucide-react';
 import { useLanguage } from '../LanguageContext';
 import { resolveAvatarUrl } from '../utils/avatar';
@@ -78,13 +78,14 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
     const [isExportingArchive, setIsExportingArchive] = useState(false);
     const [isImportingArchive, setIsImportingArchive] = useState(false);
     const archiveInputRef = React.useRef(null);
-    const authHeaders = {
+    const authToken = localStorage.getItem('cp_token') || '';
+    const authHeaders = useMemo(() => ({
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
-    };
-    const authOnlyHeaders = {
-        'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`
-    };
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
+    const authOnlyHeaders = useMemo(() => ({
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
     const currentEmotion = contact ? deriveEmotion(contact) : null;
     const currentPhysical = contact ? derivePhysicalState(contact) : null;
 
@@ -97,21 +98,21 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         setIsScheduled(contact.is_scheduled !== 0);
         setCityActionFreq(contact.city_action_frequency ?? 1);
 
-        fetch(`${apiUrl}/characters/${contact.id}/relationships`)
+        fetch(`${apiUrl}/characters/${contact.id}/relationships`, { headers: authOnlyHeaders })
             .then(r => r.json())
             .then(data => setRelationships(Array.isArray(data) ? data : []))
             .catch(() => { });
 
-        fetch(`${apiUrl}/city/schedules/${contact.id}`)
+        fetch(`${apiUrl}/city/schedules/${contact.id}`, { headers: authOnlyHeaders })
             .then(r => r.json())
             .then(data => { if (data.success) setTodaySchedule(data.schedule || []); })
             .catch(() => { });
-    }, [contact?.id, apiUrl]);
+    }, [contact, apiUrl, authOnlyHeaders]);
 
     useEffect(() => {
         if (!contact) return;
         const fetchStats = () => {
-            fetch(`${apiUrl}/characters/${contact.id}/context-stats`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } })
+            fetch(`${apiUrl}/characters/${contact.id}/context-stats`, { headers: authOnlyHeaders })
                 .then(r => r.json())
                 .then(data => { if (data.success) setContextStats(data.stats); })
                 .catch(() => { });
@@ -119,7 +120,7 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         fetchStats();
         const interval = setInterval(fetchStats, 15000);
         return () => clearInterval(interval);
-    }, [contact?.id, apiUrl, messagesHideStateCount]);
+    }, [contact, apiUrl, messagesHideStateCount, authOnlyHeaders]);
 
     useEffect(() => {
         if (!contact) return;
@@ -155,7 +156,7 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
             window.removeEventListener('refresh_contacts', handleRefresh);
             window.removeEventListener('city_update', handleRefresh);
         };
-    }, [contact?.id, apiUrl]);
+    }, [contact, apiUrl, authHeaders]);
 
     useEffect(() => {
         if (!contact) return;
@@ -195,20 +196,20 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
             window.removeEventListener('refresh_contacts', handleRefresh);
             window.removeEventListener('city_update', handleRefresh);
         };
-    }, [contact?.id, apiUrl]);
+    }, [contact, apiUrl, authHeaders]);
 
     useEffect(() => {
         if (!contact) return;
         if (!isGeneratingSchedule) {
-            fetch(`${apiUrl}/city/schedules/${contact.id}`)
+            fetch(`${apiUrl}/city/schedules/${contact.id}`, { headers: authOnlyHeaders })
                 .then(r => r.json())
                 .then(data => { if (data.success) setTodaySchedule(data.schedule || []); })
                 .catch(() => { });
         }
-    }, [isGeneratingSchedule, contact, apiUrl]);
+    }, [isGeneratingSchedule, contact, apiUrl, authOnlyHeaders]);
 
     const refreshStats = async () => {
-        const r = await fetch(`${apiUrl}/characters/${contact.id}/context-stats`, { headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` } });
+        const r = await fetch(`${apiUrl}/characters/${contact.id}/context-stats`, { headers: authOnlyHeaders });
         const data = await r.json();
         if (data.success) setContextStats(data.stats);
     };
@@ -283,7 +284,7 @@ function ChatSettingsDrawer({ contact, apiUrl, onClose, onClearHistory, isGenera
         setExpandedHistory(prev => ({ ...prev, [targetId]: true }));
         if (!impressionHistories[targetId]) {
             try {
-                const r = await fetch(`${apiUrl}/characters/${contact.id}/impressions/${targetId}?limit=10`);
+                const r = await fetch(`${apiUrl}/characters/${contact.id}/impressions/${targetId}?limit=10`, { headers: authOnlyHeaders });
                 const data = await r.json();
                 setImpressionHistories(prev => ({ ...prev, [targetId]: Array.isArray(data) ? data : [] }));
             } catch (e) {

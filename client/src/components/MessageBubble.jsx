@@ -113,7 +113,15 @@ function BlockedSystemMessage({ name }) {
     );
 }
 
-/* Interactive Transfer Card 鈥?handles both old and new formats */
+function buildAuthHeaders(extraHeaders = {}) {
+    const token = typeof window !== 'undefined' ? window.localStorage.getItem('cp_token') || '' : '';
+    return {
+        ...extraHeaders,
+        'Authorization': `Bearer ${token}`
+    };
+}
+
+/* Interactive Transfer Card; handles both old and new formats */
 function TransferCardInteractive({ content, isUser, apiUrl }) {
     const { lang } = useLanguage();
     const raw = content.replace('[TRANSFER]', '').trim();
@@ -137,11 +145,14 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
         if (!tid || !apiUrl) return;
         let cancelled = false;
         let pollCount = 0;
-        const fetchStatus = () => {
-            fetch(`${apiUrl}/transfers/${tid}`)
-                .then(r => r.ok ? r.json() : null)
-                .then(d => { if (d && !cancelled) setTransferInfo(d); })
-                .catch(() => { });
+        const fetchStatus = async () => {
+            try {
+                const response = await fetch(`${apiUrl}/transfers/${tid}`, { headers: buildAuthHeaders() });
+                const data = response.ok ? await response.json() : null;
+                if (data && !cancelled) setTransferInfo(data);
+            } catch {
+                // Keep the card usable while polling; explicit actions surface errors in console.
+            }
         };
         fetchStatus();
         // Poll every 5s up to 30 times (~2.5 min) to catch AI's claim/refund decision
@@ -154,7 +165,7 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
     }, [tid, apiUrl]);
 
     // Auto-update UI when status resolves
-    // DB returns: claimed (0/1), refunded (0/1) 鈥?NOT a 'status' string
+    // DB returns: claimed (0/1), refunded (0/1), not a status string.
     const isClaimed = !!(transferInfo?.claimed);
     const isRefunded = !!(transferInfo?.refunded);
     const isPending = transferInfo ? (!isClaimed && !isRefunded) : true;
@@ -166,9 +177,14 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
     const handleClaim = async () => {
         if (!tid) return;
         try {
-            await fetch(`${apiUrl}/transfers/${tid}/claim`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+            const response = await fetch(`${apiUrl}/transfers/${tid}/claim`, {
+                method: 'POST',
+                headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({})
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             setActionDone(true);
-            const r = await fetch(`${apiUrl}/transfers/${tid}`);
+            const r = await fetch(`${apiUrl}/transfers/${tid}`, { headers: buildAuthHeaders() });
             if (r.ok) setTransferInfo(await r.json());
         } catch (e) { console.error(e); }
     };
@@ -176,9 +192,14 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
     const handleRefund = async () => {
         if (!tid) return;
         try {
-            await fetch(`${apiUrl}/transfers/${tid}/refund`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+            const response = await fetch(`${apiUrl}/transfers/${tid}/refund`, {
+                method: 'POST',
+                headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+                body: JSON.stringify({})
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
             setActionDone(true);
-            const r = await fetch(`${apiUrl}/transfers/${tid}`);
+            const r = await fetch(`${apiUrl}/transfers/${tid}`, { headers: buildAuthHeaders() });
             if (r.ok) setTransferInfo(await r.json());
         } catch (e) { console.error(e); }
     };
@@ -192,7 +213,7 @@ function TransferCardInteractive({ content, isUser, apiUrl }) {
                     <div style={{ fontSize: '12px', color: '#999' }}>{note}</div>
                 </div>
             </div>
-            {/* Status badge 鈥?shown when claimed or refunded */}
+            {/* Status badge shown when claimed or refunded */}
             {(isClaimed || isRefunded) && (
                 <div style={{ fontSize: '12px', color: '#999', textAlign: 'center', padding: '4px 0' }}>
                     {isClaimed

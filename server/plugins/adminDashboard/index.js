@@ -134,13 +134,37 @@ module.exports = function initAdminDashboard(app, context) {
         if (!raw) return null;
         const marker = '/uploads/';
         const markerIdx = raw.indexOf(marker);
+        let rel = null;
         if (markerIdx >= 0) {
-            return raw.slice(markerIdx + 1).replaceAll('/', path.sep);
+            rel = raw.slice(markerIdx + 1);
+        } else if (/^uploads[\\/]/.test(raw)) {
+            rel = raw;
+        } else {
+            return null;
         }
-        if (raw.startsWith('uploads/')) {
-            return raw.replaceAll('/', path.sep);
+
+        rel = rel.split(/[?#]/, 1)[0].replace(/\\/g, '/');
+        if (!rel || rel.includes('\0') || rel.startsWith('/') || /^[a-zA-Z]:/.test(rel)) {
+            return null;
         }
-        return null;
+        const normalizedPath = path.posix.normalize(rel);
+        if (normalizedPath === '.' || normalizedPath === '..' || normalizedPath.startsWith('../')) {
+            return null;
+        }
+        if (!normalizedPath.startsWith('uploads/')) {
+            return null;
+        }
+        return normalizedPath.replaceAll('/', path.sep);
+    };
+
+    const resolveUploadReferencePath = (uploadsRoot, relPath) => {
+        if (!relPath) return null;
+        const uploadsDir = path.resolve(uploadsRoot, 'uploads');
+        const fullPath = path.resolve(uploadsRoot, relPath);
+        if (fullPath !== uploadsDir && !fullPath.startsWith(uploadsDir + path.sep)) {
+            return null;
+        }
+        return fullPath;
     };
 
     const collectUploadReferences = (userDb, sql, mapper = (row) => Object.values(row || {})) => {
@@ -201,9 +225,9 @@ module.exports = function initAdminDashboard(app, context) {
                 ...collectUploadReferences(userDb, 'SELECT image_url FROM moments'),
             ]);
             for (const relPath of uploadRefs) {
-                const fullPath = path.join(uploadsRoot, relPath);
+                const fullPath = resolveUploadReferencePath(uploadsRoot, relPath);
                 try {
-                    if (fs.existsSync(fullPath)) {
+                    if (fullPath && fs.existsSync(fullPath)) {
                         stats.upload_size_bytes += fs.statSync(fullPath).size;
                     }
                 } catch (e) { }
@@ -222,6 +246,20 @@ module.exports = function initAdminDashboard(app, context) {
             return res.status(403).json({ error: 'Forbidden. Admin level restricted.' });
         }
         next();
+    };
+
+    const getMutableAdminTarget = (req, res) => {
+        const targetId = req.params.id;
+        const targetUser = authDb.getUserById(targetId);
+        if (!targetUser) {
+            res.status(404).json({ error: 'User not found' });
+            return null;
+        }
+        if (targetUser.role === 'root') {
+            res.status(403).json({ error: 'Root account is protected' });
+            return null;
+        }
+        return targetUser;
     };
 
     const getQdrantMode = () => {
@@ -284,12 +322,12 @@ module.exports = function initAdminDashboard(app, context) {
         }
     });
 
-    app.get('/api/admin/invites', authMiddleware, adminMiddleware, (req, res) => {
+    app.post('/api/admin/invites', authMiddleware, adminMiddleware, (req, res) => {
         try {
             const code = authDb.generateInviteCode({
-                maxUses: req.query.maxUses,
-                expiresAt: req.query.expiresAt,
-                note: req.query.note,
+                maxUses: req.body?.maxUses,
+                expiresAt: req.body?.expiresAt,
+                note: req.body?.note,
                 createdBy: req.user.username
             });
             res.json({ success: true, code });
@@ -346,6 +384,7 @@ module.exports = function initAdminDashboard(app, context) {
         try {
             const targetId = req.params.id;
             if (targetId === req.user.id) return res.status(400).json({ error: "Cannot delete yourself" });
+            if (!getMutableAdminTarget(req, res)) return;
             markUserDbDeleting(targetId);
 
             // 1. Force disconnect websocket
@@ -375,6 +414,7 @@ module.exports = function initAdminDashboard(app, context) {
         try {
             const targetId = req.params.id;
             if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot ban yourself' });
+            if (!getMutableAdminTarget(req, res)) return;
             const banned = !!req.body?.banned;
             authDb.setUserStatus(targetId, banned ? 'banned' : 'active');
             authDb.bumpTokenVersion(targetId);
@@ -395,12 +435,7 @@ module.exports = function initAdminDashboard(app, context) {
             if (!['user', 'admin'].includes(nextRole)) {
                 return res.status(400).json({ error: 'Invalid role' });
             }
-            const allUsers = authDb.getAllUsers();
-            const targetUser = allUsers.find(u => String(u.id) === String(targetId));
-            if (!targetUser) return res.status(404).json({ error: 'User not found' });
-            if (targetUser.role === 'root') {
-                return res.status(400).json({ error: 'Cannot change root role' });
-            }
+            if (!getMutableAdminTarget(req, res)) return;
             authDb.setUserRole(targetId, nextRole);
             authDb.bumpTokenVersion(targetId);
             disconnectUserSessions(targetId);
@@ -413,6 +448,7 @@ module.exports = function initAdminDashboard(app, context) {
     app.post('/api/admin/users/:id/reset-password', authMiddleware, adminMiddleware, (req, res) => {
         try {
             const targetId = req.params.id;
+            if (!getMutableAdminTarget(req, res)) return;
             const newPassword = String(req.body?.password || '');
             if (newPassword.length < 6) {
                 return res.status(400).json({ error: 'Password must be at least 6 characters long' });
@@ -428,6 +464,7 @@ module.exports = function initAdminDashboard(app, context) {
     app.post('/api/admin/users/:id/force-logout', authMiddleware, adminMiddleware, (req, res) => {
         try {
             const targetId = req.params.id;
+            if (!getMutableAdminTarget(req, res)) return;
             authDb.bumpTokenVersion(targetId);
             disconnectUserSessions(targetId);
             res.json({ success: true });

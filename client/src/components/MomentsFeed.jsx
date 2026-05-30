@@ -8,6 +8,14 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
     const [moments, setMoments] = useState([]);
     const [characters, setCharacters] = useState({});
     const [loading, setLoading] = useState(true);
+    const authToken = localStorage.getItem('cp_token') || '';
+    const authOnlyHeaders = React.useMemo(() => ({
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
+    const authJsonHeaders = React.useMemo(() => ({
+        ...authOnlyHeaders,
+        'Content-Type': 'application/json'
+    }), [authOnlyHeaders]);
 
     // New Moment Post State
     const [newPostText, setNewPostText] = useState('');
@@ -20,13 +28,13 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
 
     const fetchMomentsData = React.useCallback(() => {
         // Fetch characters for mapping avatars/names
-        fetch(`${apiUrl}/characters`)
+        fetch(`${apiUrl}/characters`, { headers: authOnlyHeaders })
             .then(res => res.json())
             .then(data => {
                 const charMap = {};
                 data.forEach(c => charMap[c.id] = c);
                 setCharacters(charMap);
-                return fetch(`${apiUrl}/moments`);
+                return fetch(`${apiUrl}/moments`, { headers: authOnlyHeaders });
             })
             .then(res => res.json())
             .then(data => {
@@ -37,7 +45,7 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
                 console.error('Failed to load moments/characters:', err);
                 setLoading(false);
             });
-    }, [apiUrl]);
+    }, [apiUrl, authOnlyHeaders]);
 
     useEffect(() => {
         fetchMomentsData();
@@ -55,7 +63,7 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
         try {
             const res = await fetch(`${apiUrl}/moments`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders,
                 body: JSON.stringify({ content: newPostText })
             });
             if (res.ok) {
@@ -72,8 +80,8 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
         try {
             const res = await fetch(`${apiUrl}/moments/${id}/like`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ liker_id: 'user' })
+                headers: authJsonHeaders,
+                body: JSON.stringify({})
             });
             const data = await res.json();
             if (data.success) {
@@ -94,8 +102,8 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
         try {
             const res = await fetch(`${apiUrl}/moments/${momentId}/comment`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ author_id: 'user', content: text })
+                headers: authJsonHeaders,
+                body: JSON.stringify({ content: text })
             });
             const data = await res.json();
             if (data.success) {
@@ -113,7 +121,7 @@ function MomentsFeed({ apiUrl, userProfile, onBack }) {
         try {
             const res = await fetch(`${apiUrl}/moments/${momentId}`, {
                 method: 'DELETE',
-                headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}` }
+                headers: authOnlyHeaders
             });
             const data = await res.json();
             if (data.success) {

@@ -78,10 +78,10 @@ The JSON MUST have the EXACT following keys with valid 6-hex-digit HTML color co
                 temperature: 0.7
             });
 
-            console.log(`[Theme Generator Raw Output]`, generatedText);
+            console.log(`[Theme Generator] LLM returned ${String(generatedText || '').length} chars.`);
 
             // Aggressively strip markdown formatting
-            let cleanText = generatedText.replace(/```json/gi, '').replace(/```/g, '').trim();
+            let cleanText = String(generatedText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
 
             const startIdx = cleanText.indexOf('{');
             const endIdx = cleanText.lastIndexOf('}');
@@ -91,11 +91,11 @@ The JSON MUST have the EXACT following keys with valid 6-hex-digit HTML color co
                     const parsed = JSON.parse(jsonText);
                     return res.json({ success: true, theme_config: parsed });
                 } catch (err) {
-                    console.error('JSON.parse failed on this theme string:\n', jsonText);
+                    console.error(`[Theme Generator] JSON.parse failed. responseLength=${jsonText.length}`);
                     throw new Error('LLM JSON Syntax Error: ' + err.message);
                 }
             } else {
-                console.error('Failed to find JSON brackets in cleanText:', cleanText);
+                console.error(`[Theme Generator] Failed to find JSON brackets. responseLength=${cleanText.length}`);
                 throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
             }
         } catch (e) {

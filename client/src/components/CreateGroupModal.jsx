@@ -9,6 +9,11 @@ function CreateGroupModal({ apiUrl, contacts, onClose, onCreate }) {
     const [selectedIds, setSelectedIds] = useState([]);
     const [searchQuery, setSearchQuery] = useState('');
     const [creating, setCreating] = useState(false);
+    const authToken = localStorage.getItem('cp_token') || '';
+    const authJsonHeaders = React.useMemo(() => ({
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${authToken}`
+    }), [authToken]);
 
     const toggleSelect = (id) => {
         setSelectedIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
@@ -20,7 +25,7 @@ function CreateGroupModal({ apiUrl, contacts, onClose, onCreate }) {
         try {
             const res = await fetch(`${apiUrl}/groups`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: authJsonHeaders,
                 body: JSON.stringify({ name: groupName.trim(), member_ids: selectedIds })
             });
             const data = await res.json();

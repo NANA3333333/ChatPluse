@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Clock3, Database, ExternalLink, KeyRound, Play, RefreshCw, Save, Search, Trash2, Wifi } from 'lucide-react';
 
 const panel = {
@@ -136,7 +136,7 @@ function formatRawJson(value) {
   if (!value) return '';
   try {
     return JSON.stringify(value, null, 2);
-  } catch (e) {
+  } catch {
     return String(value);
   }
 }
@@ -305,7 +305,7 @@ export default function McpLabPanel({ apiUrl }) {
   const [searchResult, setSearchResult] = useState(null);
   const [tasks, setTasks] = useState([]);
   const [selectedTaskId, setSelectedTaskId] = useState('');
-  const [docs, setDocs] = useState([]);
+  const [, setDocs] = useState([]);
   const [noteTitle, setNoteTitle] = useState('');
   const [noteUrl, setNoteUrl] = useState('');
   const [noteContent, setNoteContent] = useState('');
@@ -313,7 +313,7 @@ export default function McpLabPanel({ apiUrl }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
-  async function load() {
+  const load = useCallback(async () => {
     setError('');
     try {
       const [statusData, taskData, characterData, docData] = await Promise.all([
@@ -327,7 +327,7 @@ export default function McpLabPanel({ apiUrl }) {
         const configData = await requestJson(endpoint(apiUrl, '/mcp-lab/web-config'), { headers });
         setWebConfig(configData);
         setSelectedProvider(configData.preferred_provider || 'auto');
-      } catch (configError) {
+      } catch {
         setWebConfig(null);
       }
       setTasks(taskData.tasks || []);
@@ -339,11 +339,11 @@ export default function McpLabPanel({ apiUrl }) {
     } catch (e) {
       setError(e.message);
     }
-  }
+  }, [apiUrl, headers]);
 
   useEffect(() => {
     load();
-  }, []);
+  }, [load]);
 
   async function runSearch() {
     if (!query.trim()) return;

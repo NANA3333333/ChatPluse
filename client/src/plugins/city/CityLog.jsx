@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
     Activity,
     AlertCircle,
@@ -205,7 +205,7 @@ function getAnnouncementMeta(item) {
 
 function cleanAnnouncementContent(item) {
     const raw = String(item?.content || '').trim();
-    const withoutPrefix = raw.replace(/^\s*[\[【].{1,12}?[\]】]\s*/, '').trim();
+    const withoutPrefix = raw.replace(/^\s*[[【].{1,12}?[\]】]\s*/, '').trim();
     return withoutPrefix || raw;
 }
 
@@ -248,7 +248,7 @@ function splitHackerIntelContent(value) {
     return { visible, hasIntel: true };
 }
 
-export default function CityLog({ apiUrl, userProfile }) {
+export default function CityLog({ apiUrl }) {
     const announcementActionTypes = new Set(['ANNOUNCE', 'MAYOR', 'EVENT']);
     const isAnnouncementLog = (log) => {
         const actionType = String(log.action_type || '').toUpperCase();
@@ -268,7 +268,7 @@ export default function CityLog({ apiUrl, userProfile }) {
     const [rerollingLogId, setRerollingLogId] = useState(null);
     const [isMobile, setIsMobile] = useState(() => window.innerWidth <= 768);
     const refreshTimerRef = React.useRef(null);
-    const token = localStorage.getItem('token');
+    const token = localStorage.getItem('cp_token') || '';
 
     useEffect(() => {
         const onResize = () => setIsMobile(window.innerWidth <= 768);
@@ -276,7 +276,7 @@ export default function CityLog({ apiUrl, userProfile }) {
         return () => window.removeEventListener('resize', onResize);
     }, []);
 
-    const fetchData = async () => {
+    const fetchData = useCallback(async () => {
         try {
             const headers = { Authorization: `Bearer ${token}` };
             const [logsRes, announcementsRes, eventsRes, charsRes] = await Promise.all([
@@ -298,7 +298,7 @@ export default function CityLog({ apiUrl, userProfile }) {
         } finally {
             setLoading(false);
         }
-    };
+    }, [apiUrl, token]);
 
     const retryQuestReview = async (logId) => {
         if (!logId || retryingQuestReviewId) return;
@@ -370,7 +370,7 @@ export default function CityLog({ apiUrl, userProfile }) {
                 refreshTimerRef.current = null;
             }
         };
-    }, [apiUrl, token]);
+    }, [fetchData]);
 
     const activityLogs = logs.filter((log) => !isAnnouncementLog(log));
 

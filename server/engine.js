@@ -3885,7 +3885,7 @@ ${dynamicPromptBase}`;
                     }
                 }
 
-                // Parse [JEALOUSY:N] tag 鈥?AI self-regulates jealousy cooldown
+                // Parse [JEALOUSY:N] tag; AI self-regulates jealousy cooldown.
                 if (charCheck.sys_jealousy !== 0) {
                     const jealousyRegex = /\[JEALOUSY:\s*(\d+)\s*\]/i;
                     const jealousyMatch = generatedText.match(jealousyRegex);
@@ -3945,7 +3945,7 @@ ${dynamicPromptBase}`;
                         const currentAffinity = existingRow?.affinity || 50;
                         const newAffinity = Math.max(0, Math.min(100, currentAffinity + delta));
                         db.updateCharRelationship(character.id, targetId, source, { affinity: newAffinity });
-                        console.log(`[Social] ${charCheck.name} 鈫?${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
+                        console.log(`[Social] ${charCheck.name} -> ${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
                     }
                 }
 
@@ -4037,7 +4037,7 @@ ${dynamicPromptBase}`;
                 }
 
                 if (generatedText.length > 0) {
-                    // 鈹€鈹€ Server-side deduplication: reject identical/near-identical messages 鈹€鈹€
+                    // Server-side deduplication: reject identical/near-identical messages.
                     const recentCharMsgs = db.getMessages(character.id, 15)
                         .filter(m => m.role === 'character')
                         .slice(-8)
@@ -4057,7 +4057,7 @@ ${dynamicPromptBase}`;
                         }
                         if ((matches / longer) > 0.5) return true;
 
-                        // Layer 3: Prefix pattern 鈥?if first 40% of message is same, it's a structural repeat
+                        // Layer 3: Prefix pattern; if first 40% of message is same, it's a structural repeat.
                         const prefixLen = Math.max(4, Math.floor(Math.min(prev.length, normalizedNew.length) * 0.4));
                         if (prev.substring(0, prefixLen) === normalizedNew.substring(0, prefixLen)) return true;
 
@@ -4295,7 +4295,7 @@ ${dynamicPromptBase}`;
             if (char.status !== 'active') continue;
 
             if (char.sys_proactive === 0) {
-                // Proactive messaging is OFF 鈥?don't trigger startup message, just keep timer silent
+                // Proactive messaging is OFF; don't trigger startup message, just keep timer silent.
                 console.log(`[Engine] ${char.name}: sys_proactive=OFF, skipping startup message.`);
                 continue;
             }
@@ -4385,7 +4385,7 @@ ${dynamicPromptBase}`;
             const resumeRagState = options?.useRetryResume ? getRagFailureState(characterId) : null;
             const resumedExtraSystemDirective = String(resumeRagState?.extraSystemDirective || '').trim() || null;
             // Trigger a reply. We leave pressure AND jealousy as-is for this reply so it generates the Return Reaction
-            // Jealousy is NOT zeroed out 鈥?the AI decides via [JEALOUSY:N] tag when to forgive
+            // Jealousy is NOT zeroed out; the AI decides via [JEALOUSY:N] tag when to forgive.
             triggerMessage(freshChar, wsClients, true, false, resumedExtraSystemDirective, { resumeRagState }).finally(() => {
                 // The model must explicitly relax via [PRESSURE]/[JEALOUSY] tags.
                 const cleanupPatch = {};
@@ -4443,7 +4443,7 @@ ${dynamicPromptBase}`;
                     // Accumulate jealousy_level (0-100)
                     const newLevel = Math.min(100, (char.jealousy_level || 0) + 20);
                     db.updateCharacter(char.id, { jealousy_level: newLevel, jealousy_target: activeCharacterId });
-                    console.log(`[Engine] Jealousy for ${char.name} 鈫?level ${newLevel} (rival: ${rivalName})`);
+                    console.log(`[Engine] Jealousy for ${char.name} -> level ${newLevel} (rival: ${rivalName})`);
 
                     stopTimer(char.id);
                     const delayMs = getRandomDelayMs(0.5, 2);
@@ -4470,7 +4470,7 @@ ${dynamicPromptBase}`;
     }
 
     /**
-     * Specialized message trigger for Jealousy 鈥?delegates to triggerMessage
+     * Specialized message trigger for Jealousy; delegates to triggerMessage.
      * since buildPrompt already injects jealousy context (level + rival name).
      * This ensures jealousy messages get the full chat window, memories, anti-repeat, etc.
      */
@@ -4504,7 +4504,7 @@ ${dynamicPromptBase}`;
         await triggerMessage(character, wsClients, false, false, sysDirective);
     }
 
-    // 鈹€鈹€鈹€ Group Proactive Messaging 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // Group Proactive Messaging
     const groupProactiveTimers = new Map(); // Store group proactive timers { groupId: handle }
     let groupChainCallback = null;
     let cityReplyStateSyncCallback = null;

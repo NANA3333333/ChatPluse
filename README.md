@@ -135,9 +135,8 @@ chmod +x install-and-start.sh
 首次登录：
 
 - 用户名：`Nana`
-- 默认密码：`12345`
 
-如果你在 `server/.env` 中设置了 `ADMIN_PASSWORD`，那么全新初始化时会使用你设置的密码。
+如果你在 `server/.env` 中设置了 `ADMIN_PASSWORD`，那么全新初始化时会使用你设置的密码；否则首次启动会在服务器控制台生成一次性随机 root 密码。
 
 ### 数据库、缓存与向量库初始化
 
@@ -447,9 +446,8 @@ URLs:
 First login:
 
 - Username: `Nana`
-- Default password: `12345`
 
-If you set `ADMIN_PASSWORD` in `server/.env`, that value will be used for first-run seeding on a brand-new auth database.
+If you set `ADMIN_PASSWORD` in `server/.env`, that value will be used for first-run seeding on a brand-new auth database; otherwise the first startup prints a one-time random root password in the server console.
 
 ### Databases, Cache, and Vector Initialization
 

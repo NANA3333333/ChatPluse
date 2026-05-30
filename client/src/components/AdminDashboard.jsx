@@ -174,7 +174,10 @@ export default function AdminDashboard({ apiUrl }) {
     const handleGenerateInvite = async () => {
         setLoading(true);
         try {
-            const res = await fetch(`${cleanApiUrl}/api/admin/invites`, { headers: authHeaders });
+            const res = await fetch(`${cleanApiUrl}/api/admin/invites`, {
+                method: 'POST',
+                headers: authHeaders,
+            });
             const data = await res.json();
             if (!data.success) throw new Error(data.error || '生成邀请码失败');
             await fetchInvites();

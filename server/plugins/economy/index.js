@@ -4,6 +4,19 @@
  */
 module.exports = function initEconomy(app, context) {
     const { authMiddleware, getUserDb, getEngine, getMemory, getWsClients, callLLM } = context;
+    const MAX_RED_PACKET_COUNT = 100;
+
+    function normalizePositiveMoney(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount <= 0) return null;
+        return +amount.toFixed(2);
+    }
+
+    function normalizePacketCount(value) {
+        const parsed = Number.parseInt(value, 10);
+        if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_RED_PACKET_COUNT) return null;
+        return parsed;
+    }
 
     // ─── Private Transfer APIs ────────────────────────────────────────────────
 
@@ -23,7 +36,7 @@ module.exports = function initEconomy(app, context) {
         const engine = getEngine(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            const { claimer_id = 'user' } = req.body;
+            const claimer_id = 'user';
             const result = db.claimTransfer(parseInt(req.params.tid), claimer_id);
             if (result.success) {
                 engine.broadcastWalletSync(wsClients, req.params.tid ? db.getTransfer(parseInt(req.params.tid))?.char_id : null);
@@ -67,7 +80,7 @@ ${userProfile?.name || 'User'} 给你转账了 ¥${result.amount.toFixed(2)}，�
         const engine = getEngine(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            const { refunder_id = 'user' } = req.body;
+            const refunder_id = 'user';
             const tid = parseInt(req.params.tid);
             const t = db.getTransfer(tid);
             if (!t) return res.status(404).json({ error: 'Transfer not found' });
@@ -277,31 +290,38 @@ ${char.is_blocked ? `【注意：你当前处于拉黑对方的状态！对方�
         }
     });
 
-    // Create a red packet (sent by user or char)
+    // Create a red packet from the authenticated user. Character-sent packets use direct DB calls.
     app.post('/api/groups/:id/redpackets', authMiddleware, (req, res) => {
         const db = getUserDb(req.user.id);
         const engine = getEngine(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            const { sender_id = 'user', type, count, per_amount, total_amount, note } = req.body;
-            if (!type || !count || (!per_amount && !total_amount)) {
-                return res.status(400).json({ error: 'Missing required fields' });
+            const { type, count, per_amount, total_amount, note } = req.body;
+            const sender_id = 'user';
+            const packetType = String(type || '').trim().toLowerCase();
+            const packetCount = normalizePacketCount(count);
+            if (!['fixed', 'lucky'].includes(packetType) || !packetCount) {
+                return res.status(400).json({ error: 'Invalid red packet type or count' });
             }
             const groupId = req.params.id;
             const group = db.getGroup(groupId);
             if (!group) return res.status(404).json({ error: 'Group not found' });
 
-            const total = type === 'fixed'
-                ? +(parseFloat(per_amount) * parseInt(count)).toFixed(2)
-                : +parseFloat(total_amount).toFixed(2);
+            const perAmount = packetType === 'fixed' ? normalizePositiveMoney(per_amount) : null;
+            const total = packetType === 'fixed'
+                ? (perAmount ? +(perAmount * packetCount).toFixed(2) : null)
+                : normalizePositiveMoney(total_amount);
+            if (!total || total <= 0) {
+                return res.status(400).json({ error: 'Invalid red packet amount' });
+            }
 
             const packetId = db.createRedPacket({
                 groupId,
                 senderId: sender_id,
-                type,
+                type: packetType,
                 totalAmount: total,
-                perAmount: type === 'fixed' ? +parseFloat(per_amount).toFixed(2) : null,
-                count: parseInt(count),
+                perAmount,
+                count: packetCount,
                 note: note || ''
             });
 
@@ -360,7 +380,7 @@ ${char.is_blocked ? `【注意：你当前处于拉黑对方的状态！对方�
         const db = getUserDb(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            const { claimer_id = 'user' } = req.body;
+            const claimer_id = 'user';
             const result = db.claimRedPacket(parseInt(req.params.pid), claimer_id);
             if (result.success) {
                 // Broadcast real-time claim event via WebSocket

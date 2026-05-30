@@ -44,7 +44,7 @@ function Login({ apiUrl }) {
             } else {
                 setError(data.error || 'Authentication failed');
             }
-        } catch (err) {
+        } catch {
             setError('Network error. Please check if the server is running.');
         } finally {
             setLoading(false);
@@ -67,7 +67,7 @@ function Login({ apiUrl }) {
                 <form className="login-form" onSubmit={handleSubmit}>
                     {!isRegistering && (
                         <div style={{ marginBottom: '12px', color: 'rgba(255,255,255,0.72)', fontSize: '13px', lineHeight: 1.4, textAlign: 'center' }}>
-                            首次部署默认账号 Nana，默认密码 12345
+                            请使用管理员提供的账号登录。首次部署请先在服务器环境中设置管理员密码。
                         </div>
                     )}
                     <div className="input-group">
