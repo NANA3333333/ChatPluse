@@ -1,3 +1,19 @@
+const {
+    normalizeCityCatalogItemPayload,
+    normalizeCityConfigValue,
+    normalizeCityDistrictPayload,
+    normalizeCityEventPayload,
+    normalizeCityQuestCaloriesReward,
+    normalizeCityQuestCompletionTarget,
+    normalizeCityQuestGoldReward,
+    normalizeCityQuestPayload,
+    normalizeCityRowId,
+    normalizeCityListLimit,
+    MAX_CITY_QUEST_COMPLETION_TARGET,
+    MAX_CITY_LOG_QUERY_LIMIT,
+    MAX_CITY_ANNOUNCEMENT_QUERY_LIMIT
+} = require('./utils/inputGuards');
+
 module.exports = function initCityDb(db) {
     function quoteSqlIdentifier(identifier) {
         const value = String(identifier || '');
@@ -19,6 +35,20 @@ module.exports = function initCityDb(db) {
         const safeColumnName = quoteSqlIdentifier(columnName);
         db.prepare(`ALTER TABLE ${safeTableName} ADD COLUMN ${safeColumnName} ${definition}`).run();
         return true;
+    }
+
+    function normalizeQuestProgressInteger(value, fallback = 0) {
+        const hasValue = value !== undefined && value !== null && String(value).trim() !== '';
+        const parsed = Number(hasValue ? value : fallback);
+        if (!Number.isFinite(parsed) || !Number.isInteger(parsed)) return null;
+        if (parsed < 0 || parsed > MAX_CITY_QUEST_COMPLETION_TARGET) return null;
+        return parsed;
+    }
+
+    function requireQuestProgressInteger(value, fallback = 0) {
+        const parsed = normalizeQuestProgressInteger(value, fallback);
+        if (parsed == null) throw new Error('任务进度数值无效');
+        return parsed;
     }
 
     // Disable FK enforcement — city_logs uses 'system' as character_id for mayor/system actions
@@ -581,18 +611,24 @@ module.exports = function initCityDb(db) {
 
     function upsertQuestProgressReview(data = {}) {
         const now = Date.now();
-        const logId = Number(data.log_id || 0);
+        const logId = normalizeCityRowId(data.log_id || 0);
         if (!logId) return null;
         const existing = getQuestProgressReviewByLogId(logId);
+        const targetScore = normalizeCityQuestCompletionTarget(data.target_score ?? existing?.target_score, 1);
+        if (targetScore == null) throw new Error('任务评分目标数值无效');
+        const questId = normalizeCityRowId(data.quest_id ?? existing?.quest_id ?? 0);
+        const claimId = normalizeCityRowId(data.claim_id ?? existing?.claim_id ?? 0);
+        const characterId = String(data.character_id || existing?.character_id || '').trim();
+        if (!questId || !claimId || !characterId) throw new Error('任务评分记录关联无效');
         const payload = {
-            quest_id: Number(data.quest_id || existing?.quest_id || 0),
-            claim_id: Number(data.claim_id || existing?.claim_id || 0),
+            quest_id: questId,
+            claim_id: claimId,
             log_id: logId,
-            character_id: String(data.character_id || existing?.character_id || '').trim(),
+            character_id: characterId,
             status: String(data.status || existing?.status || 'pending').trim() || 'pending',
-            progress_delta: Number(data.progress_delta ?? existing?.progress_delta ?? 0),
-            progress_after: Number(data.progress_after ?? existing?.progress_after ?? 0),
-            target_score: Number(data.target_score ?? existing?.target_score ?? 0),
+            progress_delta: requireQuestProgressInteger(data.progress_delta ?? existing?.progress_delta ?? 0, 0),
+            progress_after: requireQuestProgressInteger(data.progress_after ?? existing?.progress_after ?? 0, 0),
+            target_score: targetScore,
             is_completed: Number(data.is_completed ?? existing?.is_completed ?? 0) ? 1 : 0,
             comment: String(data.comment ?? existing?.comment ?? '').trim(),
             short_label: String(data.short_label ?? existing?.short_label ?? '').trim(),
@@ -652,8 +688,13 @@ module.exports = function initCityDb(db) {
         const hasCharacterFilter = typeof arg1 === 'string' && firstArgText !== 'all';
         const characterId = hasCharacterFilter ? arg1 : null;
         const limitInput = hasCharacterFilter ? arg2 : arg1;
-        const allLogs = String(limitInput || '').trim().toLowerCase() === 'all' || Number(limitInput) <= 0;
-        const limit = allLogs ? 0 : (Number.isFinite(Number(limitInput)) ? Math.max(1, Number(limitInput)) : 100);
+        const normalizedLimit = normalizeCityListLimit(limitInput, {
+            fallback: 100,
+            max: MAX_CITY_LOG_QUERY_LIMIT,
+            allowAll: true
+        });
+        const allLogs = normalizedLimit === 'all';
+        const limit = allLogs ? 0 : (normalizedLimit || 100);
         const rows = hasCharacterFilter
             ? (allLogs ? db.prepare(`
                 SELECT c.name as char_name, c.avatar as char_avatar, l.* 
@@ -784,7 +825,10 @@ module.exports = function initCityDb(db) {
     }
 
     function getCityAnnouncements(limit = 20) {
-        const safeLimit = Number.isFinite(Number(limit)) ? Math.max(1, Number(limit)) : 20;
+        const safeLimit = normalizeCityListLimit(limit, {
+            fallback: 20,
+            max: MAX_CITY_ANNOUNCEMENT_QUERY_LIMIT
+        }) || 20;
         const normalizeAnnouncementText = (value = '') => String(value || '')
             .replace(/^\s*\[(?:中介所广告|市长广播)\]\s*/u, '')
             .replace(/\s+/g, ' ')
@@ -993,30 +1037,33 @@ module.exports = function initCityDb(db) {
         return db.prepare('SELECT * FROM city_districts WHERE is_enabled = 1 ORDER BY sort_order ASC').all();
     }
     function upsertDistrict(data) {
-        const existing = getDistrict(data.id);
+        const payload = normalizeCityDistrictPayload(data);
+        if (!payload) throw new Error('分区数值无效');
+        const existing = getDistrict(payload.id);
         if (existing) {
             db.prepare(`UPDATE city_districts SET 
                 name=?, emoji=?, type=?, description=?, action_label=?,
                 cal_cost=?, cal_reward=?, money_cost=?, money_reward=?,
                 duration_ticks=?, capacity=?, is_enabled=?, sort_order=?
                 WHERE id=?`).run(
-                data.name, data.emoji, data.type, data.description, data.action_label,
-                data.cal_cost, data.cal_reward, data.money_cost, data.money_reward,
-                data.duration_ticks, data.capacity ?? 0, data.is_enabled ?? 1, data.sort_order ?? 0,
-                data.id
+                payload.name, payload.emoji, payload.type, payload.description, payload.action_label,
+                payload.cal_cost, payload.cal_reward, payload.money_cost, payload.money_reward,
+                payload.duration_ticks, payload.capacity, payload.is_enabled, payload.sort_order,
+                payload.id
             );
         } else {
             db.prepare(`INSERT INTO city_districts 
                 (id, name, emoji, type, description, action_label, cal_cost, cal_reward, money_cost, money_reward, duration_ticks, capacity, is_enabled, sort_order)
                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-                data.id, data.name, data.emoji, data.type, data.description, data.action_label,
-                data.cal_cost, data.cal_reward, data.money_cost, data.money_reward,
-                data.duration_ticks, data.capacity ?? 0, data.is_enabled ?? 1, data.sort_order ?? 0
+                payload.id, payload.name, payload.emoji, payload.type, payload.description, payload.action_label,
+                payload.cal_cost, payload.cal_reward, payload.money_cost, payload.money_reward,
+                payload.duration_ticks, payload.capacity, payload.is_enabled, payload.sort_order
             );
         }
     }
     function deleteDistrict(id) {
-        db.prepare('DELETE FROM city_districts WHERE id = ?').run(id);
+        const info = db.prepare('DELETE FROM city_districts WHERE id = ?').run(String(id || '').trim());
+        return info.changes || 0;
     }
 
     // --- Config ---
@@ -1027,7 +1074,10 @@ module.exports = function initCityDb(db) {
         return cfg;
     }
     function setConfig(key, value) {
-        db.prepare('INSERT OR REPLACE INTO city_config (key, value) VALUES (?, ?)').run(key, String(value));
+        const cleanKey = String(key || '').trim();
+        const normalizedValue = normalizeCityConfigValue(cleanKey, value);
+        if (!cleanKey || normalizedValue === null) throw new Error('城市配置值无效');
+        db.prepare('INSERT OR REPLACE INTO city_config (key, value) VALUES (?, ?)').run(cleanKey, normalizedValue);
     }
 
     // --- Economy Stats ---
@@ -1057,17 +1107,23 @@ module.exports = function initCityDb(db) {
         return db.prepare("SELECT * FROM city_items WHERE sold_at = ? AND is_available = 1 ORDER BY sort_order").all(districtId);
     }
     function upsertItem(data) {
+        const payload = normalizeCityCatalogItemPayload(data);
+        if (!payload) throw new Error('物品数值无效');
         db.prepare(`INSERT OR REPLACE INTO city_items 
             (id, name, emoji, category, description, buy_price, sell_price, cal_restore, effect, sold_at, is_available, sort_order, stock)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-            data.id, data.name, data.emoji || '📦', data.category || 'food', data.description || '',
-            data.buy_price ?? 10, data.sell_price ?? 0, data.cal_restore ?? 0,
-            data.effect || '', data.sold_at || '', data.is_available ?? 1, data.sort_order ?? 0, data.stock ?? -1
+            payload.id, payload.name, payload.emoji || '📦', payload.category || 'food', payload.description || '',
+            payload.buy_price, payload.sell_price, payload.cal_restore,
+            payload.effect || '', payload.sold_at || '', payload.is_available, payload.sort_order, payload.stock
         );
     }
     function deleteItem(id) {
-        db.prepare('DELETE FROM city_items WHERE id = ?').run(id);
-        db.prepare('DELETE FROM city_inventory WHERE item_id = ?').run(id);
+        const cleanId = String(id || '').trim();
+        const info = db.prepare('DELETE FROM city_items WHERE id = ?').run(cleanId);
+        if ((info.changes || 0) > 0) {
+            db.prepare('DELETE FROM city_inventory WHERE item_id = ?').run(cleanId);
+        }
+        return info.changes || 0;
     }
     function decreaseItemStock(id, amount = 1) {
         db.prepare('UPDATE city_items SET stock = stock - ? WHERE id = ? AND stock > 0').run(amount, id);
@@ -1084,12 +1140,13 @@ module.exports = function initCityDb(db) {
         `).all(charId);
     }
     function addToInventory(charId, itemId, qty = 1) {
+        const safeQty = Number(qty);
+        if (!Number.isSafeInteger(safeQty) || safeQty < 1) throw new Error('物品数量无效');
         const existing = db.prepare('SELECT * FROM city_inventory WHERE character_id = ? AND item_id = ?').get(charId, itemId);
         if (existing) {
-            db.prepare('UPDATE city_inventory SET quantity = quantity + ? WHERE id = ?').run(qty, existing.id);
-        } else {
-            db.prepare('INSERT INTO city_inventory (character_id, item_id, quantity, acquired_at) VALUES (?, ?, ?, ?)').run(charId, itemId, qty, Date.now());
+            return db.prepare('UPDATE city_inventory SET quantity = quantity + ? WHERE id = ?').run(safeQty, existing.id).changes || 0;
         }
+        return db.prepare('INSERT INTO city_inventory (character_id, item_id, quantity, acquired_at) VALUES (?, ?, ?, ?)').run(charId, itemId, safeQty, Date.now()).changes || 0;
     }
     function removeFromInventory(charId, itemId, qty = 1) {
         const existing = db.prepare('SELECT * FROM city_inventory WHERE character_id = ? AND item_id = ?').get(charId, itemId);
@@ -1146,50 +1203,27 @@ module.exports = function initCityDb(db) {
         return db.prepare('SELECT * FROM city_events ORDER BY created_at DESC LIMIT ?').all(limit);
     }
     function createEvent(data) {
+        const payload = normalizeCityEventPayload(data);
+        if (!payload) throw new Error('城市事件数值无效');
         const now = Date.now();
-        const expires = now + (data.duration_hours || 24) * 3600000;
-        if ((data.type || 'random') === 'weather') {
+        const expires = now + payload.duration_hours * 3600000;
+        if ((payload.type || 'random') === 'weather') {
             db.prepare('UPDATE city_events SET is_active = 0 WHERE is_active = 1 AND event_type = ?').run('weather');
         }
         db.prepare(`INSERT INTO city_events (event_type, title, emoji, description, effect_json, target_district, duration_hours, is_active, created_at, expires_at)
             VALUES (?,?,?,?,?,?,?,1,?,?)`).run(
-            data.type || 'random', data.title, data.emoji || '📢', data.description || '',
-            JSON.stringify(data.effect || {}), data.target_district || '', data.duration_hours || 24, now, expires
+            payload.type || 'random', payload.title, payload.emoji || '📢', payload.description || '',
+            JSON.stringify(payload.effect || {}), payload.target_district || '', payload.duration_hours, now, expires
         );
     }
     function expireEvents() {
         db.prepare('UPDATE city_events SET is_active = 0 WHERE expires_at <= ? AND is_active = 1').run(Date.now());
     }
     function deleteEvent(id) {
-        db.prepare('DELETE FROM city_events WHERE id = ?').run(id);
-    }
-
-    function getActiveQuests() {
-        return db.prepare('SELECT * FROM city_quests WHERE is_completed = 0 AND expires_at > ? ORDER BY created_at DESC').all(Date.now());
-    }
-    function getAllQuests(limit = 50) {
-        return db.prepare('SELECT * FROM city_quests ORDER BY created_at DESC LIMIT ?').all(limit);
-    }
-    function createQuest(data) {
-        const now = Date.now();
-        const expires = now + 24 * 3600000;
-        db.prepare(`INSERT INTO city_quests (title, emoji, description, reward_gold, reward_cal, reward_item_id, difficulty, created_at, expires_at)
-            VALUES (?,?,?,?,?,?,?,?,?)`).run(
-            data.title, data.emoji || '📜', data.description || '',
-            data.reward_gold ?? 50, data.reward_cal ?? 0, data.reward_item_id || '',
-            data.difficulty || 'normal', now, expires
-        );
-    }
-    function claimQuest(questId, charId) {
-        const info = db.prepare("UPDATE city_quests SET claimed_by = ? WHERE id = ? AND claimed_by = ''").run(charId, questId);
-        return info.changes > 0;
-    }
-    function completeQuest(questId) {
-        const info = db.prepare('UPDATE city_quests SET is_completed = 1 WHERE id = ?').run(questId);
-        return info.changes > 0;
-    }
-    function deleteQuest(id) {
-        db.prepare('DELETE FROM city_quests WHERE id = ?').run(id);
+        const eventId = normalizeCityRowId(id);
+        if (!eventId) return 0;
+        const info = db.prepare('DELETE FROM city_events WHERE id = ?').run(eventId);
+        return info.changes || 0;
     }
 
     function inferQuestTargetDistrict(data = {}) {
@@ -1231,16 +1265,20 @@ module.exports = function initCityDb(db) {
         }
     }
     function getQuestById(id) {
-        return db.prepare('SELECT * FROM city_quests WHERE id = ?').get(id);
+        const questId = normalizeCityRowId(id);
+        if (!questId) return null;
+        return db.prepare('SELECT * FROM city_quests WHERE id = ?').get(questId) || null;
     }
     function getQuestClaims(questId) {
+        const cleanQuestId = normalizeCityRowId(questId);
+        if (!cleanQuestId) return [];
         return db.prepare(`
             SELECT qc.*, c.name AS char_name
             FROM city_quest_claims qc
             LEFT JOIN characters c ON c.id = qc.character_id
             WHERE qc.quest_id = ?
             ORDER BY qc.created_at ASC
-        `).all(questId);
+        `).all(cleanQuestId);
     }
     function hydrateQuestRows(rows = []) {
         return rows.map((quest) => {
@@ -1271,16 +1309,18 @@ module.exports = function initCityDb(db) {
         return hydrateQuestRows(rows);
     }
     function createQuest(data) {
+        const payload = normalizeCityQuestPayload(data);
+        if (!payload) throw new Error('任务奖励或目标数值无效');
         const now = Date.now();
-        const expires = data.expires_at ? Number(data.expires_at) : now + 24 * 3600000;
-        const targetDistrict = inferQuestTargetDistrict(data);
-        const questType = inferQuestType(data);
-        const completionTarget = inferQuestCompletionTarget(questType, data);
+        const expires = payload.expires_at ? Number(payload.expires_at) : now + 24 * 3600000;
+        const targetDistrict = inferQuestTargetDistrict(payload);
+        const questType = inferQuestType(payload);
+        const completionTarget = inferQuestCompletionTarget(questType, payload);
         const info = db.prepare(`INSERT INTO city_quests (title, emoji, description, reward_gold, reward_cal, reward_item_id, difficulty, claimed_by, target_district, source_announcement_id, quest_type, completion_target, status, completed_by, difficulty_reason, created_at, expires_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
-            data.title, data.emoji || '馃摐', data.description || '',
-            data.reward_gold ?? 50, data.reward_cal ?? 0, data.reward_item_id || '',
-            data.difficulty || 'normal', '', targetDistrict, Number(data.source_announcement_id || 0), questType, completionTarget, data.status || 'open', '', String(data.difficulty_reason || '').trim(),
+            payload.title, payload.emoji || '📜', payload.description || '',
+            payload.reward_gold, payload.reward_cal, payload.reward_item_id || '',
+            payload.difficulty || 'normal', '', targetDistrict, Number(payload.source_announcement_id || 0), questType, completionTarget, payload.status || 'open', '', String(payload.difficulty_reason || '').trim(),
             now, expires
         );
         return Number(info.lastInsertRowid || 0);
@@ -1301,11 +1341,13 @@ module.exports = function initCityDb(db) {
         `).get(charId, Date.now()) || null;
     }
     function claimQuest(questId, charId) {
-        const quest = getQuestById(questId);
+        const cleanQuestId = normalizeCityRowId(questId);
+        if (!cleanQuestId) return { success: false, reason: 'invalid_quest_id' };
+        const quest = getQuestById(cleanQuestId);
         if (!quest || quest.is_completed || String(quest.status || '') === 'completed' || Number(quest.expires_at || 0) <= Date.now()) {
             return { success: false, reason: 'quest_unavailable' };
         }
-        const existing = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(questId, charId);
+        const existing = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(cleanQuestId, charId);
         if (existing) {
             if (['accepted', 'in_progress', 'ready_to_report', 'reporting', 'completed'].includes(String(existing.status || ''))) {
                 return { success: true, alreadyClaimed: true, claim: existing };
@@ -1314,83 +1356,106 @@ module.exports = function initCityDb(db) {
                 UPDATE city_quest_claims
                 SET status = 'accepted', progress_count = 0, resolution_note = '', updated_at = ?
                 WHERE quest_id = ? AND character_id = ?
-            `).run(Date.now(), questId, charId);
+            `).run(Date.now(), cleanQuestId, charId);
         } else {
             db.prepare(`
                 INSERT INTO city_quest_claims (quest_id, character_id, status, progress_count, resolution_note, created_at, updated_at)
                 VALUES (?, ?, 'accepted', 0, '', ?, ?)
-            `).run(questId, charId, Date.now(), Date.now());
+            `).run(cleanQuestId, charId, Date.now(), Date.now());
         }
         const firstClaim = db.prepare(`
             SELECT character_id FROM city_quest_claims
             WHERE quest_id = ? AND status IN ('accepted', 'in_progress', 'ready_to_report', 'reporting', 'completed')
             ORDER BY created_at ASC
             LIMIT 1
-        `).get(questId);
+        `).get(cleanQuestId);
         db.prepare(`UPDATE city_quests
             SET claimed_by = COALESCE(?, claimed_by), status = CASE WHEN status = 'open' THEN 'claimed' ELSE status END
-            WHERE id = ?`).run(firstClaim?.character_id || charId, questId);
-        return { success: true, quest: getQuestById(questId) };
+            WHERE id = ?`).run(firstClaim?.character_id || charId, cleanQuestId);
+        return { success: true, quest: getQuestById(cleanQuestId) };
     }
     function updateQuestClaimStage(questId, charId, nextStage, progressDelta = 0, note = '') {
-        const claim = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(questId, charId);
+        const cleanQuestId = normalizeCityRowId(questId);
+        if (!cleanQuestId) return null;
+        const claim = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(cleanQuestId, charId);
         if (!claim) return null;
-        const nextProgress = Math.max(0, Number(claim.progress_count || 0) + Number(progressDelta || 0));
+        const currentProgress = requireQuestProgressInteger(claim.progress_count, 0);
+        const delta = requireQuestProgressInteger(progressDelta, 0);
+        const nextProgress = Math.min(MAX_CITY_QUEST_COMPLETION_TARGET, currentProgress + delta);
         db.prepare(`
             UPDATE city_quest_claims
             SET status = ?, progress_count = ?, resolution_note = ?, updated_at = ?
             WHERE quest_id = ? AND character_id = ?
-        `).run(nextStage, nextProgress, note || claim.resolution_note || '', Date.now(), questId, charId);
-        return db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(questId, charId);
+        `).run(nextStage, nextProgress, note || claim.resolution_note || '', Date.now(), cleanQuestId, charId);
+        return db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(cleanQuestId, charId);
     }
     function advanceQuestProgress(questId, charId, increment = 1) {
-        const claim = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(questId, charId);
-        const quest = getQuestById(questId);
-        if (!claim) return null;
-        const nextProgress = Math.max(0, Number(claim.progress_count || 0) + Number(increment || 0));
-        const target = Math.max(1, Number(quest?.completion_target || 2));
+        const cleanQuestId = normalizeCityRowId(questId);
+        if (!cleanQuestId) return null;
+        const claim = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(cleanQuestId, charId);
+        const quest = getQuestById(cleanQuestId);
+        if (!claim || !quest) return null;
+        const currentProgress = requireQuestProgressInteger(claim.progress_count, 0);
+        const delta = requireQuestProgressInteger(increment, 1);
+        const target = normalizeCityQuestCompletionTarget(quest.completion_target, 2);
+        if (target == null) throw new Error('任务目标进度数值无效');
+        const nextProgress = Math.min(MAX_CITY_QUEST_COMPLETION_TARGET, currentProgress + delta);
         const nextStage = nextProgress >= target ? 'ready_to_report' : 'in_progress';
         db.prepare(`
             UPDATE city_quest_claims
             SET status = ?, progress_count = ?, updated_at = ?
             WHERE quest_id = ? AND character_id = ?
-        `).run(nextStage, nextProgress, Date.now(), questId, charId);
-        return db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(questId, charId);
+        `).run(nextStage, nextProgress, Date.now(), cleanQuestId, charId);
+        return db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(cleanQuestId, charId);
     }
     function resolveQuestCompletion(questId, charId) {
-        const quest = getQuestById(questId);
-        const claim = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(questId, charId);
+        const cleanQuestId = normalizeCityRowId(questId);
+        if (!cleanQuestId) return { success: false, reason: 'invalid_quest_id' };
+        const quest = getQuestById(cleanQuestId);
+        const claim = db.prepare('SELECT * FROM city_quest_claims WHERE quest_id = ? AND character_id = ?').get(cleanQuestId, charId);
         if (!quest) return { success: false, reason: 'quest_missing' };
         if (!claim) return { success: false, reason: 'claim_missing' };
+        const rewardGold = normalizeCityQuestGoldReward(quest.reward_gold, 0);
+        const rewardCal = normalizeCityQuestCaloriesReward(quest.reward_cal, 0);
+        if (rewardGold === null || rewardCal === null) {
+            return { success: false, reason: 'invalid_reward', quest: getQuestById(cleanQuestId) };
+        }
         if (quest.is_completed || String(quest.status || '') === 'completed') {
             db.prepare(`
                 UPDATE city_quest_claims
                 SET status = 'failed', resolution_note = ?, updated_at = ?
                 WHERE quest_id = ? AND character_id = ?
-            `).run('任务已被其他角色抢先交付。', Date.now(), questId, charId);
-            return { success: true, won: false, reason: 'already_completed', quest: getQuestById(questId) };
+            `).run('任务已被其他角色抢先交付。', Date.now(), cleanQuestId, charId);
+            return { success: true, won: false, reason: 'already_completed', quest: getQuestById(cleanQuestId) };
         }
         db.prepare(`
             UPDATE city_quests
             SET is_completed = 1, status = 'completed', completed_by = ?, claimed_by = ?
             WHERE id = ?
-        `).run(charId, charId, questId);
+        `).run(charId, charId, cleanQuestId);
         db.prepare(`
             UPDATE city_quest_claims
             SET status = CASE WHEN character_id = ? THEN 'completed' ELSE 'failed' END,
                 resolution_note = CASE WHEN character_id = ? THEN '任务已成功交付。' ELSE '任务已被其他角色抢先交付。' END,
                 updated_at = ?
             WHERE quest_id = ? AND status IN ('accepted', 'in_progress', 'ready_to_report', 'reporting')
-        `).run(charId, charId, Date.now(), questId);
-        return { success: true, won: true, quest: getQuestById(questId), reward_gold: Number(quest.reward_gold || 0), reward_cal: Number(quest.reward_cal || 0) };
+        `).run(charId, charId, Date.now(), cleanQuestId);
+        return { success: true, won: true, quest: getQuestById(cleanQuestId), reward_gold: rewardGold, reward_cal: rewardCal };
     }
     function completeQuest(questId) {
-        const info = db.prepare('UPDATE city_quests SET is_completed = 1, status = ? WHERE id = ?').run('completed', questId);
+        const cleanQuestId = normalizeCityRowId(questId);
+        if (!cleanQuestId) return false;
+        const info = db.prepare('UPDATE city_quests SET is_completed = 1, status = ? WHERE id = ?').run('completed', cleanQuestId);
         return info.changes > 0;
     }
     function deleteQuest(id) {
-        db.prepare('DELETE FROM city_quest_claims WHERE quest_id = ?').run(id);
-        db.prepare('DELETE FROM city_quests WHERE id = ?').run(id);
+        const questId = normalizeCityRowId(id);
+        if (!questId) return 0;
+        const info = db.prepare('DELETE FROM city_quests WHERE id = ?').run(questId);
+        if ((info.changes || 0) > 0) {
+            db.prepare('DELETE FROM city_quest_claims WHERE quest_id = ?').run(questId);
+        }
+        return info.changes || 0;
     }
 
     // ═══════════════════════════════════════════════════════════════════════

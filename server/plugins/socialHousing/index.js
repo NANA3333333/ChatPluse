@@ -1,11 +1,24 @@
 const initSocialHousingDb = require('./db');
 const initCityDb = require('../city/cityDb');
+const {
+    isSocialHousingValidationError,
+    normalizeAgencyConfigPayload,
+    normalizeAgencyIntervalMinutes,
+    normalizeHousingBindingPayload,
+    normalizeHousingPayload,
+    normalizeSocialClassPayload
+} = require('./inputGuards');
 
 const AUTO_TICK_MS = 60 * 1000;
 const RENT_TICK_MS = 60 * 1000;
 
 function compactText(value, fallback = '') {
     return String(value || '').replace(/\s+/g, ' ').trim() || fallback;
+}
+
+function sendSocialHousingError(res, error) {
+    const status = isSocialHousingValidationError(error) ? 400 : 500;
+    res.status(status).json({ success: false, error: error.message });
 }
 
 function buildAgencyAdKey(title, content) {
@@ -137,7 +150,7 @@ function applyRentStressPatch(character = {}, binding = {}) {
         stress: clampNumber(Number(character.stress || 20) + 6 + missed * 2, 0, 100),
         mood: clampNumber(Number(character.mood || 50) - 3 - missed, 0, 100),
         social_need: clampNumber(Number(character.social_need || 50) + 2, 0, 100),
-        pressure_level: clampNumber(Number(character.pressure_level || 0) + 1, 0, 5)
+        pressure_level: clampNumber(Number(character.pressure_level || 0) + 1, 0, 4)
     };
 }
 
@@ -168,9 +181,11 @@ function removeAgencyArtifactsForHome(socialHousingDb, cityDb, home) {
     let removedCount = 0;
     for (const ad of ads) {
         if (!doesAgencyAdReferenceHome(ad, home)) continue;
-        removeAgencyArtifacts(cityDb, ad.title, ad.content);
-        socialHousingDb.deleteAgencyAd(ad.id);
-        removedCount += 1;
+        const deleted = socialHousingDb.deleteAgencyAd(ad.id);
+        if (deleted) {
+            removeAgencyArtifacts(cityDb, ad.title, ad.content);
+            removedCount += 1;
+        }
     }
     return removedCount;
 }
@@ -389,14 +404,15 @@ module.exports = function initSocialHousingPlugin(app, context) {
             office_district: config.office_district
         });
 
-        const intervalMinutes = Math.max(60, Number(config.decision_interval_hours || 6) * 60);
+        const intervalMinutes = normalizeAgencyIntervalMinutes(config.decision_interval_hours);
+        const now = Date.now();
         socialHousingDb.saveAgencyConfig({
             ...config,
             ad_enabled: Number(config.enabled || 0) === 1 ? 1 : 0,
             ad_min_interval_minutes: intervalMinutes,
             ad_max_interval_minutes: intervalMinutes,
-            last_ad_at: Date.now(),
-            next_ad_at: Date.now() + intervalMinutes * 60 * 1000,
+            last_ad_at: now,
+            next_ad_at: now + intervalMinutes * 60 * 1000,
             last_error: '',
             last_error_at: 0
         });
@@ -423,8 +439,8 @@ module.exports = function initSocialHousingPlugin(app, context) {
         if (!housingContext?.binding?.housing_id) return { success: false, reason: 'no_housing' };
         const binding = housingContext.binding;
         const home = housingContext.housing || {};
-        const amount = Math.max(0, Number(binding.rent_weekly || home.weekly_rent || 0));
-        if (amount <= 0) return { success: false, reason: 'rent_not_configured' };
+        const amount = Number(binding.rent_weekly || home.weekly_rent || 0);
+        if (!Number.isFinite(amount) || amount <= 0) return { success: false, reason: 'rent_not_configured' };
 
         if (Number(character.wallet || 0) >= amount) {
             db.updateCharacter(character.id, { wallet: Number(character.wallet || 0) - amount });
@@ -502,21 +518,21 @@ module.exports = function initSocialHousingPlugin(app, context) {
     app.post('/api/social-housing/classes', authMiddleware, (req, res) => {
         try {
             const socialHousingDb = ensureSocialHousingDb(req.db);
-            const payload = req.body || {};
-            if (!String(payload.name || '').trim()) {
-                return res.status(400).json({ success: false, error: '缺少阶级名称' });
-            }
+            const payload = normalizeSocialClassPayload(req.body || {});
             const id = socialHousingDb.upsertClass(payload);
             res.json({ success: true, id, classes: socialHousingDb.getClasses() });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            sendSocialHousingError(res, e);
         }
     });
 
     app.delete('/api/social-housing/classes/:id', authMiddleware, (req, res) => {
         try {
             const socialHousingDb = ensureSocialHousingDb(req.db);
-            socialHousingDb.deleteClass(req.params.id);
+            const deleted = socialHousingDb.deleteClass(req.params.id);
+            if (!deleted) {
+                return res.status(404).json({ success: false, error: '阶层不存在' });
+            }
             res.json({ success: true, classes: socialHousingDb.getClasses() });
         } catch (e) {
             res.status(500).json({ success: false, error: e.message });
@@ -526,14 +542,14 @@ module.exports = function initSocialHousingPlugin(app, context) {
     app.post('/api/social-housing/housing', authMiddleware, (req, res) => {
         try {
             const socialHousingDb = ensureSocialHousingDb(req.db);
-            const payload = req.body || {};
+            const payload = normalizeHousingPayload(req.body || {});
             if (!String(payload.name || '').trim()) {
                 return res.status(400).json({ success: false, error: '缺少房子名称' });
             }
             const id = socialHousingDb.upsertHousing(payload);
             res.json({ success: true, id, housing_tiers: socialHousingDb.getHousingTiers() });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            sendSocialHousingError(res, e);
         }
     });
 
@@ -543,7 +559,10 @@ module.exports = function initSocialHousingPlugin(app, context) {
             const cityDb = ensureCityDb(req.db);
             const housingList = socialHousingDb.getHousingTiers() || [];
             const removedHome = housingList.find((item) => String(item.id) === String(req.params.id)) || null;
-            socialHousingDb.deleteHousing(req.params.id);
+            const deleted = socialHousingDb.deleteHousing(req.params.id);
+            if (!deleted || !removedHome) {
+                return res.status(404).json({ success: false, error: '房屋不存在' });
+            }
             const removedAgencyAds = removedHome ? removeAgencyArtifactsForHome(socialHousingDb, cityDb, removedHome) : 0;
             res.json({
                 success: true,
@@ -563,20 +582,28 @@ module.exports = function initSocialHousingPlugin(app, context) {
             if (!character) {
                 return res.status(404).json({ success: false, error: '角色不存在' });
             }
-            socialHousingDb.saveBinding(req.params.id, req.body || {});
+            const rawPayload = req.body || {};
+            const currentBinding = socialHousingDb.getBinding(req.params.id);
+            const targetHome = socialHousingDb.getHousingById(String(rawPayload.housing_id || '').trim());
+            const payload = normalizeHousingBindingPayload(rawPayload, currentBinding, targetHome);
+            socialHousingDb.saveBinding(req.params.id, payload);
             res.json({
                 success: true,
                 characters: socialHousingDb.getCharactersWithBindings(() => req.db.getCharacters()),
                 housing_context: socialHousingDb.getHousingContextForCharacter(req.params.id)
             });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            sendSocialHousingError(res, e);
         }
     });
 
     app.post('/api/social-housing/characters/:id/pay-rent', authMiddleware, (req, res) => {
         try {
-            const result = settleCharacterRent(req.db, req.params.id, { manual: true });
+            const character = req.db.getCharacter(req.params.id);
+            if (!character) {
+                return res.status(404).json({ success: false, error: '角色不存在' });
+            }
+            const result = settleCharacterRent(req.db, character.id, { manual: true });
             if (!result.success) {
                 return res.status(400).json({ success: false, error: result.reason || '房租结算失败' });
             }
@@ -585,7 +612,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
             wsClients?.forEach((client) => {
                 if (client.readyState === 1) {
                     client.send(JSON.stringify({ type: 'refresh_contacts' }));
-                    client.send(JSON.stringify({ type: 'city_update', action: 'rent-settled', character_id: req.params.id }));
+                    client.send(JSON.stringify({ type: 'city_update', action: 'rent-settled', character_id: character.id }));
                 }
             });
             res.json({
@@ -602,19 +629,14 @@ module.exports = function initSocialHousingPlugin(app, context) {
         try {
             const socialHousingDb = ensureSocialHousingDb(req.db);
             const current = socialHousingDb.getAgencyConfig();
-            const decisionIntervalHours = Math.max(1, Number(req.body?.decision_interval_hours ?? current.decision_interval_hours ?? 6));
-            const saved = socialHousingDb.saveAgencyConfig({
+            const payload = normalizeAgencyConfigPayload({
                 ...current,
-                ...req.body,
-                ad_enabled: Number(req.body?.enabled ?? current.enabled ?? 1) === 1 ? 1 : 0,
-                ad_min_interval_minutes: decisionIntervalHours * 60,
-                ad_max_interval_minutes: decisionIntervalHours * 60,
-                decision_interval_hours: decisionIntervalHours,
-                next_ad_at: Number(req.body?.next_ad_at ?? current.next_ad_at ?? 0)
-            });
+                ...(req.body || {})
+            }, current);
+            const saved = socialHousingDb.saveAgencyConfig(payload);
             res.json({ success: true, agency: saved });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            sendSocialHousingError(res, e);
         }
     });
 
@@ -657,8 +679,11 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 return res.status(404).json({ success: false, error: '中介广告记录不存在' });
             }
 
+            const deleted = socialHousingDb.deleteAgencyAd(req.params.id);
+            if (!deleted) {
+                return res.status(404).json({ success: false, error: '中介广告记录不存在' });
+            }
             removeAgencyArtifacts(cityDb, ad.title, ad.content);
-            socialHousingDb.deleteAgencyAd(req.params.id);
             res.json({
                 success: true,
                 agency_ads: getAgencyAdsWithPublishState(socialHousingDb, cityDb, 12)
@@ -679,7 +704,7 @@ module.exports = function initSocialHousingPlugin(app, context) {
                 if (Number(config.enabled || 0) !== 1 || Number(config.ad_enabled || 0) !== 1) continue;
 
                 const now = Date.now();
-                const intervalMinutes = Math.max(60, Number(config.decision_interval_hours || 6) * 60);
+                const intervalMinutes = normalizeAgencyIntervalMinutes(config.decision_interval_hours);
                 if (Number(config.next_ad_at || 0) <= 0) {
                     socialHousingDb.saveAgencyConfig({
                         ...config,

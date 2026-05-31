@@ -6,8 +6,16 @@ const { createMayorService } = require('./services/mayorService');
 const { createMayorRuntimeService } = require('./services/mayorRuntimeService');
 const { createQuestService } = require('./services/questService');
 const { createSocialService } = require('./services/socialService');
+const { createAdminGrantService } = require('./services/adminGrantService');
 const { registerCoreCityRoutes } = require('./routes/coreRoutes');
 const { registerEventQuestRoutes } = require('./routes/eventQuestRoutes');
+const {
+    normalizeCityCatalogItemPayload,
+    normalizeCityConfigValue,
+    normalizeCityDistrictPayload,
+    normalizeStoredCityOffsetDays,
+    normalizeStoredCityOffsetHours
+} = require('./utils/inputGuards');
 const initCityGrowthDb = require('../cityGrowth/growthDb');
 const schoolLogic = require('../cityGrowth/schoolLogic');
 const mcpLabTools = require('../mcpLab');
@@ -76,31 +84,11 @@ module.exports = function initCityPlugin(app, context) {
         if (entry) db.addEmotionLog(entry);
     }
 
-    function buildGrantReplyDirective(grantKind, details = {}, userName = '用户') {
-        const amount = Number(details.amount || 0);
-        const itemName = String(details.itemName || '').trim();
-        const itemEmoji = String(details.itemEmoji || '').trim();
-        const quantity = Number(details.quantity || 1) || 1;
-
-        const eventSummary = grantKind === 'gold'
-            ? `${userName}刚刚给了你 ${amount} 金币。`
-            : grantKind === 'calories'
-                ? `${userName}刚刚给你补了 ${amount} 点体力/热量。`
-                : `${userName}刚刚给了你 ${itemEmoji}${itemName} x${quantity}。`;
-
-        return [
-            '[系统提示：这是一次收到用户赠与后的回复。]',
-            `最新事件：${eventSummary}`,
-            '请先回应这次收到的东西本身。'
-        ].join('\n');
-    }
-
     const socialService = createSocialService({
         buildUniversalContext,
         callLLM,
         recordCityLlmDebug,
         buildQuestCompetitionContext,
-        buildCollapsedCityLog,
         logEmotionTransition,
         applyEmotionEvent,
         broadcastCityEvent,
@@ -112,48 +100,6 @@ module.exports = function initCityPlugin(app, context) {
             forceCityDetail: true
         })
     });
-
-    async function triggerAdminGrantChat(userId, char, grantKind, details = {}) {
-        if (!char?.id) return null;
-        const db = ensureCityDb(getUserDb(userId));
-        const engine = getEngine(userId);
-        const wsClients = getWsClients(userId);
-        if (!engine || typeof engine.triggerImmediateUserReply !== 'function') {
-            throw new Error('私聊引擎不可用');
-        }
-
-        const amount = Number(details.amount || 0);
-        const itemName = String(details.itemName || '').trim();
-        const itemEmoji = String(details.itemEmoji || '').trim();
-        const quantity = Number(details.quantity || 1) || 1;
-        const userName = String(db.getUserProfile()?.name || '用户').trim() || '用户';
-        const noticeContent = grantKind === 'gold'
-            ? `${userName}刚给了你 ${amount} 金币。`
-            : grantKind === 'calories'
-                ? `${userName}刚给你补了 ${amount} 点体力/热量。`
-                : `${userName}刚给了你 ${itemEmoji}${itemName} x${quantity}。`;
-        const extraSystemDirective = buildGrantReplyDirective(grantKind, details, userName);
-
-        const { id: msgId, timestamp: msgTs } = db.addMessage(char.id, 'system', noticeContent);
-        const newMessage = {
-            id: msgId,
-            character_id: char.id,
-            role: 'system',
-            content: noticeContent,
-            timestamp: msgTs,
-            read: 0
-        };
-        engine?.broadcastNewMessage?.(wsClients, newMessage);
-        engine?.broadcastEvent?.(wsClients, { type: 'refresh_contacts' });
-        await engine.triggerImmediateUserReply(char.id, wsClients, {
-            propagateError: true,
-            extraSystemDirective,
-            triggerSource: 'city_admin_grant',
-            triggerRoute: 'city.triggerAdminGrantChat',
-            triggerNote: `grant_${grantKind}`
-        });
-        return newMessage;
-    }
 
     async function triggerHackerIntelReply(userId, char, intelText) {
         if (!char?.id) return null;
@@ -256,23 +202,23 @@ module.exports = function initCityPlugin(app, context) {
     }
 
     function normalizeDistrictPayload(raw) {
-        return {
+        return normalizeCityDistrictPayload({
             ...raw,
             id: raw.id || slugifyCityId(raw.name, 'district'),
             type: raw.type || 'generic',
             action_label: raw.action_label || '前往',
             emoji: raw.emoji || '🏬'
-        };
+        });
     }
 
     function normalizeItemPayload(raw) {
-        return {
+        return normalizeCityCatalogItemPayload({
             ...raw,
             id: raw.id || slugifyCityId(raw.name, 'item'),
             emoji: raw.emoji || '📦',
             category: inferItemCategory(raw),
             sold_at: raw.sold_at || ''
-        };
+        });
     }
 
     function ensureCityDb(db) {
@@ -283,6 +229,13 @@ module.exports = function initCityPlugin(app, context) {
         return db;
     }
 
+    function createCityError(message, status = 500, canRetry = false) {
+        const err = new Error(message);
+        err.status = status;
+        if (canRetry) err.canRetry = true;
+        return err;
+    }
+
     function ensureCityGrowthDb(db) {
         if (!db.cityGrowth) {
             const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : db;
@@ -291,18 +244,37 @@ module.exports = function initCityPlugin(app, context) {
         return db.cityGrowth;
     }
 
+    const { triggerAdminGrantChat } = createAdminGrantService({
+        ensureCityDb,
+        getUserDb,
+        getEngine,
+        getWsClients
+    });
+
     // City virtual clock
     // Uses config to offset real-world time to create roleplay/testing time
     function getCityDate(config) {
         const now = new Date();
         if (!config) return now;
-        const daysOffset = parseInt(config.city_time_offset_days) || 0;
-        const hoursOffset = parseInt(config.city_time_offset_hours) || 0;
+        const daysOffset = normalizeStoredCityOffsetDays(config.city_time_offset_days);
+        const hoursOffset = normalizeStoredCityOffsetHours(config.city_time_offset_hours);
         if (daysOffset === 0 && hoursOffset === 0) return now;
 
-        now.setDate(now.getDate() + daysOffset);
-        now.setHours(now.getHours() + hoursOffset);
+        now.setTime(now.getTime() + daysOffset * 24 * 60 * 60 * 1000 + hoursOffset * 60 * 60 * 1000);
         return now;
+    }
+
+    function normalizeCityRuntimeConfigNumber(config, key, fallback) {
+        const normalized = normalizeCityConfigValue(key, config?.[key]);
+        if (normalized === null) return fallback;
+        const parsed = Number(normalized);
+        return Number.isFinite(parsed) ? parsed : fallback;
+    }
+
+    function normalizeMetabolismPerMinute(config) {
+        const metabolismRate = normalizeCityRuntimeConfigNumber(config, 'metabolism_rate', 20);
+        if (metabolismRate <= 0) return 0;
+        return Math.max(1, Math.round(metabolismRate / 15));
     }
 
     function clamp(value, min, max) {
@@ -528,28 +500,30 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
                     temperature: 0.4
                 });
                 recordCityLlmDebug(db, char, 'output', 'city_suggestion_action', reply, { model: char.model_name, sourceLabel });
-                const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-                const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-                if (jsonMatch) decision = JSON.parse(jsonMatch[0]);
+                decision = tryParseCityActionReply(reply);
             } catch (err) {
-                console.warn(`[City] 用户建议行动判断失败 ${char.name}: ${err.message}`);
+                return { triggered: false, reason: err.message, canRetry: true };
             }
+        } else {
+            return { triggered: false, reason: 'missing_model_config', canRetry: true };
         }
 
         if (!decision?.accept || !decision?.district_id) return { triggered: false, reason: decision?.reason || 'rejected' };
 
-        const district = districts.find(d => d.id === decision.district_id) || candidates.find(d => d.id === decision.district_id);
+        const district = candidates.find(d => d.id === decision.district_id);
         if (!district) return { triggered: false, reason: 'district_not_found' };
+        const log = String(decision.log || '').trim();
+        if (!log) return { triggered: false, reason: 'missing_log', canRetry: true };
 
         const activeEvents = db.city.getActiveEvents();
         const currentCals = char.calories ?? 2000;
         const narrations = {
-            log: String(decision.log || '').trim() || buildCollapsedCityLog(char, '建议行动文案生成失败', { district }),
+            log,
             chat: '',
             moment: '',
             diary: ''
         };
-            await applyDecision(district, char, db, userId, currentCals, config, activeEvents, narrations, { preserveDirectedDistrict: true });
+        await applyDecision(district, char, db, userId, currentCals, config, activeEvents, narrations, { preserveDirectedDistrict: true });
         return { triggered: true, districtId: district.id, reason: decision.reason || '' };
     }
 
@@ -758,40 +732,10 @@ ${candidates.map(d => `- ${d.id}: ${d.emoji} ${d.name} (${d.type})`).join('\n')}
         return lines.join('\n');
     }
 
-    function parseLooseJsonObject(reply) {
-        const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) return null;
-        let jsonStr = jsonMatch[0];
-        try {
-            return JSON.parse(jsonStr);
-        } catch (err) {
-            jsonStr = jsonStr
-                .replace(/,\s*([\]}])/g, '$1')
-                .replace(/\/\/.*$/gm, '')
-                .replace(/(?<!\\)\n/g, '\\n');
-            try {
-                return JSON.parse(jsonStr);
-            } catch (innerErr) {
-                return null;
-            }
-        }
-    }
-
-    function buildReplyIntentNarrationsFallback(char, district, replyText, db) {
-        return {
-            log: buildCollapsedCityLog(char, '私聊行动文案生成失败', { district }),
-            chat: '',
-            moment: '',
-            diary: ''
-        };
-    }
-
     async function buildGamblingOutcomeNarrations(char, district, db, outcome = {}, styleHint = null) {
-        const fallbackLog = buildCollapsedCityLog(char, outcome.didWin ? '赌场赢钱文案生成失败' : '赌场输钱文案生成失败', { district });
-        const fallback = { log: fallbackLog, chat: '', moment: '', diary: '' };
-
-        if (!(char.api_endpoint && char.api_key && char.model_name)) return fallback;
+        if (!(char.api_endpoint && char.api_key && char.model_name)) {
+            throw createCityError('赌场结果文案生成缺少模型 URL/Key/模型名，请补全后重试。', 400, true);
+        }
 
         const currentLocation = char.location ? db.city.getDistrict(char.location) : null;
         const currentLocationLabel = currentLocation ? `${currentLocation.emoji}${currentLocation.name}` : (char.location || '未知地点');
@@ -830,17 +774,18 @@ ${styleText ? `- 可轻微参考这段既有语气，但只能参考语气，不
   "diary": ""
 }`;
 
+        const messages = [
+            { role: 'system', content: '你是角色自己的现实行动记录器。你只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
+            { role: 'user', content: prompt }
+        ];
+        recordCityLlmDebug(db, char, 'input', 'city_gambling_outcome_narration', messages, {
+            model: char.model_name,
+            districtId: district.id,
+            didWin: !!outcome.didWin
+        });
+        let reply = '';
         try {
-            const messages = [
-                { role: 'system', content: '你是角色自己的现实行动记录器。你只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
-                { role: 'user', content: prompt }
-            ];
-            recordCityLlmDebug(db, char, 'input', 'city_gambling_outcome_narration', messages, {
-                model: char.model_name,
-                districtId: district.id,
-                didWin: !!outcome.didWin
-            });
-            const reply = await callLLM({
+            reply = await callLLM({
                 endpoint: char.api_endpoint,
                 key: char.api_key,
                 model: char.model_name,
@@ -852,179 +797,38 @@ ${styleText ? `- 可轻微参考这段既有语气，但只能参考语气，不
                     didWin: !!outcome.didWin
                 })
             });
-            recordCityLlmDebug(db, char, 'output', 'city_gambling_outcome_narration', reply, {
-                model: char.model_name,
-                districtId: district.id,
-                didWin: !!outcome.didWin
-            });
-            const parsed = parseLooseJsonObject(reply);
-            if (parsed && typeof parsed === 'object') {
-                return {
-                    log: String(parsed.log || '').trim() || fallback.log,
-                    chat: String(parsed.chat || '').trim(),
-                    moment: String(parsed.moment || '').trim(),
-                    diary: String(parsed.diary || '').trim()
-                };
-            }
         } catch (err) {
-            console.warn(`[City] 赌场结果文案生成失败 ${char.name}: ${err.message}`);
+            throw createCityError(`赌场结果文案生成请求失败，请重试：${err.message}`, 502, true);
         }
+        recordCityLlmDebug(db, char, 'output', 'city_gambling_outcome_narration', reply, {
+            model: char.model_name,
+            districtId: district.id,
+            didWin: !!outcome.didWin
+        });
 
-        return fallback;
-    }
-
-    async function buildReplyIntentNarrations(char, district, replyText, db) {
-        const previousDistrict = char.location ? db.city.getDistrict(char.location) : null;
-        const previousDistrictLabel = previousDistrict ? `${previousDistrict.emoji}${previousDistrict.name}` : '当前位置';
-        const targetDistrictLabel = `${district.emoji}${district.name}`;
-
-        if (!(char.api_endpoint && char.api_key && char.model_name)) {
-            return buildReplyIntentNarrationsFallback(char, district, replyText, db);
-        }
-
-        const prompt = `你正在生成一次正常的商业街活动结果。
-
-角色：${char.name}
-角色当前地点：${previousDistrictLabel}
-目标地点：${targetDistrictLabel}
-目标地点类型：${district.type || 'generic'}
-
-[触发信号]
-- 这次商业街活动已经确认开启。
-- 目标地点已经锁定为 ${targetDistrictLabel}。
-- 信号只负责“确认开启 + 指定去哪”，不是让你续写私聊对白。
-
-要求：
-1. 把这次输出当成一次普通商业街活动记录来写，不要围着私聊原话打转。
-2. 重点参考：当前地点、目标地点、角色当前状态，以及商业街活动本身的连续性。
-3. log 要像自然发生的商业街活动记录，不要写成固定模板。
-4. chat / moment / diary 默认可留空；只有这次行动里真的自然出现时才填写。
-5. 不要写系统、后台、模板、日志、触发器。
-6. 如果目标地点属于吃饭/购物场景，不要提前编造“具体买了/吃了哪件商品”；商品结算会在后续真实发生。
-
-严格返回 JSON 对象：
-{
-  "log": "自然的商业街活动记录",
-  "chat": "",
-  "moment": "",
-  "diary": ""
-}`;
-
+        let parsed = null;
         try {
-            const messages = [
-                { role: 'system', content: '你是角色自己的现实行动记录器。你只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
-                { role: 'user', content: prompt }
-            ];
-            recordCityLlmDebug(db, char, 'input', 'city_reply_intent_narration', messages, {
-                model: char.model_name,
-                from: previousDistrict?.id || '',
-                to: district.id || ''
-            });
-            const reply = await callLLM({
-                endpoint: char.api_endpoint,
-                key: char.api_key,
-                model: char.model_name,
-                messages,
-                maxTokens: 3000,
-                temperature: 0.35,
-                debugAttempt: buildCityAttemptRecorder(db, char, 'city_reply_intent_narration', {
-                    from: previousDistrict?.id || '',
-                    to: district.id || ''
-                })
-            });
-            recordCityLlmDebug(db, char, 'output', 'city_reply_intent_narration', reply, {
-                model: char.model_name,
-                from: previousDistrict?.id || '',
-                to: district.id || ''
-            });
-            const parsed = parseLooseJsonObject(reply);
-            if (parsed && typeof parsed === 'object') {
-                return {
-                    log: String(parsed.log || '').trim(),
-                    chat: String(parsed.chat || '').trim(),
-                    moment: String(parsed.moment || '').trim(),
-                    diary: String(parsed.diary || '').trim()
-                };
-            }
+            parsed = tryParseCityActionReply(reply);
         } catch (err) {
-            console.warn(`[City] 私聊触发商业街叙述生成失败 ${char.name}: ${err.message}`);
+            throw createCityError(`赌场结果文案生成返回的 JSON 无法解析，请重试：${err.message || 'parse_failed'}`, 502, true);
         }
-
-        return buildReplyIntentNarrationsFallback(char, district, replyText, db);
-    }
-
-    async function buildPrivateReplyCitySelfPrompt(char, district, replyText, db) {
-        const normalizedReply = String(replyText || '').replace(/\[[^\]]+\]/g, ' ').replace(/\s+/g, ' ').trim();
-        const fallbackPrompt = `立刻前往 ${district.emoji}${district.name}，按刚才私聊里自己定下的主意行动。动作要贴合当下情绪和身体状态，不要像系统任务。`;
-
-        if (!(char.api_endpoint && char.api_key && char.model_name)) {
-            return { prompt: fallbackPrompt, reason: 'no_api_config' };
+        const log = String(parsed?.log || '').trim();
+        if (!parsed || !log) {
+            throw createCityError('赌场结果文案生成缺少可用 log，请重试。', 502, true);
         }
-
-        const prompt = `你是 ${char.name}。你刚在私聊里自己决定要去商业街活动，现在请你给“马上到商业街行动的自己”写一段简短行动规范。
-
-目标地点：${district.emoji}${district.name} (${district.id})
-刚才私聊中的原话：
-${normalizedReply || '（空）'}
-
-要求：
-1. 只写 1-2 句简短 prompt，像角色写给自己的行动提醒。
-2. 重点说明：这次去 ${district.name} 想干什么、会带着什么情绪/态度去、有没有要避免的事。
-3. 不要写 JSON，不要写解释，不要写“我是 AI / 系统 / 后台 / 触发器”。
-4. 不要重复整段私聊原话，要提炼成简短执行规范。
-5. 语气必须像角色自己对自己下的一个小决心。`;
-
-        try {
-            const messages = [
-                { role: 'system', content: '你只返回角色写给自己的简短行动 prompt，不要输出任何额外解释。' },
-                { role: 'user', content: prompt }
-            ];
-            recordCityLlmDebug(db, char, 'input', 'city_private_self_prompt', messages, { model: char.model_name, districtId: district.id });
-            const reply = await callLLM({
-                endpoint: char.api_endpoint,
-                key: char.api_key,
-                model: char.model_name,
-                messages,
-                maxTokens: 3000,
-                temperature: 0.5,
-                debugAttempt: buildCityAttemptRecorder(db, char, 'city_private_self_prompt', {
-                    districtId: district.id
-                })
-            });
-            recordCityLlmDebug(db, char, 'output', 'city_private_self_prompt', reply, { model: char.model_name, districtId: district.id });
-            const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').replace(/\s+/g, ' ').trim();
-            return { prompt: cleaned || fallbackPrompt, reason: cleaned ? 'llm' : 'fallback_empty' };
-        } catch (err) {
-            console.warn(`[City] 私聊商业街自提示生成失败 ${char.name}: ${err.message}`);
-            return { prompt: fallbackPrompt, reason: 'fallback_error' };
-        }
+        return {
+            log,
+            chat: String(parsed.chat || '').trim(),
+            moment: String(parsed.moment || '').trim(),
+            diary: String(parsed.diary || '').trim()
+        };
     }
 
     function tryParseCityActionReply(reply = '') {
         const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) return null;
-
-        let jsonStr = jsonMatch[0];
-        const candidates = [
-            jsonStr,
-            jsonStr
-                .replace(/,\s*([\]}])/g, '$1')
-                .replace(/\/\/.*$/gm, '')
-                .replace(/(?<!\\)\n/g, '\\n')
-                .replace(/\\n\s*}/g, '\n}')
-                .replace(/\\n\s*]/g, '\n]')
-                .replace(/{\s*\\n/g, '{\n')
-        ];
-
-        for (const candidate of candidates) {
-            try {
-                return JSON.parse(candidate);
-            } catch (err) {
-                continue;
-            }
-        }
-        return null;
+        if (!cleaned) return null;
+        const parsed = JSON.parse(cleaned);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
     }
 
     async function runPrivateReplyDirectedCityAction(userId, char, district, replyText, db, config) {
@@ -1069,9 +873,7 @@ ${normalizedReply || '（空）'}
 - 如果当前状态里已经带着明显情绪，就让商业街行动自然延续，但不要夸张到失真。${questDirectedBlock}${districtItemsPrompt}`;
 
         if (!(char.api_endpoint && char.api_key && char.model_name)) {
-            const fallbackNarrations = await buildReplyIntentNarrations(char, district, replyText, db);
-            await applyDecision(district, char, db, userId, currentCals, config, activeEvents, fallbackNarrations, { preserveDirectedDistrict: true });
-            return { triggered: true, districtId: district.id, mode: 'fallback_no_api' };
+            return { triggered: false, districtId: district.id, reason: 'missing_model_config', canRetry: true };
         }
 
         try {
@@ -1104,16 +906,22 @@ ${normalizedReply || '（空）'}
 
             const richNarrations = tryParseCityActionReply(reply);
             if (richNarrations && typeof richNarrations === 'object') {
+                const expectedAction = `[${String(district.id || '').toUpperCase()}]`;
+                const action = String(richNarrations.action || '').trim();
+                if (action !== expectedAction) {
+                    throw new Error(`私聊定向商业街行动 action 无效：${action || 'empty'}`);
+                }
+                if (!String(richNarrations.log || '').trim()) {
+                    throw new Error('私聊定向商业街行动缺少 log 字段');
+                }
                 await applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations, { preserveDirectedDistrict: true });
                 return { triggered: true, districtId: district.id, mode: 'directed_city_action' };
             }
+            throw new Error('私聊定向商业街行动返回内容不是合法 JSON 对象');
         } catch (err) {
             console.warn(`[City] 私聊定向商业街行动失败 ${char.name}: ${err.message}`);
+            return { triggered: false, districtId: district.id, reason: err.message, canRetry: true };
         }
-
-        const fallbackNarrations = await buildReplyIntentNarrations(char, district, replyText, db);
-        await applyDecision(district, char, db, userId, currentCals, config, activeEvents, fallbackNarrations, { preserveDirectedDistrict: true });
-        return { triggered: true, districtId: district.id, mode: 'directed_fallback' };
     }
 
     function isWeakCityNarration(text, char, district) {
@@ -1189,7 +997,7 @@ ${normalizedReply || '（空）'}
 
     async function regenerateActionNarrations(char, district, db, baseNarrations = {}, options = {}) {
         if (!(char?.api_endpoint && char?.api_key && char?.model_name)) {
-            return baseNarrations;
+            throw createCityError('行动文案重写缺少模型 URL/Key/模型名，请补全后重试。', 400, true);
         }
 
         const currentLocation = char.location ? db.city.getDistrict(char.location) : null;
@@ -1241,17 +1049,18 @@ ${districtSpecificRule ? districtSpecificRule + '\n' : ''}严格返回 JSON：
   "diary": ""
 }`;
 
+        const messages = [
+            { role: 'system', content: '你是角色自己的现实行动记录器。只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
+            { role: 'user', content: prompt }
+        ];
+        recordCityLlmDebug(db, char, 'input', 'city_action_regenerate_narration', messages, {
+            model: char.model_name,
+            districtId: district.id,
+            location: char.location || ''
+        });
+        let reply = '';
         try {
-            const messages = [
-                { role: 'system', content: '你是角色自己的现实行动记录器。只返回合法 JSON 对象，不要输出任何额外解释、markdown、前言或后记。' },
-                { role: 'user', content: prompt }
-            ];
-            recordCityLlmDebug(db, char, 'input', 'city_action_regenerate_narration', messages, {
-                model: char.model_name,
-                districtId: district.id,
-                location: char.location || ''
-            });
-            const reply = await callLLM({
+            reply = await callLLM({
                 endpoint: char.api_endpoint,
                 key: char.api_key,
                 model: char.model_name,
@@ -1263,40 +1072,42 @@ ${districtSpecificRule ? districtSpecificRule + '\n' : ''}严格返回 JSON：
                     location: char.location || ''
                 })
             });
-            recordCityLlmDebug(db, char, 'output', 'city_action_regenerate_narration', reply, {
-                model: char.model_name,
-                districtId: district.id,
-                location: char.location || ''
-            });
-            const parsed = tryParseCityActionReply(reply);
-            if (parsed && typeof parsed === 'object') {
-                return {
-                    ...baseNarrations,
-                    ...parsed,
-                    log: String(parsed.log || '').trim() || String(baseNarrations?.log || '').trim()
-                };
-            }
         } catch (err) {
-            console.warn(`[City] 行动文案重写失败 ${char?.name || ''}: ${err.message}`);
+            throw createCityError(`行动文案重写请求失败，请重试：${err.message}`, 502, true);
         }
-
-        return baseNarrations;
+        recordCityLlmDebug(db, char, 'output', 'city_action_regenerate_narration', reply, {
+            model: char.model_name,
+            districtId: district.id,
+            location: char.location || ''
+        });
+        let parsed = null;
+        try {
+            parsed = tryParseCityActionReply(reply);
+        } catch (err) {
+            throw createCityError(`行动文案重写返回的 JSON 无法解析，请重试：${err.message || 'parse_failed'}`, 502, true);
+        }
+        const log = String(parsed?.log || '').trim();
+        if (!parsed || !log) {
+            throw createCityError('行动文案重写缺少可用 log，请重试。', 502, true);
+        }
+        return {
+            ...baseNarrations,
+            ...parsed,
+            log
+        };
     }
 
     async function buildQuestResolutionNarrations(char, quest, district, db, outcome = 'success') {
         return questService.buildQuestResolutionNarrations(char, quest, district, db, outcome);
     }
 
-    function buildBusyPenaltyLog(char, kind, amount, districtName) {
-        return buildCollapsedCityLog(char, kind === 'work' ? '忙碌惩罚文案生成失败' : '休息惩罚文案生成失败', {
-            locationLabel: districtName || '当前地点'
-        });
-    }
-
     async function buildBusyPenaltyNarration(char, kind, amount, districtName, db) {
-        const fallback = buildBusyPenaltyLog(char, kind, amount, districtName);
-        if (!(char?.api_endpoint && char?.api_key && char?.model_name) || !amount) {
-            return fallback;
+        const penaltyAmount = Number(amount || 0);
+        if (!Number.isFinite(penaltyAmount) || penaltyAmount <= 0) {
+            throw createCityError('忙碌惩罚文案生成缺少有效惩罚数值，请重试。', 500, true);
+        }
+        if (!(char?.api_endpoint && char?.api_key && char?.model_name)) {
+            throw createCityError('忙碌惩罚文案生成缺少模型 URL/Key/模型名，请补全后重试。', 400, true);
         }
 
         const kindLabel = kind === 'work' ? '工作' : '补觉/休息';
@@ -1365,10 +1176,13 @@ ${recentSameKindBlock}
                 amount
             });
             const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').replace(/\s+/g, ' ').trim();
-            return cleaned || fallback;
+            if (!cleaned) {
+                throw createCityError('忙碌惩罚文案生成缺少可用文案，请重试。', 502, true);
+            }
+            return cleaned;
         } catch (err) {
-            console.warn(`[City] 忙碌惩罚文案生成失败 ${char?.name || ''}: ${err.message}`);
-            return fallback;
+            if (err?.canRetry) throw err;
+            throw createCityError(`忙碌惩罚文案生成请求失败，请重试：${err.message}`, 502, true);
         }
     }
 
@@ -2026,43 +1840,33 @@ ${districtList}
 
     function tryParseScheduleReply(reply = '') {
         const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-        const candidates = [];
-        const pushCandidate = (value) => {
-            const text = String(value || '').trim();
-            if (!text || candidates.includes(text)) return;
-            candidates.push(text);
-        };
+        if (!cleaned) return null;
+        const parsed = JSON.parse(cleaned);
+        return Array.isArray(parsed) ? parsed : null;
+    }
 
-        const firstBracket = cleaned.indexOf('[');
-        const lastBracket = cleaned.lastIndexOf(']');
-        if (firstBracket !== -1 && lastBracket > firstBracket) {
-            pushCandidate(cleaned.slice(firstBracket, lastBracket + 1));
+    function normalizeGeneratedSchedulePlan(plan, districts = []) {
+        if (!Array.isArray(plan) || plan.length === 0) return null;
+        const allowedActions = new Set((Array.isArray(districts) ? districts : [])
+            .map((district) => String(district?.id || '').trim())
+            .filter(Boolean));
+        allowedActions.add('none');
+        const normalized = [];
+        for (const entry of plan) {
+            if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+            const hour = Number(entry.hour);
+            const action = String(entry.action || '').trim();
+            const reason = String(entry.reason || '').trim();
+            if (!Number.isSafeInteger(hour) || hour < 6 || hour > 23) return null;
+            if (!allowedActions.has(action)) return null;
+            if (!reason) return null;
+            normalized.push({
+                hour,
+                action,
+                reason: reason.slice(0, 160)
+            });
         }
-
-        if (firstBracket !== -1) {
-            const lastBrace = cleaned.lastIndexOf('}');
-            if (lastBrace > firstBracket) {
-                pushCandidate(`${cleaned.slice(firstBracket, lastBrace + 1)}]`);
-            }
-        }
-
-        pushCandidate(cleaned);
-
-        for (const candidate of candidates) {
-            try {
-                const parsed = JSON.parse(candidate);
-                if (Array.isArray(parsed)) return parsed;
-            } catch (e) {
-                try {
-                    const repaired = candidate
-                        .replace(/,\s*([\]}])/g, '$1')
-                        .replace(/[\r\n]+/g, ' ');
-                    const parsed = JSON.parse(repaired);
-                    if (Array.isArray(parsed)) return parsed;
-                } catch (_) { /* ignore */ }
-            }
-        }
-        return null;
+        return normalized;
     }
 
     function buildSocialPrompt(charA, charB, district, relAB, relBA, inventoryA, inventoryB, universalContextA, universalContextB) {
@@ -2153,6 +1957,20 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         'end_interaction'
     ];
     const behaviorTreeAllowedActionSet = new Set(behaviorTreeAllowedActions);
+    const behaviorPlayerInteractionActions = [
+        'greet',
+        'small_talk',
+        'ask_current_action',
+        'ask_destination',
+        'suggest_destination',
+        'request_company',
+        'treat_food',
+        'request_help',
+        'joke',
+        'comfort'
+    ];
+    const behaviorPlayerInteractionActionSet = new Set(behaviorPlayerInteractionActions);
+    const behaviorRepeatTextActions = new Set(['say', 'emote', 'offer_choices', 'create_memory', 'relationship_delta']);
     const behaviorSemanticMovementActions = [
         { id: 'go_to_place', label: '前往地点', needs: ['place_id'], description: '走到某个表内地点附近。' },
         { id: 'wander_between', label: '两点间闲逛', needs: ['from_place_id', 'to_place_id'], description: '在两个表内地点之间来回平移。' },
@@ -2191,9 +2009,8 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
 
     function parseJsonObjectFromLlmText(text) {
         const cleaned = String(text || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) return null;
-        return JSON.parse(jsonMatch[0]);
+        if (!cleaned) return null;
+        return JSON.parse(cleaned);
     }
 
     async function fetchBehaviorModelList(endpoint, key, timeoutMs = 18000) {
@@ -2317,7 +2134,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                     priority: '1-100',
                     ttl_ms: '3000-120000',
                     trigger: {
-                        player_action: 'greet|small_talk|ask_current_action|ask_destination|suggest_destination|request_company|treat_food|request_help|joke|comfort',
+                        player_action: behaviorPlayerInteractionActions.join('|'),
                         place_id: 'optional；如果填写，必须来自 allowed_place_ids'
                     },
                     summary: '一两句话说明角色为什么这么反应',
@@ -2378,108 +2195,6 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         };
     }
 
-    function buildFallbackBehaviorBranch(char, payload = {}, reason = 'local_fallback') {
-        const event = payload?.player_event || {};
-        const action = String(event.action || 'greet');
-        const placeId = limitText(event.place_id || event.placeId || '', 60);
-        const placeLabel = limitText(event.place_label || event.placeLabel || '', 80);
-        const name = limitText(char?.name || '角色', 40);
-        const branchId = `bt_${action}_${Date.now()}`;
-        const templates = {
-            greet: {
-                title: '玩家靠近打招呼',
-                summary: `${name}先看向玩家，给一个短回应。`,
-                steps: [
-                    { action: 'face_player' },
-                    { action: 'say', text: '我在。你刚刚也在这条街上晃吗？' },
-                    { action: 'wait', duration_ms: 1200 }
-                ]
-            },
-            small_talk: {
-                title: '街边闲聊',
-                summary: `${name}把商业街最近的气氛带进闲聊。`,
-                steps: [
-                    { action: 'face_player' },
-                    { action: 'emote', text: '停下脚步，往街边看了一眼' },
-                    { action: 'say', text: '这条街今天挺有动静的，我刚还在想要不要换个地方走走。' },
-                    { action: 'offer_choices', choices: [
-                        { id: 'ask_more', label: '继续问' },
-                        { id: 'walk_together', label: '一起走' }
-                    ] }
-                ]
-            },
-            ask_current_action: {
-                title: '询问正在做什么',
-                summary: `${name}把当前状态解释给玩家听。`,
-                steps: [
-                    { action: 'face_player' },
-                    { action: 'say', text: '我在整理今天要做的事，顺便看看街上有没有适合下手的机会。' },
-                    { action: 'wait', duration_ms: 900 }
-                ]
-            },
-            suggest_destination: {
-                title: '玩家提出目的地',
-                summary: `${name}根据玩家选的地点临时改道。`,
-                steps: [
-                    { action: 'face_player' },
-                    { action: 'say', text: placeLabel ? `去${placeLabel}？行，我先过去看看。` : '行，我跟你过去看看。' },
-                    { action: 'walk_with_player', to_place_id: placeId || 'restaurant', target_label: placeLabel || '街区', movement_style: 'walk_together' },
-                    { action: 'end_interaction' }
-                ]
-            },
-            treat_food: {
-                title: '玩家请吃东西',
-                summary: `${name}接住玩家的好意，并留下轻量记忆。`,
-                steps: [
-                    { action: 'face_player' },
-                    { action: 'say', text: '你请？那我可记住了。先找个能坐下的地方。' },
-                    { action: 'walk_with_player', to_place_id: placeId || 'restaurant', target_label: placeLabel || '餐饮点', movement_style: 'walk_together' },
-                    { action: 'relationship_delta', value: 1, reason: '玩家主动请吃东西' },
-                    { action: 'create_memory', text: '玩家在商业街主动提出请我吃东西。', importance: 0.35 }
-                ]
-            },
-            comfort: {
-                title: '玩家请求安慰',
-                summary: `${name}用短句和靠近动作回应玩家。`,
-                steps: [
-                    { action: 'face_player' },
-                    { action: 'emote', text: '靠近半步，语气放轻' },
-                    { action: 'say', text: '先别急着硬撑。你说，我听着。' },
-                    { action: 'wait', duration_ms: 1600 }
-                ]
-            }
-        };
-        const chosen = templates[action] || templates.greet;
-        const steps = chosen.steps.some((step) => step?.action === 'offer_choices')
-            ? chosen.steps
-            : [
-                ...chosen.steps,
-                {
-                    action: 'offer_choices',
-                    text: '你要怎么继续？',
-                    choices: [
-                        { id: 'ask_more', label: '继续问', trigger: 'small_talk' },
-                        { id: 'walk_together', label: '一起走', trigger: 'request_company' },
-                        { id: 'help_out', label: '请他帮忙', trigger: 'request_help' },
-                        { id: 'comfort', label: '认真回应', trigger: 'comfort' }
-                    ]
-                }
-            ];
-        return {
-            branch_id: branchId,
-            title: chosen.title,
-            priority: 95,
-            ttl_ms: 45000,
-            trigger: {
-                player_action: action,
-                place_id: placeId || ''
-            },
-            summary: chosen.summary,
-            steps,
-            fallback_reason: reason
-        };
-    }
-
     function normalizeAllowedBehaviorPlaceIds(rawIds = []) {
         if (!Array.isArray(rawIds)) return [];
         return Array.from(new Set(rawIds
@@ -2529,6 +2244,21 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         return null;
     }
 
+    function normalizeBehaviorChoiceTrigger(choice = {}) {
+        const candidates = [
+            choice?.trigger,
+            choice?.action_id,
+            choice?.actionId,
+            choice?.next_action,
+            choice?.nextAction,
+            choice?.player_action,
+            choice?.playerAction,
+            choice?.id,
+            choice?.action
+        ].map((value) => limitText(value, 80));
+        return candidates.find((value) => behaviorPlayerInteractionActionSet.has(value)) || '';
+    }
+
     function sanitizeBehaviorSteps(rawSteps, allowedPlaceIds = [], maxSteps = 10, options = {}) {
         const allowedPlaceIdSet = new Set(normalizeAllowedBehaviorPlaceIds(allowedPlaceIds));
         const allowChoices = options.allowChoices !== false;
@@ -2557,21 +2287,30 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 if (step.reason !== undefined) normalized.reason = limitText(step.reason, 120);
                 if (step.importance !== undefined) normalized.importance = clamp(Number(step.importance) || 0.2, 0, 1);
                 if (allowChoices && Array.isArray(step.choices)) {
-                    normalized.choices = step.choices.slice(0, 4).map((choice, index) => {
+                    const normalizedChoices = step.choices.slice(0, 4).map((choice, index) => {
                         if (typeof choice === 'string') {
-                            return {
-                                id: `choice_${index + 1}`,
-                                label: limitText(choice, 24),
-                                trigger: ''
-                            };
+                            const label = limitText(choice, 24);
+                            const trigger = behaviorPlayerInteractionActionSet.has(label) ? label : '';
+                            return trigger ? { id: trigger, label, trigger } : null;
                         }
+                        if (!choice || typeof choice !== 'object') return null;
+                        const trigger = normalizeBehaviorChoiceTrigger(choice);
+                        if (!trigger) return null;
+                        const choicePlaceId = toAllowedBehaviorPlaceId(
+                            choice.place_id || choice.placeId || choice.to_place_id || choice.toPlaceId || '',
+                            allowedPlaceIdSet
+                        );
                         return {
-                            id: limitText(choice?.id || `choice_${index + 1}`, 40),
-                            label: limitText(choice?.label || choice?.text || `选项 ${index + 1}`, 24),
-                            trigger: limitText(choice?.trigger || '', 80)
+                            id: limitText(choice.id || trigger || `choice_${index + 1}`, 40),
+                            label: limitText(choice.label || choice.text || `选项 ${index + 1}`, 24),
+                            trigger,
+                            ...(choicePlaceId ? { place_id: choicePlaceId } : {})
                         };
-                    });
+                    }).filter(Boolean);
+                    if (action === 'offer_choices' && !normalizedChoices.length) return null;
+                    normalized.choices = normalizedChoices;
                 }
+                if (action === 'offer_choices' && !Array.isArray(normalized.choices)) return null;
                 return normalized;
             })
             .filter(Boolean)
@@ -2579,25 +2318,25 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
     }
 
     function sanitizeBehaviorBranch(rawBranch, char, payload = {}, fallbackReason = 'sanitize_empty', allowedPlaceIds = []) {
-        if (!rawBranch || typeof rawBranch !== 'object') return buildFallbackBehaviorBranch(char, payload, fallbackReason);
-        const fallback = buildFallbackBehaviorBranch(char, payload, fallbackReason);
+        if (!rawBranch || typeof rawBranch !== 'object') return null;
         const allowedPlaceIdSet = new Set(normalizeAllowedBehaviorPlaceIds(allowedPlaceIds));
         const steps = sanitizeBehaviorSteps(rawBranch.steps, allowedPlaceIds, 10, { allowChoices: true });
-        if (!steps.length) return fallback;
+        if (!steps.length) return null;
         const triggerPlaceId = toAllowedBehaviorPlaceId(
             rawBranch.trigger?.place_id || rawBranch.trigger?.placeId || payload?.player_event?.place_id || '',
             allowedPlaceIdSet
         );
+        const branchId = normalizeBehaviorNodeId(rawBranch.branch_id || rawBranch.id || `bt_${Date.now().toString(36)}`, 'branch');
         return {
-            branch_id: limitText(rawBranch.branch_id || rawBranch.id || fallback.branch_id, 80),
-            title: limitText(rawBranch.title || fallback.title, 80),
+            branch_id: branchId,
+            title: limitText(rawBranch.title || '玩家互动分支', 80),
             priority: clamp(Number(rawBranch.priority) || 95, 1, 100),
             ttl_ms: clamp(Number(rawBranch.ttl_ms || rawBranch.ttlMs) || 45000, 3000, 120000),
             trigger: {
                 player_action: limitText(rawBranch.trigger?.player_action || rawBranch.trigger?.playerAction || payload?.player_event?.action || 'greet', 60),
                 place_id: triggerPlaceId
             },
-            summary: limitText(rawBranch.summary || fallback.summary, 180),
+            summary: limitText(rawBranch.summary || '', 180),
             steps
         };
     }
@@ -2616,6 +2355,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const rawNode = patch.node && typeof patch.node === 'object' ? patch.node : null;
         const rawBranch = rawNode?.steps ? rawNode : (patch.branch || patch);
         const branch = sanitizeBehaviorBranch(rawBranch, char, payload, fallbackReason, allowedPlaceIds);
+        if (!branch) return null;
         const nodeId = normalizeBehaviorNodeId(rawNode?.id || rawNode?.node_id || branch.branch_id, 'branch');
         const requestedTargetNodeId = normalizeBehaviorNodeId(patch.target_node_id || patch.targetNodeId || 'player_interaction', 'target');
         const targetNodeId = behaviorPatchTargetIds.has(requestedTargetNodeId) ? requestedTargetNodeId : 'player_interaction';
@@ -2645,6 +2385,121 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         };
     }
 
+    function normalizeBehaviorRepeatText(value) {
+        return limitText(value, 320)
+            .toLowerCase()
+            .replace(/[\s"'“”‘’`.,，。！？!?、:：;；（）()[\]{}<>《》【】…—_\-~～]+/g, '');
+    }
+
+    function collectBehaviorNodeRepeatTexts(node = {}) {
+        const entries = [];
+        const pushText = (value, kind) => {
+            const text = limitText(value, 180);
+            const normalized = normalizeBehaviorRepeatText(text);
+            if (normalized.length < 10) return;
+            entries.push({ kind, text, normalized });
+        };
+        pushText(node.title, 'title');
+        pushText(node.summary, 'summary');
+        (Array.isArray(node.steps) ? node.steps : []).forEach((step) => {
+            const action = String(step?.action || '').trim();
+            if (!behaviorRepeatTextActions.has(action)) return;
+            pushText(step.text, action);
+        });
+        return entries;
+    }
+
+    function collectRecentBehaviorSpecialNodes(behaviorTree = {}) {
+        const nodes = behaviorTree?.nodes && typeof behaviorTree.nodes === 'object' ? behaviorTree.nodes : {};
+        const playerChildren = new Set(Array.isArray(nodes.player_interaction?.children_ids) ? nodes.player_interaction.children_ids : []);
+        const orderedIds = [];
+        const pushId = (value) => {
+            const id = limitText(value, 100);
+            if (id && !orderedIds.includes(id)) orderedIds.push(id);
+        };
+        pushId(behaviorTree.active_node_id);
+        (Array.isArray(behaviorTree.patch_history) ? behaviorTree.patch_history : []).forEach((item) => {
+            pushId(item?.node_id || item?.nodeId || item?.next_active_node_id || item?.nextActiveNodeId);
+        });
+        playerChildren.forEach(pushId);
+        Object.entries(nodes).forEach(([id, node]) => {
+            if (node?.branch_kind === 'special' || node?.branchKind === 'special') pushId(id);
+        });
+        return orderedIds
+            .map((id) => nodes[id])
+            .filter((node) => node && Array.isArray(node.steps) && (playerChildren.has(node.id) || node.branch_kind === 'special' || node.branchKind === 'special'))
+            .slice(0, 8);
+    }
+
+    function summarizeRecentBehaviorSpecialInteractions(behaviorTree = {}) {
+        return collectRecentBehaviorSpecialNodes(behaviorTree).slice(0, 6).map((node) => ({
+            node_id: limitText(node.id, 80),
+            title: limitText(node.title, 80),
+            summary: limitText(node.summary, 180),
+            texts: collectBehaviorNodeRepeatTexts(node).map((entry) => entry.text).slice(0, 6)
+        }));
+    }
+
+    function createBehaviorRepeatGrams(normalizedText) {
+        const text = String(normalizedText || '');
+        const size = text.length >= 18 ? 3 : 2;
+        const grams = new Set();
+        for (let index = 0; index <= text.length - size; index += 1) {
+            grams.add(text.slice(index, index + size));
+        }
+        return grams;
+    }
+
+    function getBehaviorRepeatSimilarity(leftText, rightText) {
+        const left = normalizeBehaviorRepeatText(leftText);
+        const right = normalizeBehaviorRepeatText(rightText);
+        if (left.length < 10 || right.length < 10) return 0;
+        if (left === right) return 1;
+        if (Math.min(left.length, right.length) >= 14 && (left.includes(right) || right.includes(left))) return 0.94;
+        const leftGrams = createBehaviorRepeatGrams(left);
+        const rightGrams = createBehaviorRepeatGrams(right);
+        if (!leftGrams.size || !rightGrams.size) return 0;
+        let overlap = 0;
+        leftGrams.forEach((gram) => {
+            if (rightGrams.has(gram)) overlap += 1;
+        });
+        const containment = overlap / Math.min(leftGrams.size, rightGrams.size);
+        const jaccard = overlap / (leftGrams.size + rightGrams.size - overlap);
+        return Math.max(jaccard, containment * 0.88);
+    }
+
+    function findDuplicateBehaviorInteraction(treePatch, inputPackage = {}) {
+        const node = treePatch?.node;
+        if (!node || node.branch_kind !== 'special') return null;
+        const behaviorTree = inputPackage?.behavior_tree && typeof inputPackage.behavior_tree === 'object' ? inputPackage.behavior_tree : {};
+        const existingNodes = behaviorTree.nodes && typeof behaviorTree.nodes === 'object' ? behaviorTree.nodes : {};
+        if (existingNodes[node.id]) {
+            return { reason: 'duplicate_node_id', node_id: node.id };
+        }
+        const generatedTexts = collectBehaviorNodeRepeatTexts(node).filter((entry) => entry.kind !== 'title' && entry.kind !== 'summary');
+        if (!generatedTexts.length) return null;
+        const recentEntries = collectRecentBehaviorSpecialNodes(behaviorTree)
+            .flatMap((recentNode) => collectBehaviorNodeRepeatTexts(recentNode)
+                .filter((entry) => entry.kind !== 'title' && entry.kind !== 'summary')
+                .map((entry) => ({
+                    ...entry,
+                    node_id: recentNode.id,
+                    title: recentNode.title || ''
+                })));
+        for (const generated of generatedTexts) {
+            const duplicate = recentEntries.find((entry) => getBehaviorRepeatSimilarity(generated.normalized, entry.normalized) >= 0.82);
+            if (duplicate) {
+                return {
+                    reason: 'duplicate_text',
+                    text: generated.text,
+                    previous_node_id: duplicate.node_id,
+                    previous_title: duplicate.title
+                };
+            }
+        }
+        return null;
+    }
+
     function inferBaseBehaviorTargetNode(triggerValue = '', fallback = 'wander') {
         const trigger = limitText(triggerValue, 100);
         if (trigger.includes('need') || trigger.includes('hunger') || trigger.includes('energy')) return 'hard_needs';
@@ -2654,99 +2509,6 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         if (trigger.includes('nearby')) return 'curiosity';
         if (trigger === 'idle') return 'idle_micro';
         return fallback;
-    }
-
-    function buildFallbackBaseBehaviorBranches(char, payload = {}, reason = 'local_fallback', allowedPlaceIds = []) {
-        const allowed = normalizeAllowedBehaviorPlaceIds(allowedPlaceIds);
-        const pick = (...ids) => ids.find((id) => allowed.includes(id)) || allowed[0] || '';
-        const cafe = pick('restaurant', 'convenience', 'agency');
-        const shop = pick('convenience', 'restaurant', 'agency');
-        const agency = pick('agency', 'convenience', 'restaurant');
-        const home = pick('home_exit', 'agency', 'restaurant');
-        const name = limitText(char?.name || '角色', 40);
-        return [
-            {
-                id: 'base_ai_morning_agency_walk',
-                target_node_id: 'routine_goal',
-                title: '基础：慢慢走到中介所',
-                priority: 76,
-                trigger: 'runtime_state.routine_tick',
-                summary: `${name}无互动时按自己的节奏从住处走到中介所。`,
-                steps: [
-                    { action: 'go_to_place', place_id: home, movement_style: 'normal' },
-                    { action: 'emote', text: '低头确认了一下口袋里的东西', duration_ms: 900 },
-                    { action: 'go_to_place', place_id: agency, movement_style: 'normal' },
-                    { action: 'say', text: '先看看今天有没有新消息。', duration_ms: 1100 },
-                    { action: 'idle_at_place', place_id: agency, movement_style: 'checking' }
-                ]
-            },
-            {
-                id: 'base_ai_cafe_refuel',
-                target_node_id: 'hard_needs',
-                title: '基础：去咖啡馆补一点精神',
-                priority: 82,
-                trigger: 'runtime_state.need_high',
-                summary: `${name}状态低时会去餐饮点附近短暂停留。`,
-                steps: [
-                    { action: 'go_to_place', place_id: cafe, movement_style: 'slow' },
-                    { action: 'say', text: '买点热的，脑子会清醒一点。', duration_ms: 1100 },
-                    { action: 'idle_at_place', place_id: cafe, movement_style: 'resting' }
-                ]
-            },
-            {
-                id: 'base_ai_shop_cafe_wander',
-                target_node_id: 'wander',
-                title: '基础：便利店和咖啡馆之间闲逛',
-                priority: 38,
-                trigger: 'otherwise',
-                summary: `${name}没有目标时在街区右侧来回走动。`,
-                steps: [
-                    { action: 'wander_between', from_place_id: shop, to_place_id: cafe, movement_style: 'window_shopping' },
-                    { action: 'say', text: '从这边走过去刚好。', duration_ms: 900 },
-                    { action: 'wander_between', from_place_id: cafe, to_place_id: shop, movement_style: 'window_shopping' }
-                ]
-            },
-            {
-                id: 'base_ai_agency_window',
-                target_node_id: 'place_affordance',
-                title: '基础：在中介所前看橱窗',
-                priority: 68,
-                trigger: 'location.has_affordance',
-                summary: `${name}经过中介所时会看看橱窗内容。`,
-                steps: [
-                    { action: 'browse_near', place_id: agency, movement_style: 'window_shopping' },
-                    { action: 'say', text: '这套看起来还不错。', duration_ms: 1000 },
-                    { action: 'loop_in_front_of', place_id: agency, movement_style: 'small_loop' }
-                ]
-            },
-            {
-                id: 'base_ai_player_glance',
-                target_node_id: 'curiosity',
-                title: '基础：注意到玩家但不打断',
-                priority: 54,
-                trigger: 'nearby_place_or_player',
-                summary: `${name}靠近玩家时会有轻微反应，但不会主动打开互动。`,
-                steps: [
-                    { action: 'approach_player', movement_style: 'curious' },
-                    { action: 'face_player' },
-                    { action: 'emote', text: '看了你一眼，又把视线挪开', duration_ms: 1000 }
-                ]
-            },
-            {
-                id: 'base_ai_quiet_mood_walk',
-                target_node_id: 'background_mood',
-                title: '基础：心情放慢到咖啡馆',
-                priority: 60,
-                trigger: 'runtime_state.mood_idle',
-                summary: '大输入只影响语气和轻微情绪，角色不会因为私聊或商业街活动改目标。',
-                steps: [
-                    { action: 'go_to_place', place_id: cafe, movement_style: 'distracted' },
-                    { action: 'emote', text: '走着走着忽然慢了一点', duration_ms: 900 },
-                    { action: 'say', text: '今天街上有点安静。', duration_ms: 1000 },
-                    { action: 'idle_at_place', place_id: cafe, movement_style: 'quiet' }
-                ]
-            }
-        ].filter((branch) => sanitizeBehaviorSteps(branch.steps, allowed, 12, { allowChoices: false }).length);
     }
 
     function sanitizeBaseBehaviorBranch(rawBranch, char, payload = {}, fallbackReason = 'base_branch_invalid', allowedPlaceIds = []) {
@@ -2789,14 +2551,6 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             .map((branch) => sanitizeBaseBehaviorBranch(branch, char, payload, fallbackReason, allowedPlaceIds))
             .filter(Boolean)
             .slice(0, 20);
-        let fallback = false;
-        if (!patches.length) {
-            fallback = true;
-            patches = buildFallbackBaseBehaviorBranches(char, payload, fallbackReason, allowedPlaceIds)
-                .map((branch) => sanitizeBaseBehaviorBranch(branch, char, payload, fallbackReason, allowedPlaceIds))
-                .filter(Boolean)
-                .slice(0, 20);
-        }
         const baseBranches = patches.map((patch) => ({
             id: patch.node.id,
             branch_id: patch.node.id,
@@ -2809,7 +2563,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             steps: patch.node.steps,
             branch_kind: 'base'
         }));
-        return { base_branches: baseBranches, base_patches: patches, fallback };
+        return { base_branches: baseBranches, base_patches: patches, fallback: false };
     }
 
     function summarizeBehaviorCharacter(char) {
@@ -2944,6 +2698,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             },
             player_event: payload.player_event || {},
             behavior_tree: payload.behavior_tree && typeof payload.behavior_tree === 'object' ? payload.behavior_tree : null,
+            recent_special_interactions: summarizeRecentBehaviorSpecialInteractions(payload.behavior_tree || {}),
             world,
             input_policy: {
                 large_input_enabled: true,
@@ -2972,13 +2727,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const apiKey = usePayloadCredentials ? payloadKey : String(char?.api_key || '').trim();
         const modelName = limitText(payload.model_name || payload.model || char?.model_name || '', 200);
         if (!apiEndpoint || !apiKey || !modelName) {
-            const branch = buildFallbackBehaviorBranch(char, payload, 'missing_model_config');
-            return {
-                branch,
-                tree_patch: sanitizeBehaviorTreePatch({ node: branch, target_node_id: 'player_interaction' }, char, payload, 'missing_model_config', inputPackage?.world?.allowed_place_ids || []),
-                raw_output: '',
-                fallback: true
-            };
+            throw createCityError('行为树生成缺少模型 URL/Key/模型名，请补全后重试。', 400, true);
         }
         const messages = [
             {
@@ -2991,6 +2740,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                     '本接口正在响应玩家互动，所以 patch.operation 固定为 upsert_child，target_node_id 必须是 player_interaction，并设置 next_active_node_id 为本次 node.id。',
                     '这通常是玩家在预制互动枝丫末尾选择某个回应后的后续枝丫；请承接 input.player_event，不要重复预制开场。',
                     '除非明确要结束互动，否则特殊枝丫最后一步必须是 offer_choices，给 2-4 个玩家回应选项；choice.trigger 必须来自玩家互动动作白名单。',
+                    'input.recent_special_interactions 是最近特殊互动台词，禁止复写这些台词、开头、收尾或同一情绪推进。',
                     '你可以读取 input.large_input，但它只是背景材料。最近私聊、朋友圈、商业街活动记录、公告任务不能作为小人移动、发起互动、改变目的地或重写基础枝丫的原因。',
                     '特殊枝丫只能由当前 input.player_event 触发；基础枝丫只由 runtime_state、location、nearby_player、otherwise、idle 等本地运行时触发。',
                     '角色可以自由决定在商业街做什么，但不要输出 x/y、像素坐标、锚点或碰撞信息。',
@@ -3007,6 +2757,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                     '优先且只响应当前 player_event。large_input.preamble 可以帮助理解角色语气和背景，但不要因为最近私聊或商业街活动记录让角色行动。',
                     '请把玩家互动造成的分歧写成 player_interaction 下的新 ActionSequence 节点；不要改写基础枝丫，除非输入明确要求重规划角色的无互动默认行为。',
                     '如果 input.behavior_tree.patch_history 里已有上一轮互动，请让新 node 承接上一轮，而不是重复开场。',
+                    '如果 input.recent_special_interactions 有内容，请承接最近状态并换新的推进，不要复用里面的句子或相同问法。',
                     '最后给出 offer_choices 让玩家继续选择；这些选择会触发下一轮特殊枝丫生成。',
                     'world 是语义街区，不是大世界地图；不要让角色选择具体像素点。',
                     'world.places_ordered 是从左到右的可用建筑表，world.allowed_place_ids 是唯一可用地点 ID 白名单。',
@@ -3026,19 +2777,25 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             temperature: 0.72
         });
         let parsed = null;
-        let parseError = '';
         try {
             parsed = parseJsonObjectFromLlmText(rawOutput);
         } catch (err) {
-            parseError = err.message || 'parse_failed';
+            throw createCityError(`行为树生成返回的 JSON 无法解析，请重试：${err.message || 'parse_failed'}`, 502, true);
         }
         const treePatch = sanitizeBehaviorTreePatch(
             parsed,
             char,
             payload,
-            parseError ? `model_output_parse_failed:${parseError}` : 'model_output_invalid',
+            'model_output_invalid',
             inputPackage?.world?.allowed_place_ids || []
         );
+        if (!treePatch) {
+            throw createCityError('行为树生成结果没有可用的行为步骤，请重试。', 502, true);
+        }
+        const duplicate = findDuplicateBehaviorInteraction(treePatch, inputPackage);
+        if (duplicate) {
+            throw createCityError('特殊枝丫生成疑似重复上一轮内容，请重试。', 502, true);
+        }
         const branch = {
             branch_id: treePatch.node.id,
             title: treePatch.node.title,
@@ -3052,7 +2809,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             tree_patch: treePatch,
             branch,
             raw_output: String(rawOutput || ''),
-            fallback: !parsed || Boolean(branch.fallback_reason)
+            fallback: false
         };
     }
 
@@ -3068,11 +2825,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             output_contract: getBehaviorBaseOutputContract(inputPackage?.world || {})
         };
         if (!apiEndpoint || !apiKey || !modelName) {
-            return {
-                ...sanitizeBaseBehaviorBranchPack(null, char, payload, 'missing_model_config', inputPackage?.world?.allowed_place_ids || []),
-                raw_output: '',
-                fallback: true
-            };
+            throw createCityError('基础枝丫生成缺少模型 URL/Key/模型名，请补全后重试。', 400, true);
         }
         const messages = [
             {
@@ -3114,23 +2867,25 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             temperature: 0.76
         });
         let parsed = null;
-        let parseError = '';
         try {
             parsed = parseJsonObjectFromLlmText(rawOutput);
         } catch (err) {
-            parseError = err.message || 'parse_failed';
+            throw createCityError(`基础枝丫生成返回的 JSON 无法解析，请重试：${err.message || 'parse_failed'}`, 502, true);
         }
         const sanitized = sanitizeBaseBehaviorBranchPack(
             parsed,
             char,
             payload,
-            parseError ? `model_output_parse_failed:${parseError}` : 'model_output_invalid',
+            'model_output_invalid',
             inputPackage?.world?.allowed_place_ids || []
         );
+        if (!sanitized.base_patches.length) {
+            throw createCityError('基础枝丫生成结果没有可用的行为步骤，请重试。', 502, true);
+        }
         return {
             ...sanitized,
             raw_output: String(rawOutput || ''),
-            fallback: !parsed || sanitized.fallback
+            fallback: false
         };
     }
 
@@ -3170,17 +2925,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             const char = req.db.getCharacter(req.params.characterId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
             const input = await buildBehaviorInputPackage(req.user.id, req.db, char, req.body || {});
-            let generated;
-            try {
-                generated = await createBaseBehaviorBranchesWithModel(char, input, req.body || {});
-            } catch (modelErr) {
-                generated = {
-                    ...sanitizeBaseBehaviorBranchPack(null, char, req.body || {}, modelErr.message || 'model_call_failed', input?.world?.allowed_place_ids || []),
-                    raw_output: '',
-                    fallback: true,
-                    error: modelErr.message
-                };
-            }
+            const generated = await createBaseBehaviorBranchesWithModel(char, input, req.body || {});
             res.json({
                 success: true,
                 skeleton: getBehaviorTreeSkeleton(),
@@ -3195,7 +2940,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 error: generated.error || ''
             });
         } catch (e) {
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({
+                error: e.message,
+                ...(e.canRetry ? { canRetry: true } : {})
+            });
         }
     });
 
@@ -3205,19 +2953,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             const char = req.db.getCharacter(req.params.characterId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
             const input = await buildBehaviorInputPackage(req.user.id, req.db, char, req.body || {});
-            let generated;
-            try {
-                generated = await createBehaviorBranchWithModel(char, input, req.body || {});
-            } catch (modelErr) {
-                const branch = buildFallbackBehaviorBranch(char, req.body || {}, modelErr.message || 'model_call_failed');
-                generated = {
-                    branch,
-                    tree_patch: sanitizeBehaviorTreePatch({ node: branch, target_node_id: 'player_interaction' }, char, req.body || {}, modelErr.message || 'model_call_failed', input?.world?.allowed_place_ids || []),
-                    raw_output: '',
-                    fallback: true,
-                    error: modelErr.message
-                };
-            }
+            const generated = await createBehaviorBranchWithModel(char, input, req.body || {});
             res.json({
                 success: true,
                 skeleton: getBehaviorTreeSkeleton(),
@@ -3229,7 +2965,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 error: generated.error || ''
             });
         } catch (e) {
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({
+                error: e.message,
+                ...(e.canRetry ? { canRetry: true } : {})
+            });
         }
     });
 
@@ -3404,11 +3143,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                         if (!cityActivityEnabled && physiologyPaused) return;
 
                         const districts = db.city.getEnabledDistricts();
-                        const metabolismRate = parseInt(config.metabolism_rate) || 20;
 
                     // Adjust metabolism drain to be per-minute based (originally 20 per 15-min tick)
                     // If old tick means 20 cals/15min, then 1 min = 20/15 = 1.33 cals per real-time minute.
-                        const minuteMetabolism = Math.max(1, Math.round(metabolismRate / 15));
+                        const minuteMetabolism = normalizeMetabolismPerMinute(config);
 
                         const characters = db.getCharacters().filter(c =>
                             c.status === 'active' && c.sys_survival !== 0
@@ -3693,10 +3431,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             return;
         }
 
-        // No API -> rule-based fallback
+        // Missing model config -> skip autonomous actions. Passive survival
+        // ticks above still run, but city actions require generated intent/logs.
         const activeEvents = db.city.getActiveEvents();
         if (!char.api_endpoint || !char.api_key || !char.model_name) {
-            await applyDecision(selectRandomDistrict(districts, char), char, db, userId, currentCals, config, activeEvents);
             return;
         }
 
@@ -3775,152 +3513,60 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 })
             });
             recordCityLlmDebug(db, char, 'output', 'city_action_decision', reply, { model: char.model_name, location: char.location || '', status: currentCityStatus });
-            let codeMatch = null;
-            let richNarrations = null;
-            try {
-                // Pre-clean the reply: remove markdown fences common in LLM outputs
-                const cleaned = reply.replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
-                const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    let jsonStr = jsonMatch[0];
-                    try {
-                        richNarrations = JSON.parse(jsonStr);
-                    } catch (parseErr) {
-                        // Advanced cleanup for common LLM JSON errors: trailing commas, unescaped newlines in strings, and comments
-                        jsonStr = jsonStr.replace(/,\s*([\]}])/g, '$1')
-                            .replace(/\/\/.*$/gm, '')
-                            .replace(/(?<!\\)\n/g, '\\n') // Escape unescaped newlines
-                            .replace(/\\n\s*}/, '\n}') // Restore structural newlines
-                            .replace(/{\s*\\n/, '{\n');
-                        try {
-                            richNarrations = JSON.parse(jsonStr);
-                        } catch (e2) {
-                            console.error(`[City] JSON advanced recovery parsing error for ${char.name}:`, e2.message);
-                            console.log(`[City] Problematic JSON string:`, jsonStr.substring(0, 200));
-                        }
-                    }
-                    if (richNarrations) {
-                        codeMatch = richNarrations.action?.match(/\[([A-Z_]+)\]/)?.[1]?.toLowerCase();
-                    }
-                }
-            } catch (e) {
-                console.error(`[City] Unexpected JSON regex error for ${char.name}:`, e.message);
-                console.error(`[City] Raw reply was:`, reply.substring(0, 200));
+            const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+            if (!cleaned) throw new Error('商业街行动生成失败：模型没有返回 JSON 对象，请重试。');
+            const richNarrations = JSON.parse(cleaned);
+            if (!richNarrations || typeof richNarrations !== 'object' || Array.isArray(richNarrations)) {
+                throw new Error('商业街行动生成失败：JSON 结构无效，请重试。');
             }
-            if (!codeMatch) codeMatch = reply.match(/\[([A-Z_]+)\]/)?.[1]?.toLowerCase();
-
-            const salvageQuestIntentFromReply = () => {
-                const raw = String(reply || '');
-                const questBlock = raw.match(/['"]?quest_intent['"]?\s*:\s*\{([\s\S]*?)\}/i);
-                if (!questBlock) return null;
-                const body = questBlock[1] || '';
-                const idMatch = body.match(/['"]?(?:quest_id|id)['"]?\s*:\s*([0-9]+)/i);
-                const stageMatch = body.match(/['"]?stage['"]?\s*:\s*['"]?([a-z_]+)/i);
-                const questId = Number(idMatch?.[1] || 0);
-                const stage = String(stageMatch?.[1] || '').trim().toLowerCase();
-                if (!questId || !['claim', 'progress', 'report'].includes(stage)) return null;
-                return { quest_id: questId, stage };
-            };
-
-            // Salvage non-JSON responses
-            // If the LLM completely ignored JSON formatting but still gave us an action tag + some text,
-            // we fabricate a richNarrations object using its raw text so we don't lose the flavor.
-            if (codeMatch && !richNarrations) {
-                // Strip markdown backticks
-                let safeReply = reply.replace(/```(json)?\s*/gi, '').replace(/```/g, '').trim();
-
-                // Aggressive extraction of fields, ignoring strict JSON rules
-                const extractField = (fieldName) => {
-                    // Matches "fieldName":"(anything)" or 'fieldName':'(anything)' across multiple lines until the next obvious key or end of string
-                    const regex = new RegExp(`['"]?${fieldName}['"]?\\s*:\\s*['"]([\\s\\S]*?)(?=['"]?\\s*(?:,|}|$|['"]?\\w+['"]?\\s*:))`, 'i');
-                    const match = safeReply.match(regex);
-                    if (match && match[1]) {
-                        return match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\'/g, "'").trim();
-                    }
-                    return '';
-                };
-
-                const logText = extractField('log');
-                const chatText = extractField('chat');
-                const momentText = extractField('moment');
-                const diaryText = extractField('diary');
-
-                if (logText || chatText || momentText || diaryText) {
-                    richNarrations = {
-                        log: logText || buildCollapsedCityLog(char, '行动文案字段缺失', {
-                            locationLabel: String(codeMatch || '').toUpperCase()
-                        }),
-                        chat: chatText,
-                        moment: momentText,
-                        diary: diaryText
-                    };
-                } else {
-                    // Absolute last resort: clean up obvious JSON structure lines
-                    safeReply = safeReply
-                        .replace(/^\{|\}$/g, '') // remove outer braces
-                        .replace(/['"]?action['"]?\s*:\s*['"]?\[?[a-zA-Z_]+\]?['"]?,?/gi, '') // remove action line
-                        .replace(/['"]\w+['"]\s*:\s*/g, '') // remove "key": prefixes
-                        .replace(/["']/g, '') // remove floating quotes
-                        .replace(/,/g, '') // remove commas
-                        .trim();
-
-                    richNarrations = {
-                        log: safeReply || buildCollapsedCityLog(char, '行动响应解析失败', {
-                            locationLabel: String(codeMatch || '').toUpperCase()
-                        }),
-                        chat: '',
-                        moment: '',
-                        diary: ''
-                    };
-                }
-                console.log(`[City] ${char.name} 非 JSON 回复抢救成功，已提取 Action: ${codeMatch.toUpperCase()}`);
+            const codeMatch = String(richNarrations.action || '').match(/^\[([A-Z_]+)\]$/)?.[1]?.toLowerCase();
+            if (!codeMatch) {
+                throw new Error('商业街行动生成失败：缺少有效 action 标签，请重试。');
             }
-            const salvagedQuestIntent = salvageQuestIntentFromReply();
-            if (richNarrations && salvagedQuestIntent && (!richNarrations.quest_intent || typeof richNarrations.quest_intent !== 'object')) {
-                richNarrations.quest_intent = salvagedQuestIntent;
-                console.log(`[City] ${char.name} 坏格式回复中抢救 quest_intent: QUEST_${salvagedQuestIntent.quest_id}/${salvagedQuestIntent.stage}`);
+            const generatedLog = String(richNarrations.log || '').trim();
+            if (!generatedLog) {
+                throw new Error('商业街行动生成失败：缺少可用 log，请重试。');
             }
 
             // Handle EAT_ITEM action
             if (codeMatch === 'eat_item') {
                 const foodItems = db.city.getInventoryFoodItems(char.id);
-                if (foodItems.length > 0) {
-                    const food = foodItems[0];
-                    db.city.removeFromInventory(char.id, food.item_id, 1);
-                    const newCals = Math.min(4000, currentCals + food.cal_restore);
-                    const satietyBoost = clamp(Math.round((food.cal_restore || 0) / 18), 8, 28);
-                    const loadBoost = clamp(Math.round((food.cal_restore || 0) / 24), 6, 22);
-                    const eatItemState = applyStateEffectsToCharacter(char, {
-                        energy: 8,
-                        stress: -4,
-                        mood: 3,
-                        health: 1,
-                        satiety: satietyBoost,
-                        stomach_load: loadBoost,
-                        sleep_debt: Math.round(loadBoost * 0.6)
-                    });
-                    const eatItemPatch = { calories: newCals, city_status: newCals > 500 ? 'idle' : 'hungry', ...eatItemState };
-                    db.updateCharacter(char.id, eatItemPatch);
-                    logEmotionTransitionToState(
-                        db,
-                        char,
-                        { ...char, ...eatItemPatch },
-                        'city_eat_item',
-                        `角色主动吃了背包中的 ${food.name}，生理状态和主情绪发生变化。`
-                    );
-                    const currentDistrict = char.location ? db.city.getDistrict(char.location) : null;
-                    const eatLog = String(richNarrations?.log || '').trim() || buildCollapsedCityLog(char, '背包进食文案生成失败', {
-                        district: currentDistrict || { id: char.location || 'unknown', name: char.location || '当前位置', emoji: '' }
-                    });
-                    db.city.logAction(char.id, 'EAT', eatLog, food.cal_restore, 0);
-                    broadcastCityEvent(userId, char.id, 'EAT', eatLog);
-                    if (richNarrations) broadcastCityToChat(userId, char, eatLog, 'EAT', richNarrations);
-                    console.log(`[City] ${char.name} -> 🍜 吃 ${food.name}`);
-                    return;
-                }
+                if (!foodItems.length) throw new Error('商业街行动生成失败：模型选择 EAT_ITEM，但背包没有可食用物品，请重试。');
+                const food = foodItems[0];
+                db.city.removeFromInventory(char.id, food.item_id, 1);
+                const newCals = Math.min(4000, currentCals + food.cal_restore);
+                const satietyBoost = clamp(Math.round((food.cal_restore || 0) / 18), 8, 28);
+                const loadBoost = clamp(Math.round((food.cal_restore || 0) / 24), 6, 22);
+                const eatItemState = applyStateEffectsToCharacter(char, {
+                    energy: 8,
+                    stress: -4,
+                    mood: 3,
+                    health: 1,
+                    satiety: satietyBoost,
+                    stomach_load: loadBoost,
+                    sleep_debt: Math.round(loadBoost * 0.6)
+                });
+                const eatItemPatch = { calories: newCals, city_status: newCals > 500 ? 'idle' : 'hungry', ...eatItemState };
+                db.updateCharacter(char.id, eatItemPatch);
+                logEmotionTransitionToState(
+                    db,
+                    char,
+                    { ...char, ...eatItemPatch },
+                    'city_eat_item',
+                    `角色主动吃了背包中的 ${food.name}，生理状态和主情绪发生变化。`
+                );
+                const eatLog = generatedLog;
+                db.city.logAction(char.id, 'EAT', eatLog, food.cal_restore, 0);
+                broadcastCityEvent(userId, char.id, 'EAT', eatLog);
+                broadcastCityToChat(userId, char, eatLog, 'EAT', richNarrations);
+                console.log(`[City] ${char.name} -> 🍜 吃 ${food.name}`);
+                return;
             }
 
-            const district = districts.find(d => d.id === codeMatch) || selectRandomDistrict(districts, char);
+            const district = districts.find(d => d.id === codeMatch);
+            if (!district) {
+                throw new Error(`商业街行动生成失败：action 不在可选地点中 (${codeMatch})，请重试。`);
+            }
 
             // Schedule adherence tracking
             if (schedule) {
@@ -3958,22 +3604,6 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             await applyDecision(district, char, db, userId, currentCals, config, activeEvents, richNarrations, { preserveDirectedDistrict: true });
         } catch (e) {
             console.error(`[City] ${char.name} LLM 失败: ${e.message}`);
-            const currentDistrict = (char.location && db.city.getDistrict(char.location))
-                || districts.find(d => d.id === char.location)
-                || null;
-            const collapsedErrorLog = buildCollapsedCityLog(char, 'API连接失败，本轮商业街行动已取消', {
-                district: currentDistrict,
-                locationLabel: currentDistrict ? '' : (char.location || '原地')
-            });
-            db.city.logAction(
-                char.id,
-                'ERROR',
-                collapsedErrorLog,
-                0,
-                0,
-                currentDistrict?.id || char.location || 'unknown'
-            );
-            broadcastCityEvent(userId, char.id, 'ERROR', collapsedErrorLog);
             return;
         }
     }
@@ -4121,19 +3751,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
             });
             recordCityLlmDebug(db, char, 'output', 'city_schedule_generate', reply, { model: char.model_name });
             const plan = tryParseScheduleReply(reply);
-            if (plan) {
-                // Validate: each entry must have hour and action
-                const valid = plan.filter(e => typeof e.hour === 'number' && typeof e.action === 'string');
-                if (valid.length > 0) {
-                    db.city.saveSchedule(char.id, today, valid);
-                    const summary = valid.slice(0, 3).map(e => `${e.hour}:00 ${e.action}`).join(' -> ');
-                    db.city.logAction(char.id, 'PLAN', `${char.name} 制定了今日计划：${summary}... 📝`, 0, 0);
-                    console.log(`[City] ${char.name} 📝 日程已生成 (${valid.length} 个时段)`);
+            const valid = normalizeGeneratedSchedulePlan(plan, districts);
+            if (valid) {
+                db.city.saveSchedule(char.id, today, valid);
+                const summary = valid.slice(0, 3).map(e => `${e.hour}:00 ${e.action}`).join(' -> ');
+                db.city.logAction(char.id, 'PLAN', `${char.name} 制定了今日计划：${summary}... 📝`, 0, 0);
+                console.log(`[City] ${char.name} 📝 日程已生成 (${valid.length} 个时段)`);
 
-                    // Broadcast success
-                    broadcastCityEvent(context.userId, char.id, 'schedule_updated', valid);
-                    return true;
-                }
+                // Broadcast success
+                broadcastCityEvent(context.userId, char.id, 'schedule_updated', valid);
+                return true;
             }
             // Failed: log the raw reply for debugging
             const snippet = reply.substring(0, 200);
@@ -4198,7 +3825,6 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         callLLM,
         recordCityLlmDebug,
         buildCityAttemptRecorder,
-        buildCollapsedCityLog,
         scoreQuestProgressWithMayor: (...args) => mayorService.scoreQuestProgressWithMayor(...args)
     });
 
@@ -4207,20 +3833,16 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const match = raw.match(/\[WEB_SEARCH_INTENT:\s*([\s\S]*?)\]/i);
         if (!match) return null;
         const payload = String(match[1] || '').trim();
-        if (!payload) return { reason: '', query_hint: '' };
+        if (!payload) return null;
         try {
-            const start = payload.indexOf('{');
-            const end = payload.lastIndexOf('}');
-            const parsed = JSON.parse(start >= 0 && end > start ? payload.slice(start, end + 1) : payload);
-            return {
+            const parsed = JSON.parse(payload);
+            const intent = {
                 reason: String(parsed?.reason || '').trim(),
                 query_hint: String(parsed?.query_hint || parsed?.query || '').trim()
             };
+            return intent.reason || intent.query_hint ? intent : null;
         } catch (e) {
-            return {
-                reason: payload.replace(/[{}"']/g, '').slice(0, 120),
-                query_hint: payload.replace(/[{}"']/g, '').slice(0, 160)
-            };
+            return null;
         }
     }
 
@@ -4270,11 +3892,10 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
     }
 
     async function planCityWebSearchQuery(db, char, district, intent, baseLog) {
-        const fallbackQuery = String(intent?.query_hint || baseLog || `${district?.name || ''} 最新信息`).trim().slice(0, 180);
         const endpoint = String(char.memory_api_endpoint || char.api_endpoint || '').trim();
         const key = String(char.memory_api_key || char.api_key || '').trim();
         const model = String(char.memory_model_name || char.model_name || '').trim();
-        if (!endpoint || !key || !model) return { queries: fallbackQuery ? [fallbackQuery] : [], provider: 'auto' };
+        if (!endpoint || !key || !model) throw new Error('联网查询规划缺少模型配置，请重试。');
         const prompt = [
             '你是商业街联网查询规划器，只负责把角色的查询意图变成搜索关键词。',
             '不要角色扮演，不要写活动文本，只返回 JSON。',
@@ -4304,19 +3925,21 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
                 debugAttempt: buildCityAttemptRecorder(db, char, 'city_web_query_plan', { location: district?.id || '' })
             });
             recordCityLlmDebug(db, char, 'output', 'city_web_query_plan', reply, { model, location: district?.id || '' });
-            const jsonMatch = String(reply || '').match(/\{[\s\S]*\}/);
-            const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+            const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+            if (!cleaned) throw new Error('联网查询规划没有返回 JSON，请重试。');
+            const parsed = JSON.parse(cleaned);
             const queries = (Array.isArray(parsed.queries) ? parsed.queries : [])
                 .map(item => String(item || '').trim())
                 .filter(Boolean)
                 .slice(0, 2);
+            if (!queries.length) throw new Error('联网查询规划缺少可用查询词，请重试。');
             return {
-                queries: queries.length ? queries : (fallbackQuery ? [fallbackQuery] : []),
+                queries,
                 provider: String(parsed.provider || 'auto').trim() || 'auto'
             };
         } catch (e) {
             console.warn(`[City/Web] 查询规划失败 ${char.name}: ${e.message}`);
-            return { queries: fallbackQuery ? [fallbackQuery] : [], provider: 'auto' };
+            throw e;
         }
     }
 
@@ -4359,13 +3982,14 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         const intent = parseCityWebIntentTag(preReply);
         if (!intent) return null;
 
-        const preLog = stripCityWebIntentTag(preReply) || `${char.name} 在 ${locationLabel} 低头划开手机，想查查${intent.query_hint || '一点消息'}。`;
-        db.city.logAction(char.id, 'WEB_SEARCH', preLog, 0, 0, district?.id || char.location || '');
-        broadcastCityEvent(userId, char.id, 'WEB_SEARCH', preLog);
-
         const plan = await planCityWebSearchQuery(db, char, district, intent, baseLog);
         const query = String(plan.queries?.[0] || intent.query_hint || '').trim();
-        if (!query) return { moneyDelta: 0, calorieDelta: 0, stateEffects: { stress: 1 } };
+        if (!query) throw new Error('联网查询规划缺少可用查询词，请重试。');
+
+        const preLog = stripCityWebIntentTag(preReply);
+        if (!preLog) throw new Error('联网前活动文案为空，请重试。');
+        db.city.logAction(char.id, 'WEB_SEARCH', preLog, 0, 0, district?.id || char.location || '');
+        broadcastCityEvent(userId, char.id, 'WEB_SEARCH', preLog);
 
         const resolved = mcpLabTools.resolveSearchProvider(db, plan.provider || 'auto');
         const labDb = mcpLabTools.ensureMcpLabDb(db);
@@ -4549,9 +4173,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         recordCityLlmDebug,
         resolveMayorAiCharacter: (...args) => mayorService.resolveMayorAiCharacter(...args),
         parseMayorJsonReply: (...args) => mayorService.parseMayorJsonReply(...args),
-        applyMayorDecisions: (...args) => mayorService.applyMayorDecisions(...args),
-        publishQuestAnnouncement,
-        recordMayorAnnouncement
+        applyMayorDecisions: (...args) => mayorService.applyMayorDecisions(...args)
     });
 
     function resolveMayorAiCharacter(db) {
@@ -4588,10 +4210,6 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
 
     async function applyMayorDecisions(db, decision, aiChar = null) {
         return mayorService.applyMayorDecisions(db, decision, aiChar);
-    }
-
-    function applyFallbackMayorDecisions(db) {
-        return mayorRuntimeService.applyFallbackMayorDecisions(db);
     }
 
     registerEventQuestRoutes(app, {
@@ -4767,10 +4385,77 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
 
     // Phase 7: Time Skip Schedule Backfill
 
+    function parseTimeSkipBackfillReply(reply, char) {
+        const cleaned = String(reply || '').replace(/```(?:json)?\s*/gi, '').replace(/```/g, '').trim();
+        if (!cleaned) {
+            throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：模型没有返回 JSON，请重试。`, 502, true);
+        }
+        try {
+            const parsed = JSON.parse(cleaned);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+                throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：结果不是 JSON 对象，请重试。`, 502, true);
+            }
+            return parsed;
+        } catch (err) {
+            if (err?.canRetry) throw err;
+            throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：JSON 无法解析，请重试。`, 502, true);
+        }
+    }
+
+    function normalizeTimeSkipBackfillResult(raw, missedTasks = [], char = null) {
+        const summary = String(raw?.summary || '').trim();
+        if (!summary) {
+            throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：缺少 summary，请重试。`, 502, true);
+        }
+        if (!Array.isArray(raw?.tasks_completed) || !Array.isArray(raw?.tasks_missed)) {
+            throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：缺少任务完成/错过数组，请重试。`, 502, true);
+        }
+
+        const missedHourSet = new Set(missedTasks.map(task => Number(task.hour)).filter(hour => Number.isSafeInteger(hour)));
+        const normalizeHours = (values, label) => {
+            const result = [];
+            for (const value of values) {
+                const hour = Number(value);
+                if (!Number.isSafeInteger(hour) || hour < 0 || hour > 23) {
+                    throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：${label} 含无效小时，请重试。`, 502, true);
+                }
+                if (!missedHourSet.has(hour)) {
+                    throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：${label} 包含未跳过的任务，请重试。`, 502, true);
+                }
+                if (!result.includes(hour)) result.push(hour);
+            }
+            return result;
+        };
+
+        const tasksCompleted = normalizeHours(raw.tasks_completed, 'tasks_completed');
+        const tasksMissed = normalizeHours(raw.tasks_missed, 'tasks_missed');
+        const classified = new Set([...tasksCompleted, ...tasksMissed]);
+        for (const hour of missedHourSet) {
+            if (!classified.has(hour)) {
+                throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：有跳过任务没有被分类，请重试。`, 502, true);
+            }
+        }
+        for (const hour of tasksCompleted) {
+            if (tasksMissed.includes(hour)) {
+                throw createCityError(`${char?.name || '角色'} 时间跳过回溯生成失败：同一任务同时完成和错过，请重试。`, 502, true);
+            }
+        }
+
+        return {
+            summary,
+            tasks_completed: tasksCompleted,
+            tasks_missed: tasksMissed,
+            chat: String(raw?.chat || '').trim(),
+            moment: String(raw?.moment || '').trim(),
+            diary: String(raw?.diary || '').trim()
+        };
+    }
+
     async function runTimeSkipBackfill(db, oldCityDate, newCityDate, userId) {
         console.log(`[City DLC] ⏩ 触发时空飞跃推算: ${oldCityDate.toLocaleString()} -> ${newCityDate.toLocaleString()}`);
 
         let processedTasks = 0;
+        const backfillResults = [];
         const wsClients = getWsClients(userId);
 
         // Broadcast start
@@ -4780,7 +4465,7 @@ B=${charB.name}(${personaB}) | 背包=${invBStr} | 金币=${charB.wallet ?? 0} |
         }
 
         // Find all characters with active APIs (whether scheduled or not)
-        const characters = db.getCharacters().filter(c => c.api_endpoint && c.api_key);
+        const characters = db.getCharacters().filter(c => c.api_endpoint && c.api_key && c.model_name);
 
         for (const char of characters) {
             const userProfile = typeof db.getUserProfile === 'function' ? db.getUserProfile() : null;
@@ -4853,41 +4538,32 @@ ${missedTaskText}
   "diary": "写一段内心独白式日记，可以反思，也可以抱怨"
 }`;
 
-            let fallbackToOrdinary = false;
-            let result = null;
-
+            const messages = [{ role: 'user', content: prompt }];
+            recordCityLlmDebug(db, char, 'input', 'city_timeskip_backfill', messages, { model: char.model_name });
+            let reply = '';
             try {
-                const messages = [{ role: 'user', content: prompt }];
-                recordCityLlmDebug(db, char, 'input', 'city_timeskip_backfill', messages, { model: char.model_name });
-                const reply = await callLLM({
+                reply = await callLLM({
                     endpoint: char.api_endpoint, key: char.api_key, model: char.model_name,
                     messages, maxTokens: 3000, temperature: 0.95
                 });
-                recordCityLlmDebug(db, char, 'output', 'city_timeskip_backfill', reply, { model: char.model_name });
-
-                const jsonMatch = reply.match(/\{[\s\S]*\}/);
-                if (jsonMatch) {
-                    result = JSON.parse(jsonMatch[0]);
-                } else {
-                    fallbackToOrdinary = true;
-                    console.error(`[City/TimeSkip] ${char.name} 返回了非 JSON 格式，触发平凡保底。`);
-                }
             } catch (e) {
-                console.error(`[City/TimeSkip] ${char.name} 回溯请求失败: ${e.message}。触发平凡保底。`);
-                fallbackToOrdinary = true;
+                throw createCityError(`${char.name} 时间跳过回溯请求失败，请重试：${e.message}`, 502, true);
             }
+            recordCityLlmDebug(db, char, 'output', 'city_timeskip_backfill', reply, { model: char.model_name });
+            const result = normalizeTimeSkipBackfillResult(parseTimeSkipBackfillReply(reply, char), missedTasks, char);
 
-            // Failure folding
-            if (fallbackToOrdinary) {
-                result = {
-                    summary: buildCollapsedCityLog(char, '时间跳过总结生成失败', { locationLabel: `${skippedHoursDelta}小时` }),
-                    tasks_completed: [],
-                    tasks_missed: missedTasks.map(t => Number(t.hour)),
-                    chat: "",
-                    moment: "",
-                    diary: ""
-                };
-            }
+            backfillResults.push({
+                char,
+                scheduleRecord,
+                scheduleArray,
+                missedTasks,
+                result
+            });
+            processedTasks += missedTasks.length;
+        }
+
+        for (const item of backfillResults) {
+            const { char, scheduleRecord, scheduleArray, missedTasks, result } = item;
 
             // Update schedule tasks with completed or missed status
             if (scheduleRecord && scheduleArray.length > 0 && missedTasks.length > 0) {
@@ -4900,16 +4576,13 @@ ${missedTaskText}
                     if (completedHours.includes(h)) return { ...task, status: 'completed' };
                     if (missedHours.includes(h)) return { ...task, status: 'missed' };
                     if (missedTasks.some(mt => Number(mt.hour) === h)) {
-                        // Default to completed if fallback, or missed if LLM forgot
-                        return { ...task, status: fallbackToOrdinary ? 'completed' : 'missed' };
+                        throw createCityError(`${char.name} 时间跳过回溯结果缺少任务 ${h}:00 的状态，请重试。`, 502, true);
                     }
                     return task;
                 });
 
                 db.city.db.prepare('UPDATE city_schedules SET schedule_json = ? WHERE id = ?').run(JSON.stringify(updatedSchedule), scheduleRecord.id);
             }
-
-            processedTasks += missedTasks.length;
 
             // Execute Broadcast bridge
             const eventSummary = result.summary;

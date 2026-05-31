@@ -1,9 +1,37 @@
 const fs = require('fs');
 const { createRequire } = require('module');
 const path = require('path');
+const { spawnSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
 const serverRequire = createRequire(path.join(root, 'server', 'package.json'));
+const isWindows = process.platform === 'win32';
+
+function getBundledNode() {
+  const candidate = isWindows
+    ? path.join(root, '.runtime', 'node20', 'node.exe')
+    : path.join(root, '.runtime', 'node20', 'bin', 'node');
+  return fs.existsSync(candidate) ? candidate : '';
+}
+
+function maybeRerunWithBundledNode() {
+  const bundledNode = getBundledNode();
+  if (!bundledNode || process.env.CHATPULSE_DOCTOR_BUNDLED_NODE === '1') return;
+  if (path.resolve(process.execPath).toLowerCase() === path.resolve(bundledNode).toLowerCase()) return;
+
+  const result = spawnSync(bundledNode, [__filename], {
+    cwd: process.cwd(),
+    stdio: 'inherit',
+    env: { ...process.env, CHATPULSE_DOCTOR_BUNDLED_NODE: '1' }
+  });
+  if (result.error) {
+    console.error(`[doctor] Failed to rerun with bundled Node: ${result.error.message}`);
+    process.exit(1);
+  }
+  process.exit(typeof result.status === 'number' ? result.status : 1);
+}
+
+maybeRerunWithBundledNode();
 
 function exists(relPath) {
   return fs.existsSync(path.join(root, relPath));

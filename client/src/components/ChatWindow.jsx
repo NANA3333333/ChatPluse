@@ -192,7 +192,9 @@ function RagHeaderProgress({ progress, lang }) {
 
 function ChatWindow({
     contact, allContacts, apiUrl, incomingMessageQueue, engineState,
-    onToggleMemo, onToggleDiary, onToggleSettings, userAvatar, onBack
+    onToggleMemo, onToggleDiary, onToggleSettings,
+    onPreloadMemo, onPreloadDiary, onPreloadSettings,
+    userAvatar, onBack
 }) {
     const { t, lang } = useLanguage();
     const [messages, setMessages] = useState([]);
@@ -512,13 +514,13 @@ function ChatWindow({
                     <button onClick={() => setIsRecommendModalOpen(true)} title={lang === 'en' ? 'Recommend Contact' : '推荐联系人'}>
                         <UserPlus size={20} />
                     </button>
-                    <button onClick={onToggleMemo} title={t('Memories')}>
+                    <button onPointerEnter={onPreloadMemo} onFocus={onPreloadMemo} onClick={onToggleMemo} title={t('Memories')}>
                         <Brain size={20} />
                     </button>
-                    <button onClick={onToggleDiary} title={t('Secret Diary')}>
+                    <button onPointerEnter={onPreloadDiary} onFocus={onPreloadDiary} onClick={onToggleDiary} title={t('Secret Diary')}>
                         <BookOpen size={20} />
                     </button>
-                    <button onClick={onToggleSettings} title={t('Chat Settings')}>
+                    <button onPointerEnter={onPreloadSettings} onFocus={onPreloadSettings} onClick={onToggleSettings} title={t('Chat Settings')}>
                         <MoreHorizontal size={20} />
                     </button>
                 </div>
@@ -669,7 +671,7 @@ function ChatWindow({
                                     const res = await fetch(`${apiUrl}/messages/batch-delete`, {
                                         method: 'POST',
                                         headers: { 'Authorization': `Bearer ${localStorage.getItem('cp_token') || ''}`, 'Content-Type': 'application/json' },
-                                        body: JSON.stringify({ messageIds: [...selectedIds] })
+                                        body: JSON.stringify({ characterId: contactRef.current?.id, messageIds: [...selectedIds] })
                                     });
                                     const data = await res.json();
                                     if (data.success) {

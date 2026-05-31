@@ -1,3 +1,10 @@
+const {
+    MAX_CITY_CALORIES_GRANT,
+    normalizeCityEventPayload,
+    normalizeCityQuestPayload,
+    normalizeCityRowId
+} = require('../utils/inputGuards');
+
 function registerEventQuestRoutes(app, deps) {
     const {
         authMiddleware,
@@ -22,8 +29,10 @@ function registerEventQuestRoutes(app, deps) {
     app.post('/api/city/events', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            if (!req.body.title) return res.status(400).json({ error: '缺少 title' });
-            req.db.city.createEvent(req.body);
+            if (!req.body?.title) return res.status(400).json({ error: '缺少 title' });
+            const payload = normalizeCityEventPayload(req.body || {});
+            if (!payload) return res.status(400).json({ error: '城市事件数值无效' });
+            req.db.city.createEvent(payload);
             res.json({ success: true });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -31,7 +40,10 @@ function registerEventQuestRoutes(app, deps) {
     app.delete('/api/city/events/:id', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            req.db.city.deleteEvent(req.params.id);
+            const eventId = normalizeCityRowId(req.params.id);
+            if (!eventId) return res.status(400).json({ error: '无效的事件 ID' });
+            const deleted = req.db.city.deleteEvent(eventId);
+            if (!deleted) return res.status(404).json({ error: '事件不存在' });
             res.json({ success: true });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -47,14 +59,24 @@ function registerEventQuestRoutes(app, deps) {
     app.post('/api/city/quests', authMiddleware, (req, res) => {
         (async () => {
             ensureCityDb(req.db);
-            if (!req.body.title) return res.status(400).json({ error: '缺少 title' });
-            const scoredQuest = await scoreQuestDifficultyWithMayor(req.db, req.body);
-            const questId = req.db.city.createQuest({
-                ...req.body,
+            if (!req.body?.title) return res.status(400).json({ error: '缺少 title' });
+            const baseQuest = normalizeCityQuestPayload(req.body || {});
+            if (!baseQuest) return res.status(400).json({ error: '任务奖励或目标数值无效' });
+            const scoredQuest = await scoreQuestDifficultyWithMayor(req.db, baseQuest);
+            if (!scoredQuest?.success) {
+                return res.status(500).json({
+                    error: scoredQuest?.error || scoredQuest?.reason || '市长难度评分失败，请重试。',
+                    canRetry: true
+                });
+            }
+            const questPayload = normalizeCityQuestPayload({
+                ...baseQuest,
                 completion_target: scoredQuest.targetScore,
                 difficulty_reason: scoredQuest.reason
             });
-            publishQuestAnnouncement(req.db, questId, req.body);
+            if (!questPayload) return res.status(400).json({ error: '任务奖励或目标数值无效' });
+            const questId = req.db.city.createQuest(questPayload);
+            publishQuestAnnouncement(req.db, questId, questPayload);
             res.json({ success: true, questId });
         })().catch((e) => res.status(500).json({ error: e.message }));
     });
@@ -62,7 +84,7 @@ function registerEventQuestRoutes(app, deps) {
     app.post('/api/city/logs/:id/retry-quest-score', authMiddleware, (req, res) => {
         (async () => {
             ensureCityDb(req.db);
-            const logId = Number(req.params.id || 0);
+            const logId = normalizeCityRowId(req.params.id);
             if (!logId) return res.status(400).json({ error: '缺少有效日志 ID' });
             const review = req.db.city.getQuestProgressReviewByLogId?.(logId);
             if (!review) return res.status(404).json({ error: '这条行动还没有任务评分记录' });
@@ -106,10 +128,11 @@ function registerEventQuestRoutes(app, deps) {
     app.post('/api/city/quests/:id/claim', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
-            const questId = req.params.id;
+            const questId = normalizeCityRowId(req.params.id);
+            if (!questId) return res.status(400).json({ error: '无效的任务 ID' });
             const charId = String(req.body?.characterId || '').trim();
             if (!charId) return res.status(400).json({ error: '缺少 characterId' });
-            const quest = req.db.city.getAllQuests(1000).find((item) => String(item.id) === String(questId));
+            const quest = req.db.city.getQuestById?.(questId);
             if (!quest) return res.status(404).json({ error: '任务不存在' });
             const char = req.db.getCharacter(charId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
@@ -193,21 +216,26 @@ function registerEventQuestRoutes(app, deps) {
     app.post('/api/city/quests/:id/complete', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
-            const questId = req.params.id;
+            const questId = normalizeCityRowId(req.params.id);
+            if (!questId) return res.status(400).json({ error: '无效的任务 ID' });
             const charId = String(req.body?.characterId || '').trim();
             if (!charId) return res.status(400).json({ error: '缺少 characterId' });
-            const quest = req.db.city.getAllQuests(1000).find((item) => String(item.id) === String(questId));
+            const quest = req.db.city.getQuestById?.(questId);
             if (!quest) return res.status(404).json({ error: '任务不存在' });
             const claimant = req.db.getCharacter(charId);
             if (!claimant) return res.status(404).json({ error: '角色不存在' });
+            const questDistrict = req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' };
+            const expectedOutcome = quest.is_completed || String(quest.status || '') === 'completed' ? 'failed' : 'success';
+            const resolution = await buildQuestResolutionNarrations(claimant, quest, questDistrict, req.db, expectedOutcome);
             const completion = req.db.city.resolveQuestCompletion(questId, charId);
             if (!completion?.success) return res.status(400).json({ error: '任务完成失败' });
 
             if (completion.won) {
-                const wallet = Number(claimant.wallet || 0) + Number(completion.reward_gold || 0);
-                const calories = Number(claimant.calories || 0) + Number(completion.reward_cal || 0);
+                const rewardGold = Number(completion.reward_gold || 0);
+                const rewardCal = Number(completion.reward_cal || 0);
+                const wallet = +(Number(claimant.wallet || 0) + rewardGold).toFixed(2);
+                const calories = Math.min(MAX_CITY_CALORIES_GRANT, Math.max(0, Number(claimant.calories || 0) + rewardCal));
                 req.db.updateCharacter(claimant.id, { wallet, calories });
-                const resolution = await buildQuestResolutionNarrations(claimant, quest, req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' }, req.db, 'success');
                 req.db.city.logAction(claimant.id, 'QUEST', resolution.log, 0, 0, quest.target_district || 'street');
                 req.db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, quest.target_district || 'street');
                 if (quest.source_announcement_id) req.db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
@@ -216,7 +244,6 @@ function registerEventQuestRoutes(app, deps) {
                 return;
             }
 
-            const resolution = await buildQuestResolutionNarrations(claimant, quest, req.db.city.getDistrict(quest.target_district) || { id: quest.target_district || 'street', name: quest.target_district || 'street', emoji: '' }, req.db, 'failed');
             req.db.city.logAction(claimant.id, 'QUEST', resolution.log, 0, 0, quest.target_district || 'street');
             req.db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, quest.target_district || 'street');
             req.db.city.addCityAnnouncement?.('system', '任务失效', resolution.announcement, 'street');
@@ -227,9 +254,13 @@ function registerEventQuestRoutes(app, deps) {
     app.delete('/api/city/quests/:id', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            const quest = req.db.city.getQuestById?.(req.params.id);
+            const questId = normalizeCityRowId(req.params.id);
+            if (!questId) return res.status(400).json({ error: '无效的任务 ID' });
+            const quest = req.db.city.getQuestById?.(questId);
+            if (!quest) return res.status(404).json({ error: '任务不存在' });
             if (quest?.source_announcement_id) req.db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
-            req.db.city.deleteQuest(req.params.id);
+            const deleted = req.db.city.deleteQuest(questId);
+            if (!deleted) return res.status(404).json({ error: '任务不存在' });
             res.json({ success: true });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });

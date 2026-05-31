@@ -2,6 +2,52 @@
  * Theme DLC — AI Theme Generation
  * Extracted from server/index.js
  */
+const THEME_COLOR_KEYS = [
+    '--bg-main',
+    '--bg-sidebar',
+    '--bg-sidebar-hover',
+    '--bg-contacts',
+    '--bg-chat-area',
+    '--bg-input',
+    '--text-primary',
+    '--text-secondary',
+    '--bubble-user-bg',
+    '--bubble-user-text',
+    '--bubble-ai-bg',
+    '--bubble-ai-text',
+    '--accent-color',
+    '--accent-hover',
+    '--border-color',
+    '--sidebar-icon',
+    '--sidebar-icon-active'
+];
+
+const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
+
+function parseThemeJsonReply(replyText) {
+    const cleanText = String(replyText || '')
+        .replace(/```(?:json)?\s*/gi, '')
+        .replace(/```/g, '')
+        .trim();
+    if (!cleanText) throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
+    return JSON.parse(cleanText);
+}
+
+function validateGeneratedThemeConfig(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error('Generated theme must be a JSON object.');
+    }
+    const result = {};
+    for (const key of THEME_COLOR_KEYS) {
+        const color = String(value[key] || '').trim();
+        if (!HEX_COLOR_RE.test(color)) {
+            throw new Error(`Generated theme has invalid color for ${key}.`);
+        }
+        result[key] = color;
+    }
+    return result;
+}
+
 module.exports = function initTheme(app, context) {
     const { authMiddleware, getUserDb, callLLM } = context;
 
@@ -17,7 +63,7 @@ Please generate a JSON object containing the following keys with HEX color value
 {
   "--bg-main": "Main app background color (e.g. #F8F0F5)",
   "--bg-sidebar": "Very left navigation bar background (e.g. #2A2D3E)",
-  "--bg-sidebar-hover": "Hover state for sidebar icons (e.g. rgba(255,255,255,0.1))",
+  "--bg-sidebar-hover": "Hover state for sidebar icons (e.g. #EEF4FF)",
   "--bg-contacts": "Contacts list middle column background (e.g. #F0F4FA)",
   "--bg-chat-area": "Right side chatting area background (e.g. #F8F0F5)",
   "--bg-input": "Message input box background (e.g. #FFFFFF)",
@@ -29,7 +75,9 @@ Please generate a JSON object containing the following keys with HEX color value
   "--bubble-ai-text": "Text color for AI messages (e.g. #333333)",
   "--accent-color": "Primary brand color for active items/buttons (e.g. #7B9FE0)",
   "--accent-hover": "Hover state for primary buttons (e.g. #9BB5E8)",
-  "--border-color": "Subtle borders between panes (e.g. #E0E0E0)"
+  "--border-color": "Subtle borders between panes (e.g. #E0E0E0)",
+  "--sidebar-icon": "Inactive sidebar icon color (e.g. #FFFFFF)",
+  "--sidebar-icon-active": "Active sidebar icon color (e.g. #9BB5E8)"
 }
 
 Only output the raw valid JSON object, without markdown formatting or surrounding explanations. I need to upload this directly into the app.`;
@@ -55,6 +103,7 @@ Return ONLY a raw JSON object with no markdown formatting. Do not include \`\`\`
 The JSON MUST have the EXACT following keys with valid 6-hex-digit HTML color codes (e.g. #F8F0F5):
 - "--bg-main" (Main app background color)
 - "--bg-sidebar" (Very left navigation bar background)
+- "--bg-sidebar-hover" (Hover state for sidebar icons)
 - "--bg-contacts" (Contacts list middle column background)
 - "--bg-chat-area" (Right side chatting area background)
 - "--bg-input" (Message input box background)
@@ -67,6 +116,8 @@ The JSON MUST have the EXACT following keys with valid 6-hex-digit HTML color co
 - "--accent-color" (Primary brand color for active items/buttons)
 - "--accent-hover" (Hover state for primary buttons)
 - "--border-color" (Subtle borders between panes)
+- "--sidebar-icon" (Inactive sidebar icon color)
+- "--sidebar-icon-active" (Active sidebar icon color)
 `;
 
             const generatedText = await callLLM({
@@ -80,23 +131,13 @@ The JSON MUST have the EXACT following keys with valid 6-hex-digit HTML color co
 
             console.log(`[Theme Generator] LLM returned ${String(generatedText || '').length} chars.`);
 
-            // Aggressively strip markdown formatting
-            let cleanText = String(generatedText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-
-            const startIdx = cleanText.indexOf('{');
-            const endIdx = cleanText.lastIndexOf('}');
-            if (startIdx !== -1 && endIdx !== -1) {
-                const jsonText = cleanText.slice(startIdx, endIdx + 1);
-                try {
-                    const parsed = JSON.parse(jsonText);
-                    return res.json({ success: true, theme_config: parsed });
-                } catch (err) {
-                    console.error(`[Theme Generator] JSON.parse failed. responseLength=${jsonText.length}`);
-                    throw new Error('LLM JSON Syntax Error: ' + err.message);
-                }
-            } else {
-                console.error(`[Theme Generator] Failed to find JSON brackets. responseLength=${cleanText.length}`);
-                throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
+            try {
+                const parsed = parseThemeJsonReply(generatedText);
+                const themeConfig = validateGeneratedThemeConfig(parsed);
+                return res.json({ success: true, theme_config: themeConfig });
+            } catch (err) {
+                console.error(`[Theme Generator] JSON validation failed. responseLength=${String(generatedText || '').length}`);
+                throw new Error('LLM JSON Syntax Error: ' + err.message);
             }
         } catch (e) {
             console.error('Theme Generation Error:', e.message);

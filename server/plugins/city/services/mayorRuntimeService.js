@@ -1,12 +1,28 @@
+const { normalizeCityConfigValue } = require('../utils/inputGuards');
+
+function hasMayorConfigValue(value) {
+    return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function normalizeMayorIntervalHours(value) {
+    if (!hasMayorConfigValue(value)) return 6;
+    const normalized = normalizeCityConfigValue('mayor_interval_hours', value);
+    return normalized === null ? null : Number(normalized);
+}
+
+function normalizeMayorLastRunAt(value) {
+    if (!hasMayorConfigValue(value)) return 0;
+    const normalized = normalizeCityConfigValue('mayor_last_run_at', value);
+    return normalized === null ? null : Number(normalized);
+}
+
 function createMayorRuntimeService(deps = {}) {
     const {
         callLLM,
         recordCityLlmDebug,
         resolveMayorAiCharacter,
         parseMayorJsonReply,
-        applyMayorDecisions,
-        publishQuestAnnouncement,
-        recordMayorAnnouncement
+        applyMayorDecisions
     } = deps;
 
     const mayorRunLocks = new Set();
@@ -52,8 +68,9 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
         const config = db.city.getConfig();
         const mayorEnabled = config.mayor_enabled === '1' || config.mayor_enabled === 'true';
         if (!mayorEnabled) return false;
-        const intervalHours = Math.max(1, parseInt(config.mayor_interval_hours, 10) || 6);
-        const lastRunAt = parseInt(config.mayor_last_run_at, 10) || 0;
+        const intervalHours = normalizeMayorIntervalHours(config.mayor_interval_hours);
+        const lastRunAt = normalizeMayorLastRunAt(config.mayor_last_run_at);
+        if (intervalHours === null || lastRunAt === null) return false;
         return !lastRunAt || (now - lastRunAt) >= intervalHours * 60 * 60 * 1000;
     }
 
@@ -136,71 +153,12 @@ ${activeQuests.length > 0 ? activeQuests.map(q => `  - ${q.emoji} ${q.title} (${
         }
     }
 
-    function applyFallbackMayorDecisions(db) {
-        const weatherRoll = Math.random();
-        let w;
-        if (weatherRoll < 0.35) {
-            w = { title: '晴天', emoji: '☀️', desc: '阳光明媚，适合户外活动', dur: 12 };
-        } else if (weatherRoll < 0.55) {
-            w = { title: '多云', emoji: '⛅', desc: '云层较多，气温舒适', dur: 12 };
-        } else if (weatherRoll < 0.70) {
-            w = { title: '微风', emoji: '🍃', desc: '清风徐来，心情舒缓', dur: 8 };
-        } else if (weatherRoll < 0.85) {
-            w = { title: '小雨', emoji: '🌦️', desc: '细雨绵绵，记得带伞', dur: 6 };
-        } else if (weatherRoll < 0.92) {
-            w = { title: '大雨', emoji: '🌧️', desc: '倾盆大雨，建议待在室内', dur: 8 };
-        } else if (weatherRoll < 0.97) {
-            w = { title: '大雾', emoji: '🌫️', desc: '能见度较低，出行注意安全', dur: 6 };
-        } else {
-            w = { title: '暴风雨', emoji: '⛈️', desc: '雷暴天气，请在安全处避雨', dur: 4 };
-        }
-
-        try {
-            db.city.createEvent({ type: 'weather', title: w.title, emoji: w.emoji, description: w.desc, duration_hours: w.dur });
-            db.city.logAction('system', 'EVENT', `${w.emoji} 天气: ${w.title} - ${w.desc}`, 0, 0);
-        } catch (e) { console.error('[Mayor fallback] Event error:', e.message); }
-
-        const quests = [
-            { title: '用 ASCII 画一幅画', emoji: '🎨', desc: '用纯文本字符创作一幅 ASCII 艺术画', gold: 40, diff: 'normal' },
-            { title: '写一首小诗', emoji: '✍️', desc: '以城市的黄昏为主题写一首短诗', gold: 35, diff: 'easy' },
-            { title: '编一个冷笑话', emoji: '😄', desc: '讲一个让人忍不住翻白眼的冷笑话', gold: 20, diff: 'easy' },
-            { title: '出一道谜语', emoji: '🧩', desc: '出一道有趣的谜语考考大家', gold: 30, diff: 'easy' },
-            { title: '写一段绕口令', emoji: '🗣️', desc: '创作一段有趣的中文绕口令', gold: 35, diff: 'normal' },
-            { title: '编一个微小说', emoji: '📘', desc: '用 50 字以内写一个完整的微型故事', gold: 50, diff: 'normal' },
-            { title: '发明一道菜', emoji: '🍳', desc: '用背包里的食材发明一道创意料理并写出做法', gold: 45, diff: 'normal' },
-            { title: '用 Emoji 画一幅画', emoji: '🖼️', desc: '只用 Emoji 表情创作一幅有创意的画面', gold: 30, diff: 'easy' },
-            { title: '写一封情书', emoji: '💌', desc: '以匿名身份给城里某位居民写一封搞笑情书', gold: 40, diff: 'normal' },
-            { title: '即兴 Rap', emoji: '🎤', desc: '以商业街日常为主题来一段即兴说唱', gold: 55, diff: 'hard' },
-            { title: '编一个都市传说', emoji: '👻', desc: '为这座城市编一个神秘的都市传说', gold: 45, diff: 'normal' },
-            { title: '写今日运势', emoji: '🔮', desc: '给城里的每位居民写一句今日运势', gold: 35, diff: 'easy' }
-        ];
-
-        const q = quests[Math.floor(Math.random() * quests.length)];
-        try {
-            const questId = db.city.createQuest({ title: q.title, emoji: q.emoji, description: q.desc, reward_gold: q.gold, difficulty: q.diff });
-            publishQuestAnnouncement(db, questId, { title: q.title, emoji: q.emoji, description: q.desc, reward_gold: q.gold, difficulty: q.diff });
-            db.city.logAction('system', 'QUEST', `📐 新悬赏: ${q.title} - 奖励 ${q.gold} 金币`, 0, 0);
-        } catch (e) { console.error('[Mayor fallback] Quest error:', e.message); }
-
-        const fallbackAnnouncement = `城市广播：今日天气为${w.title}，布告栏新增任务“${q.title}”。请市民按需安排行程。`;
-        try {
-            db.city.logAction('system', 'ANNOUNCE', `📙 ${fallbackAnnouncement}`, 0, 0);
-            recordMayorAnnouncement(db, '市长广播', fallbackAnnouncement);
-        } catch (e) {
-            console.error('[Mayor fallback] Announcement error:', e.message);
-        }
-
-        console.log('[Mayor AI] 使用规则生成: ' + w.title + ' + ' + q.title);
-        return { success: true, results: { price_changes: 0, events: 1, quests: 1, announcement: fallbackAnnouncement }, fallback: true };
-    }
-
     return {
         buildMayorContext,
         markMayorRun,
         shouldAutoRunMayor,
         maybeRunMayorAI,
-        runMayorAI,
-        applyFallbackMayorDecisions
+        runMayorAI
     };
 }
 

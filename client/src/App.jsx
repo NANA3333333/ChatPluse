@@ -5,7 +5,7 @@ import CreateGroupModal from './components/CreateGroupModal';
 import AddCharacterModal from './components/AddCharacterModal';
 
 import './App.css';
-import { MessageSquare, Users, Compass, Settings, UserPlus, Globe, UsersRound, LogOut, Database, LibraryBig } from 'lucide-react';
+import { MessageSquare, Users, Compass, Settings, UserPlus, Globe, UsersRound, LogOut, Database, LibraryBig, Download, Upload, Wand2, RefreshCw, X, BookOpen } from 'lucide-react';
 import { plugins } from './plugins';
 import { useLanguage } from './LanguageContext';
 import { useAuth } from './AuthContext';
@@ -21,19 +21,92 @@ const defaultWsHost = `${HOST}:8000`;
 const API_URL = import.meta.env.VITE_API_URL || `${defaultApiOrigin}/api`;
 const WS_URL = import.meta.env.VITE_WS_URL || `${defaultWsProtocol}//${defaultWsHost}`;
 
-const GroupChatWindow = lazy(() => import('./components/GroupChatWindow'));
-const MemoTable = lazy(() => import('./components/MemoTable'));
-const DiaryTable = lazy(() => import('./components/DiaryTable'));
-const MomentsFeed = lazy(() => import('./components/MomentsFeed'));
-const SettingsPanel = lazy(() => import('./components/SettingsPanel'));
-const ChatSettingsDrawer = lazy(() => import('./components/ChatSettingsDrawer'));
-const MemoryLibraryPanel = lazy(() => import('./components/MemoryLibraryPanel'));
+function lazyWithPreload(factory) {
+  const Component = lazy(factory);
+  Component.preload = factory;
+  return Component;
+}
+
+const GroupChatWindow = lazyWithPreload(() => import('./components/GroupChatWindow'));
+const MemoTable = lazyWithPreload(() => import('./components/MemoTable'));
+const DiaryTable = lazyWithPreload(() => import('./components/DiaryTable'));
+const MomentsFeed = lazyWithPreload(() => import('./components/MomentsFeed'));
+const SettingsPanel = lazyWithPreload(() => import('./components/SettingsPanel'));
+const ChatSettingsDrawer = lazyWithPreload(() => import('./components/ChatSettingsDrawer'));
+const MemoryLibraryPanel = lazyWithPreload(() => import('./components/MemoryLibraryPanel'));
 
 function PanelFallback() {
   return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8a8f98', fontSize: '13px' }}>
       Loading...
     </div>
+  );
+}
+
+function DrawerFallback({ type = 'settings', contact, lang = 'zh', onClose }) {
+  const contactName = contact?.name || (lang === 'en' ? 'Character' : '角色');
+  if (type === 'memo') {
+    return (
+      <aside className="drawer-container memory-drawer memory-table-drawer drawer-loading-fallback">
+        <div className="memory-header">
+          <h3>{contactName} {lang === 'en' ? "'s Memories" : '的记忆'}</h3>
+          <div className="memory-header-actions">
+            <button type="button" className="memory-action-btn drawer-fallback-action" aria-disabled="true" tabIndex={-1}>
+              <Download size={14} /> {lang === 'en' ? 'Export all' : '导出全部'}
+            </button>
+            <button type="button" className="memory-action-btn drawer-fallback-action" aria-disabled="true" tabIndex={-1}>
+              <Upload size={14} /> {lang === 'en' ? 'Import all' : '导入全部'}
+            </button>
+            <button type="button" className="memory-action-btn drawer-fallback-action" aria-disabled="true" tabIndex={-1}>
+              <Wand2 size={14} /> {lang === 'en' ? 'Extract' : '提取'}
+            </button>
+            <button type="button" className="icon-btn drawer-fallback-action" aria-disabled="true" tabIndex={-1}>
+              <RefreshCw size={16} />
+            </button>
+            <button type="button" className="icon-btn" onClick={onClose} title={lang === 'en' ? 'Close' : '关闭'}>
+              <X size={16} />
+            </button>
+          </div>
+        </div>
+        <div className="memory-content">
+          <p className="loading-text">{lang === 'en' ? 'Loading memories...' : '加载记忆中...'}</p>
+        </div>
+      </aside>
+    );
+  }
+  if (type === 'diary') {
+    return (
+      <aside className="memory-drawer drawer-loading-fallback diary" style={{ width: '380px', backgroundColor: '#fffdf5' }}>
+        <div className="memory-header" style={{ backgroundColor: '#f6f1e3', borderBottomColor: '#e0d8c3' }}>
+          <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#5a4d3c' }}>
+            <BookOpen size={18} />
+            {contactName} {lang === 'en' ? "'s Diary" : '的日记'}
+          </h3>
+          <button type="button" className="icon-btn" onClick={onClose} title={lang === 'en' ? 'Close' : '关闭'}>
+            <X size={20} />
+          </button>
+        </div>
+        <div className="memory-list" style={{ padding: '20px' }}>
+          <div className="placeholder-text">{lang === 'en' ? 'Loading...' : '加载中...'}</div>
+        </div>
+      </aside>
+    );
+  }
+  return (
+    <aside className="memory-drawer drawer-loading-fallback" style={{ width: '320px', backgroundColor: '#f7f7f7' }}>
+      <div className="memory-header">
+        <h3 style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <Settings size={18} />
+          {lang === 'en' ? 'Chat Settings' : '聊天设置'}
+        </h3>
+        <button type="button" className="icon-btn" onClick={onClose} title={lang === 'en' ? 'Close' : '关闭'}>
+          <X size={20} />
+        </button>
+      </div>
+      <div className="memory-content">
+        <p className="loading-text">{lang === 'en' ? 'Loading settings...' : '加载设置中...'}</p>
+      </div>
+    </aside>
   );
 }
 
@@ -67,6 +140,7 @@ function App() {
   const visiblePlugins = plugins.filter(p => !p.condition || p.condition(effectiveUser));
   const experimentalPlugins = visiblePlugins.filter(p => p.position === 'experiment');
   const regularPlugins = visiblePlugins.filter(p => p.position !== 'experiment');
+  const activeChatContact = contacts.find(c => c.id === activeContactId) || activeContactSnapshot;
 
   // Use a ref to track the active contact ID without causing useEffect re-renders when it changes.
   const activeContactRef = useRef(activeContactId);
@@ -197,6 +271,17 @@ function App() {
       setActiveDrawer(null);
     }
   }, []);
+
+  const preloadChatDrawer = useCallback((drawer) => {
+    if (drawer === 'memo') MemoTable.preload?.();
+    if (drawer === 'diary') DiaryTable.preload?.();
+    if (drawer === 'settings') ChatSettingsDrawer.preload?.();
+  }, []);
+
+  const toggleChatDrawer = useCallback((drawer) => {
+    preloadChatDrawer(drawer);
+    setActiveDrawer((current) => (current === drawer ? null : drawer));
+  }, [preloadChatDrawer]);
 
   // 1. Fetch Contacts (Characters) and Profile on mount
   useEffect(() => {
@@ -752,15 +837,18 @@ function App() {
               <div style={{ flex: 1, display: 'flex', flexDirection: 'row', height: '100%', minWidth: 0 }}>
                 <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
                   <ChatWindow
-                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
+                    contact={activeChatContact}
                     allContacts={contacts}
                     userAvatar={effectiveUser?.avatar}
                     apiUrl={API_URL}
                     incomingMessageQueue={incomingMessageQueue}
                     engineState={engineState}
-                    onToggleMemo={() => setActiveDrawer(activeDrawer === 'memo' ? null : 'memo')}
-                    onToggleDiary={() => setActiveDrawer(activeDrawer === 'diary' ? null : 'diary')}
-                    onToggleSettings={() => setActiveDrawer(activeDrawer === 'settings' ? null : 'settings')}
+                    onToggleMemo={() => toggleChatDrawer('memo')}
+                    onToggleDiary={() => toggleChatDrawer('diary')}
+                    onToggleSettings={() => toggleChatDrawer('settings')}
+                    onPreloadMemo={() => preloadChatDrawer('memo')}
+                    onPreloadDiary={() => preloadChatDrawer('diary')}
+                    onPreloadSettings={() => preloadChatDrawer('settings')}
                     onBack={() => { setActiveContactId(null); setActiveContactSnapshot(null); activeContactRef.current = null; }}
                     onSwitchTab={setActiveTab}
                     isGeneratingSchedule={generatingSchedules[activeContactId]}
@@ -768,31 +856,37 @@ function App() {
                   />
                 </div>
                 {activeDrawer === 'memo' && (
-                  <MemoTable
-                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                    apiUrl={API_URL}
-                    onClose={() => setActiveDrawer(null)}
-                  />
+                  <Suspense fallback={<DrawerFallback type="memo" contact={activeChatContact} lang={lang} onClose={() => setActiveDrawer(null)} />}>
+                    <MemoTable
+                      contact={activeChatContact}
+                      apiUrl={API_URL}
+                      onClose={() => setActiveDrawer(null)}
+                    />
+                  </Suspense>
                 )}
                 {activeDrawer === 'diary' && (
-                  <DiaryTable
-                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                    apiUrl={API_URL}
-                    onClose={() => setActiveDrawer(null)}
-                  />
+                  <Suspense fallback={<DrawerFallback type="diary" contact={activeChatContact} lang={lang} onClose={() => setActiveDrawer(null)} />}>
+                    <DiaryTable
+                      contact={activeChatContact}
+                      apiUrl={API_URL}
+                      onClose={() => setActiveDrawer(null)}
+                    />
+                  </Suspense>
                 )}
                 {activeDrawer === 'settings' && (
-                  <ChatSettingsDrawer
-                    contact={contacts.find(c => c.id === activeContactId) || activeContactSnapshot}
-                    apiUrl={API_URL}
-                    onClose={() => setActiveDrawer(null)}
-                    onClearHistory={() => {
-                      setActiveDrawer(null);
-                      fetchContacts(); // Re-pull character data so stats show as reset immediately
-                    }}
-                    isGeneratingSchedule={!!generatingSchedules[activeContactId]}
-                    messagesHideStateCount={hiddenMessagesCount}
-                  />
+                  <Suspense fallback={<DrawerFallback type="settings" contact={activeChatContact} lang={lang} onClose={() => setActiveDrawer(null)} />}>
+                    <ChatSettingsDrawer
+                      contact={activeChatContact}
+                      apiUrl={API_URL}
+                      onClose={() => setActiveDrawer(null)}
+                      onClearHistory={() => {
+                        setActiveDrawer(null);
+                        fetchContacts(); // Re-pull character data so stats show as reset immediately
+                      }}
+                      isGeneratingSchedule={!!generatingSchedules[activeContactId]}
+                      messagesHideStateCount={hiddenMessagesCount}
+                    />
+                  </Suspense>
                 )}
               </div>
             ) : activeGroupId && activeTab === 'chats' ? (

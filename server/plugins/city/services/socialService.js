@@ -1,10 +1,19 @@
+const { normalizeCityConfigValue } = require('../utils/inputGuards');
+
+function normalizeSocialHistoryLimit(config = {}) {
+    const rawValue = config?.city_social_log_limit;
+    if (rawValue === undefined || rawValue === null || String(rawValue).trim() === '') return 3;
+    const normalized = normalizeCityConfigValue('city_social_log_limit', rawValue);
+    if (normalized === null) return 3;
+    return Number(normalized);
+}
+
 function createSocialService(deps = {}) {
     const {
         buildUniversalContext,
         callLLM,
         recordCityLlmDebug,
         buildQuestCompetitionContext,
-        buildCollapsedCityLog,
         logEmotionTransition,
         applyEmotionEvent,
         broadcastCityEvent,
@@ -13,6 +22,64 @@ function createSocialService(deps = {}) {
     } = deps;
 
     const socialCooldowns = new Map();
+
+    function createSocialEncounterError(message, status = 502) {
+        const err = new Error(message);
+        err.status = status;
+        err.canRetry = true;
+        return err;
+    }
+
+    function cleanSocialJsonReply(text) {
+        return String(text || '')
+            .replace(/```(?:json)?\s*/gi, '')
+            .replace(/```/g, '')
+            .trim();
+    }
+
+    function readSocialMappedValue(map, id, name) {
+        if (!map || typeof map !== 'object' || Array.isArray(map)) return undefined;
+        if (Object.prototype.hasOwnProperty.call(map, id)) return map[id];
+        if (Object.prototype.hasOwnProperty.call(map, name)) return map[name];
+        return undefined;
+    }
+
+    function normalizeSocialAffinityDelta(value) {
+        if (value === undefined || value === null || String(value).trim() === '') return null;
+        const text = String(value).trim();
+        if (!/^[+-]?\d+$/.test(text)) {
+            throw createSocialEncounterError('社交遭遇结算 affinity_deltas 格式无效，请重试。');
+        }
+        const parsed = Number(text);
+        if (!Number.isSafeInteger(parsed) || parsed < -10 || parsed > 10) {
+            throw createSocialEncounterError('社交遭遇结算 affinity_deltas 超出范围，请重试。');
+        }
+        return parsed;
+    }
+
+    function collectSocialEncounterWrites(systemResult, occupants = []) {
+        const writes = [];
+        const characterResults = systemResult?.characters || {};
+        for (const c of occupants) {
+            const data = characterResults[c.id] || characterResults[c.name];
+            if (!data) continue;
+
+            const safeDeltas = data.affinity_deltas || {};
+            const safeImpressions = data.impressions || {};
+            const relationUpdates = [];
+
+            for (const other of occupants) {
+                if (c.id === other.id) continue;
+                const delta = normalizeSocialAffinityDelta(readSocialMappedValue(safeDeltas, other.id, other.name));
+                const rawImpression = readSocialMappedValue(safeImpressions, other.id, other.name);
+                const impression = typeof rawImpression === 'string' ? rawImpression.trim().substring(0, 50) : '';
+                relationUpdates.push({ other, delta, impression });
+            }
+
+            writes.push({ character: c, data, relationUpdates });
+        }
+        return writes;
+    }
 
     async function checkSocialCollisions(characters, db, userId, districts, config, minuteKey) {
         const freshChars = characters.map(c => db.getCharacter(c.id) || c)
@@ -25,7 +92,7 @@ function createSocialService(deps = {}) {
             locationGroups[loc].push(c);
         }
 
-        const yLimit = parseInt(config.city_social_log_limit || '3', 10);
+        const yLimit = normalizeSocialHistoryLimit(config);
 
         for (const [locId, group] of Object.entries(locationGroups)) {
             if (group.length < 2) continue;
@@ -128,7 +195,11 @@ ${logsContext ? '\n' + logsContext : ''}${questCompetitionContext ? '\n' + quest
                 simulationLogs.push(`【${speaker.name}的行动】 ${cleanReply || '[无响应]'}`);
             } catch (e) {
                 console.error(`[City/Social] ${speaker.name} Phase LLM 失败:`, e.message);
-                simulationLogs.push(`【${speaker.name}的行动】 [由于网络波动没有任何动作]`);
+                throw createSocialEncounterError(`${speaker.name} 社交行动生成失败，请重试：${e.message}`);
+            }
+            const lastLog = simulationLogs[simulationLogs.length - 1] || '';
+            if (!lastLog || /\[无响应\]/.test(lastLog)) {
+                throw createSocialEncounterError(`${speaker.name} 社交行动生成为空，请重试。`);
             }
         }
 
@@ -202,79 +273,39 @@ ${simulationLogs.map((l, idx) => `${idx + 1}. ${l}`).join('\n')}
                 temperature: 0.7
             });
             recordCityLlmDebug(db, systemApiChar, 'output', 'city_social_resolution', reply, { model: systemApiChar.model_name });
-            const match = reply.match(/\{[\s\S]*\}/);
-            if (match) {
-                clean = match[0];
-                try {
-                    systemResult = JSON.parse(clean);
-                } catch (_pe) {
-                    clean = clean.replace(/,\s*([\]}])/g, '$1')
-                        .replace(/\/\/.*$/gm, '')
-                        .replace(/(?<!\\)\n/g, '\\n')
-                        .replace(/\\n\s*}/, '\n}')
-                        .replace(/{\s*\\n/, '{\n');
-                    systemResult = JSON.parse(clean);
-                }
-            } else {
-                console.error('[City/Social] System Final Parser 失败: 没有找到大括号匹配项. RAW:', reply.substring(0, 200));
-            }
+            clean = cleanSocialJsonReply(reply);
+            if (!clean) throw createSocialEncounterError('社交遭遇结算没有返回 JSON，请重试。');
+            systemResult = JSON.parse(clean);
         } catch (e) {
             console.error('[City/Social] System Final Parser 失败:', e.message);
             console.error('[City/Social] 尝试解析的文本:\n', clean ? clean.substring(0, 1500) : '未提取到 JSON');
+            if (e.canRetry) throw e;
+            throw createSocialEncounterError(`社交遭遇结算生成失败，请重试：${e.message}`);
         }
 
         if (!systemResult || !systemResult.characters) {
-            console.warn('[City/Social] 采用规则系统 fallback 结算遭遇');
-            systemResult = {
-                summary_log: buildCollapsedCityLog(occupants[0], '社交遭遇文案生成失败', { district }),
-                characters: {}
-            };
-            for (const c of occupants) {
-                systemResult.characters[c.id] = {
-                    chat: '',
-                    moment: '',
-                    diary: '',
-                    affinity_deltas: {}
-                };
-                for (const other of occupants) {
-                    if (c.id !== other.id) systemResult.characters[c.id].affinity_deltas[other.id] = Math.floor(Math.random() * 5) - 1;
-                }
-            }
+            throw createSocialEncounterError('社交遭遇结算缺少 characters 字段，请重试。');
         }
 
+        const encounterWrites = collectSocialEncounterWrites(systemResult, occupants);
         const summaryMsg = systemResult.summary_log || `${occupants.map(c => c.name).join('、')} 的遭遇结束了。`;
         const fullLog = `🤝 ${summaryMsg}\n\n📝 [现场侧录]\n${simulationLogs.join('\n')}`;
         db.city.logAction(occupants[0].id, district.id.toUpperCase(), fullLog, 0, 0, district.id);
 
-        for (const c of occupants) {
-            const data = systemResult.characters[c.id] || systemResult.characters[c.name];
-            if (!data) continue;
-
-            const safeDeltas = data.affinity_deltas || {};
-            const safeImpressions = data.impressions || {};
+        for (const { character: c, data, relationUpdates } of encounterWrites) {
             let netAffinityStr = '';
 
-            for (const other of occupants) {
-                if (c.id === other.id) continue;
-
-                let delta = safeDeltas[other.id];
-                if (delta === undefined) delta = safeDeltas[other.name];
-
-                let impression = safeImpressions[other.id];
-                if (impression === undefined) impression = safeImpressions[other.name];
-
+            for (const { other, delta, impression } of relationUpdates) {
                 const updates = {};
-                const dAmt = parseInt(delta);
-                if (!isNaN(dAmt) && dAmt !== 0) {
-                    const clampedDelta = Math.max(-10, Math.min(10, dAmt));
+                if (delta !== null && delta !== 0) {
                     const rel = db.getCharRelationship(c.id, other.id);
                     const curr = rel?.affinity ?? 50;
-                    updates.affinity = Math.max(0, Math.min(100, curr + clampedDelta));
-                    netAffinityStr += `[-> ${other.name}: ${clampedDelta > 0 ? '+' : ''}${clampedDelta}] `;
+                    updates.affinity = Math.max(0, Math.min(100, curr + delta));
+                    netAffinityStr += `[-> ${other.name}: ${delta > 0 ? '+' : ''}${delta}] `;
                 }
 
-                if (impression && typeof impression === 'string' && impression.trim()) {
-                    updates.impression = impression.trim().substring(0, 50);
+                if (impression) {
+                    updates.impression = impression;
                 }
 
                 if (Object.keys(updates).length > 0) {

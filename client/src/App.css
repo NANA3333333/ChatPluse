@@ -624,6 +624,20 @@ body {
   background-color: var(--middle-bg);
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
+}
+
+.drawer-loading-fallback {
+  background: #f7f9fc;
+}
+
+.drawer-loading-fallback.diary {
+  width: 380px;
+  background: #fffdf5;
+}
+
+.drawer-fallback-action[aria-disabled="true"] {
+  pointer-events: none;
 }
 
 .memory-header {

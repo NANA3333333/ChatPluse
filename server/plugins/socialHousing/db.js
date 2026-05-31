@@ -1,3 +1,14 @@
+const {
+    normalizeAgencyConfigPayload,
+    normalizeHousingPayload,
+    normalizeHousingBindingPayload,
+    normalizeSocialClassPayload,
+    normalizeStoredAgencyDecisionIntervalHours,
+    normalizeStoredAgencyIntervalMinutes,
+    normalizeStoredAgencyTimestamp,
+    SocialHousingValidationError
+} = require('./inputGuards');
+
 function slugify(value, fallbackPrefix) {
     const normalized = String(value || '')
         .trim()
@@ -318,6 +329,13 @@ module.exports = function initSocialHousingDb(db) {
         }));
     }
 
+    function getClassById(id) {
+        const cleanId = String(id || '').trim();
+        if (!cleanId) return null;
+        const row = db.prepare('SELECT * FROM social_housing_classes WHERE id = ?').get(cleanId);
+        return row ? { ...row, common_locations: parseLocations(row.common_locations_json) } : null;
+    }
+
     function getHousingTiers() {
         return db.prepare('SELECT * FROM social_housing_homes ORDER BY sort_order ASC, weekly_rent ASC').all().map((row) => ({
             ...row,
@@ -328,58 +346,70 @@ module.exports = function initSocialHousingDb(db) {
     }
 
     function upsertClass(payload) {
-        const id = slugify(payload.id || payload.name, 'class');
+        const normalized = normalizeSocialClassPayload(payload);
+        const id = slugify(normalized.id || normalized.name, 'class');
         db.prepare(`
             INSERT OR REPLACE INTO social_housing_classes
             (id, name, emoji, description, work_bias, consumption_bias, prestige_bias, social_barrier, common_locations_json, is_enabled, sort_order)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             id,
-            String(payload.name || '').trim(),
-            String(payload.emoji || '🧩').trim() || '🧩',
-            String(payload.description || '').trim(),
-            Number(payload.work_bias || 0),
-            Number(payload.consumption_bias || 0),
-            Number(payload.prestige_bias || 0),
-            Number(payload.social_barrier || 0),
-            JSON.stringify(parseLocations(payload.common_locations)),
-            Number(payload.is_enabled ?? 1) === 1 ? 1 : 0,
-            Number(payload.sort_order || 0)
+            normalized.name,
+            String(normalized.emoji || '🧩').trim() || '🧩',
+            String(normalized.description || '').trim(),
+            normalized.work_bias,
+            normalized.consumption_bias,
+            normalized.prestige_bias,
+            normalized.social_barrier,
+            JSON.stringify(parseLocations(normalized.common_locations)),
+            normalized.is_enabled,
+            normalized.sort_order
         );
         return id;
     }
 
-    function upsertHousing(payload) {
-        const id = slugify(payload.id || payload.name, 'housing');
+    function upsertHousing(payload = {}) {
+        const normalized = normalizeHousingPayload(payload);
+        const id = slugify(normalized.id || normalized.name, 'housing');
         db.prepare(`
             INSERT OR REPLACE INTO social_housing_homes
             (id, name, emoji, description, weekly_rent, deposit, sale_price, comfort, prestige, privacy, is_enabled, sort_order)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
             id,
-            String(payload.name || '').trim(),
-            String(payload.emoji || '🏠').trim() || '🏠',
-            String(payload.description || '').trim(),
-            Number(payload.weekly_rent || 0),
-            Number(payload.deposit || 0),
-            Number(payload.sale_price || 0),
-            Number(payload.comfort || 0),
-            Number(payload.prestige || 0),
-            Number(payload.privacy || 0),
-            Number(payload.is_enabled ?? 1) === 1 ? 1 : 0,
-            Number(payload.sort_order || 0)
+            String(normalized.name || '').trim(),
+            String(normalized.emoji || '🏠').trim() || '🏠',
+            String(normalized.description || '').trim(),
+            normalized.weekly_rent,
+            normalized.deposit,
+            normalized.sale_price,
+            normalized.comfort,
+            normalized.prestige,
+            normalized.privacy,
+            normalized.is_enabled,
+            normalized.sort_order
         );
         return id;
     }
 
     function deleteClass(id) {
-        db.prepare('DELETE FROM social_housing_classes WHERE id = ?').run(id);
-        db.prepare("UPDATE social_housing_bindings SET social_class_id = '' WHERE social_class_id = ?").run(id);
+        const cleanId = String(id || '').trim();
+        if (!cleanId) return 0;
+        const info = db.prepare('DELETE FROM social_housing_classes WHERE id = ?').run(cleanId);
+        if ((info.changes || 0) > 0) {
+            db.prepare("UPDATE social_housing_bindings SET social_class_id = '' WHERE social_class_id = ?").run(cleanId);
+        }
+        return info.changes || 0;
     }
 
     function deleteHousing(id) {
-        db.prepare('DELETE FROM social_housing_homes WHERE id = ?').run(id);
-        db.prepare("UPDATE social_housing_bindings SET housing_id = '' WHERE housing_id = ?").run(id);
+        const cleanId = String(id || '').trim();
+        if (!cleanId) return 0;
+        const info = db.prepare('DELETE FROM social_housing_homes WHERE id = ?').run(cleanId);
+        if ((info.changes || 0) > 0) {
+            db.prepare("UPDATE social_housing_bindings SET housing_id = '' WHERE housing_id = ?").run(cleanId);
+        }
+        return info.changes || 0;
     }
 
     function getHousingById(id) {
@@ -404,14 +434,18 @@ module.exports = function initSocialHousingDb(db) {
         return Date.now() + dueDays * 24 * 60 * 60 * 1000;
     }
 
-    function saveBinding(characterId, payload) {
+    function saveBinding(characterId, payload = {}) {
         const current = db.prepare('SELECT * FROM social_housing_bindings WHERE character_id = ?').get(characterId) || null;
         const nextHousingId = String(payload.housing_id || '').trim();
+        const nextClassId = String(payload.social_class_id || '').trim();
         const home = getHousingById(nextHousingId);
-        const rentWeekly = Number(payload.rent_weekly || 0) || Number(home?.weekly_rent || 0);
-        const depositPaid = Number(payload.deposit_paid ?? current?.deposit_paid ?? 0) || 0;
-        const nextDueAt = normalizeRentDueAt(payload, current, home);
-        const housingChanged = String(nextHousingId || '') !== String(current?.housing_id || '');
+        if (nextHousingId && !home) throw new SocialHousingValidationError('房屋不存在');
+        if (nextClassId && !getClassById(nextClassId)) throw new SocialHousingValidationError('阶层不存在');
+        const normalized = normalizeHousingBindingPayload(payload, current, home);
+        const rentWeekly = normalized.rent_weekly;
+        const depositPaid = normalized.deposit_paid;
+        const nextDueAt = normalizeRentDueAt(normalized, current, home);
+        const housingChanged = String(normalized.housing_id || '') !== String(current?.housing_id || '');
         db.prepare(`
             INSERT INTO social_housing_bindings
             (character_id, social_class_id, housing_id, housing_status, rent_weekly, rent_due_day, rent_due_at, rent_last_paid_at, deposit_paid, missed_rent_count, note, updated_at)
@@ -430,15 +464,15 @@ module.exports = function initSocialHousingDb(db) {
                 updated_at=excluded.updated_at
         `).run(
             characterId,
-            String(payload.social_class_id || '').trim(),
-            nextHousingId,
+            nextClassId,
+            normalized.housing_id,
             String(payload.housing_status || (housingChanged ? 'stable' : current?.housing_status) || 'stable').trim() || 'stable',
             rentWeekly,
-            Number(payload.rent_due_day || 7),
+            normalized.rent_due_day,
             nextDueAt,
-            Number(payload.rent_last_paid_at ?? current?.rent_last_paid_at ?? 0) || 0,
+            normalized.rent_last_paid_at,
             depositPaid,
-            Number(payload.missed_rent_count ?? (housingChanged ? 0 : current?.missed_rent_count) ?? 0) || 0,
+            normalized.missed_rent_count,
             String(payload.note || '').trim(),
             Date.now()
         );
@@ -489,6 +523,8 @@ module.exports = function initSocialHousingDb(db) {
 
     function getAgencyConfig() {
         const row = db.prepare('SELECT * FROM social_housing_agency WHERE id = 1').get() || {};
+        const decisionIntervalHours = normalizeStoredAgencyDecisionIntervalHours(row.decision_interval_hours);
+        const intervalMinutes = normalizeStoredAgencyIntervalMinutes(decisionIntervalHours);
         return {
             enabled: Number(row.enabled ?? 1),
             agency_name: String(row.agency_name || DEFAULT_AGENCY.agency_name),
@@ -500,24 +536,24 @@ module.exports = function initSocialHousingDb(db) {
             llm_key: String(row.llm_key || ''),
             llm_model: String(row.llm_model || ''),
             ad_enabled: Number(row.ad_enabled ?? 1),
-            ad_min_interval_minutes: Number(row.ad_min_interval_minutes || 360),
-            ad_max_interval_minutes: Number(row.ad_max_interval_minutes || 360),
-            decision_interval_hours: Math.max(1, Number(row.decision_interval_hours || 6)),
+            ad_min_interval_minutes: intervalMinutes,
+            ad_max_interval_minutes: intervalMinutes,
+            decision_interval_hours: decisionIntervalHours,
             model_char_id: String(row.model_char_id || 'auto'),
-            last_ad_at: Number(row.last_ad_at || 0),
-            next_ad_at: Number(row.next_ad_at || 0),
+            last_ad_at: normalizeStoredAgencyTimestamp(row.last_ad_at),
+            next_ad_at: normalizeStoredAgencyTimestamp(row.next_ad_at),
             last_error: String(row.last_error || ''),
-            last_error_at: Number(row.last_error_at || 0),
-            updated_at: Number(row.updated_at || 0)
+            last_error_at: normalizeStoredAgencyTimestamp(row.last_error_at),
+            updated_at: normalizeStoredAgencyTimestamp(row.updated_at)
         };
     }
 
     function saveAgencyConfig(payload = {}) {
         const current = getAgencyConfig();
-        const next = {
+        const next = normalizeAgencyConfigPayload({
             ...current,
             ...payload
-        };
+        }, current);
         db.prepare(`
             INSERT INTO social_housing_agency
             (id, enabled, agency_name, agent_name, office_district, business_scope, persona_prompt, llm_endpoint, llm_key, llm_model, ad_enabled, ad_min_interval_minutes, ad_max_interval_minutes, last_ad_at, next_ad_at, updated_at, decision_interval_hours, model_char_id, last_error, last_error_at)
@@ -552,16 +588,16 @@ module.exports = function initSocialHousingDb(db) {
             String(next.llm_endpoint || '').trim(),
             String(next.llm_key || '').trim(),
             String(next.llm_model || '').trim(),
-            Number(next.ad_enabled ?? 1) === 1 ? 1 : 0,
-            Math.max(10, Number(next.ad_min_interval_minutes || 360)),
-            Math.max(10, Number(next.ad_max_interval_minutes || 360)),
+            next.ad_enabled,
+            next.ad_min_interval_minutes,
+            next.ad_max_interval_minutes,
             Number(next.last_ad_at || 0),
-            Number(next.next_ad_at || 0),
+            next.next_ad_at,
             Date.now(),
-            Math.max(1, Number(next.decision_interval_hours || 6)),
+            next.decision_interval_hours,
             String(next.model_char_id || 'auto').trim() || 'auto',
             String(next.last_error || '').trim(),
-            Number(next.last_error_at || 0)
+            next.last_error_at
         );
         return getAgencyConfig();
     }
@@ -586,11 +622,15 @@ module.exports = function initSocialHousingDb(db) {
     }
 
     function getAgencyAdById(id) {
-        return db.prepare('SELECT * FROM social_housing_ads WHERE id = ?').get(Number(id)) || null;
+        const adId = Number(id);
+        if (!Number.isSafeInteger(adId) || adId <= 0) return null;
+        return db.prepare('SELECT * FROM social_housing_ads WHERE id = ?').get(adId) || null;
     }
 
     function deleteAgencyAd(id) {
-        db.prepare('DELETE FROM social_housing_ads WHERE id = ?').run(Number(id));
+        const adId = Number(id);
+        if (!Number.isSafeInteger(adId) || adId <= 0) return 0;
+        return db.prepare('DELETE FROM social_housing_ads WHERE id = ?').run(adId).changes || 0;
     }
 
     function getHousingContextForCharacter(characterId) {
@@ -659,6 +699,7 @@ module.exports = function initSocialHousingDb(db) {
 
     return {
         getClasses,
+        getClassById,
         getHousingTiers,
         getHousingById,
         upsertClass,

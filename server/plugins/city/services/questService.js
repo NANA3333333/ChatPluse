@@ -3,7 +3,6 @@ function createQuestService(deps = {}) {
         callLLM,
         recordCityLlmDebug,
         buildCityAttemptRecorder,
-        buildCollapsedCityLog,
         scoreQuestProgressWithMayor
     } = deps;
 
@@ -14,6 +13,13 @@ function createQuestService(deps = {}) {
             richNarrations?.moment,
             richNarrations?.diary
         ].map((value) => String(value || '').trim()).filter(Boolean).join('\n');
+    }
+
+    function cleanQuestJsonReply(text) {
+        return String(text || '')
+            .replace(/```(?:json)?\s*/gi, '')
+            .replace(/```/g, '')
+            .trim();
     }
 
     function normalizeQuestIntent(richNarrations = null) {
@@ -78,16 +84,8 @@ function createQuestService(deps = {}) {
     }
 
     async function buildQuestResolutionNarrations(char, quest, district, db, outcome = 'success') {
-        const fallbackLog = buildCollapsedCityLog(char, outcome === 'success' ? '任务完成文案生成失败' : '任务失败文案生成失败', { district });
-        const fallbackSystemLog = buildCollapsedCityLog(char, outcome === 'success' ? '任务系统播报生成失败' : '任务失效播报生成失败', { district });
-        const fallbackAnnouncement = buildCollapsedCityLog(char, outcome === 'success' ? '任务完成公告生成失败' : '任务失效公告生成失败', { district });
-
         if (!(char?.api_endpoint && char?.api_key && char?.model_name)) {
-            return {
-                log: fallbackLog,
-                systemLog: fallbackSystemLog,
-                announcement: fallbackAnnouncement
-            };
+            throw new Error('任务结果文案生成缺少模型配置，请重试。');
         }
 
         const districtLabel = district ? `${district.emoji || ''}${district.name || district.id || ''}` : (quest?.target_district || '商业街');
@@ -144,20 +142,19 @@ function createQuestService(deps = {}) {
                 questId: quest?.id || 0,
                 outcome
             });
-            const match = String(reply || '').match(/\{[\s\S]*\}/);
-            const parsed = match ? JSON.parse(match[0]) : null;
-            return {
-                log: String(parsed?.log || '').trim() || fallbackLog,
-                systemLog: String(parsed?.systemLog || '').trim() || fallbackSystemLog,
-                announcement: String(parsed?.announcement || '').trim() || fallbackAnnouncement
-            };
+            const cleaned = cleanQuestJsonReply(reply);
+            if (!cleaned) throw new Error('任务结果文案生成没有返回 JSON。');
+            const parsed = JSON.parse(cleaned);
+            const log = String(parsed?.log || '').trim();
+            const systemLog = String(parsed?.systemLog || '').trim();
+            const announcement = String(parsed?.announcement || '').trim();
+            if (!log || !systemLog || !announcement) {
+                throw new Error('任务结果文案生成字段不完整。');
+            }
+            return { log, systemLog, announcement };
         } catch (err) {
             console.warn(`[City] 任务结果文案生成失败 ${char?.name || ''}: ${err.message}`);
-            return {
-                log: fallbackLog,
-                systemLog: fallbackSystemLog,
-                announcement: fallbackAnnouncement
-            };
+            throw err;
         }
     }
 
@@ -190,13 +187,14 @@ function createQuestService(deps = {}) {
         const canReport = ['ready_to_report', 'reporting'].includes(String(activeClaim.status || ''))
             || Number(activeClaim.progress_count || 0) >= Math.max(1, Number(activeClaim.completion_target || quest?.completion_target || 1));
         if (reportRequested && canReport) {
+            const expectedOutcome = quest.is_completed || String(quest.status || '') === 'completed' ? 'failed' : 'success';
+            const resolution = await buildQuestResolutionNarrations(char, quest, district, db, expectedOutcome);
             db.city.updateQuestClaimStage?.(activeClaim.quest_id, char.id, 'reporting', 0, '准备汇报交付');
             const result = db.city.resolveQuestCompletion?.(activeClaim.quest_id, char.id);
             if (result?.success && result.won) {
                 bonusMoney += Number(result.reward_gold || 0);
                 bonusCalories += Number(result.reward_cal || 0);
                 if (quest.source_announcement_id) db.city.deleteCityAnnouncement?.(quest.source_announcement_id);
-                const resolution = await buildQuestResolutionNarrations(char, quest, district, db, 'success');
                 const targetScore = Math.max(1, Number(activeClaim.completion_target || quest?.completion_target || 1));
                 const currentProgress = Math.max(0, Number(activeClaim.progress_count || 0));
                 const completionDelta = Math.max(0, targetScore - currentProgress);
@@ -221,7 +219,6 @@ function createQuestService(deps = {}) {
                 db.city.addCityAnnouncement?.('system', '任务完成', resolution.announcement, district.id);
                 return { bonusMoney, bonusCalories, questReview: review };
             } else if (result?.success && !result.won) {
-                const resolution = await buildQuestResolutionNarrations(char, quest, district, db, 'failed');
                 db.city.logAction(char.id, 'QUEST', resolution.log, 0, 0, district.id);
                 db.city.logAction('system', 'QUEST', resolution.systemLog, 0, 0, district.id);
                 db.city.addCityAnnouncement?.('system', '任务失效', resolution.announcement, district.id);

@@ -262,6 +262,10 @@ module.exports = function initAdminDashboard(app, context) {
         return targetUser;
     };
 
+    const sendAdminUserMutationNotFound = (res) => {
+        return res.status(404).json({ error: 'User not found' });
+    };
+
     const getQdrantMode = () => {
         const config = qdrant.getQdrantConfig();
         if (!config.enabled) return 'disabled';
@@ -332,7 +336,7 @@ module.exports = function initAdminDashboard(app, context) {
             });
             res.json({ success: true, code });
         } catch (e) {
-            res.status(500).json({ error: e.message });
+            res.status(e.statusCode === 400 ? 400 : 500).json({ error: e.message });
         }
     });
 
@@ -359,7 +363,8 @@ module.exports = function initAdminDashboard(app, context) {
 
     app.delete('/api/admin/invites/:code', authMiddleware, adminMiddleware, (req, res) => {
         try {
-            authDb.deleteInviteCode(req.params.code);
+            const deleted = authDb.deleteInviteCode(req.params.code);
+            if (!deleted) return res.status(404).json({ error: 'Invite code not found' });
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -368,15 +373,16 @@ module.exports = function initAdminDashboard(app, context) {
 
     app.put('/api/admin/invites/:code', authMiddleware, adminMiddleware, (req, res) => {
         try {
-            authDb.updateInviteCode(req.params.code, {
+            const updated = authDb.updateInviteCode(req.params.code, {
                 status: req.body?.status,
                 note: req.body?.note,
                 maxUses: req.body?.maxUses,
                 expiresAt: req.body?.expiresAt
             });
+            if (!updated) return res.status(404).json({ error: 'Invite code not found' });
             res.json({ success: true });
         } catch (e) {
-            res.status(500).json({ error: e.message });
+            res.status(e.statusCode === 400 ? 400 : 500).json({ error: e.message });
         }
     });
 
@@ -387,9 +393,13 @@ module.exports = function initAdminDashboard(app, context) {
             if (!getMutableAdminTarget(req, res)) return;
             markUserDbDeleting(targetId);
 
-            // 1. Force disconnect websocket
+            const deleted = authDb.deleteUser(targetId);
+            if (!deleted) {
+                unmarkUserDbDeleting(targetId);
+                return sendAdminUserMutationNotFound(res);
+            }
+
             disconnectUserSessions(targetId);
-            authDb.deleteUser(targetId);
 
             try {
                 await cleanupUserStorage(targetId);
@@ -416,10 +426,12 @@ module.exports = function initAdminDashboard(app, context) {
             if (targetId === req.user.id) return res.status(400).json({ error: 'Cannot ban yourself' });
             if (!getMutableAdminTarget(req, res)) return;
             const banned = !!req.body?.banned;
-            authDb.setUserStatus(targetId, banned ? 'banned' : 'active');
-            authDb.bumpTokenVersion(targetId);
+            const status = banned ? 'banned' : 'active';
+            const updated = authDb.setUserStatus(targetId, status);
+            const tokenUpdated = updated ? authDb.bumpTokenVersion(targetId) : 0;
+            if (!updated || !tokenUpdated) return sendAdminUserMutationNotFound(res);
             disconnectUserSessions(targetId);
-            res.json({ success: true, status: banned ? 'banned' : 'active' });
+            res.json({ success: true, status });
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -436,8 +448,9 @@ module.exports = function initAdminDashboard(app, context) {
                 return res.status(400).json({ error: 'Invalid role' });
             }
             if (!getMutableAdminTarget(req, res)) return;
-            authDb.setUserRole(targetId, nextRole);
-            authDb.bumpTokenVersion(targetId);
+            const updated = authDb.setUserRole(targetId, nextRole);
+            const tokenUpdated = updated ? authDb.bumpTokenVersion(targetId) : 0;
+            if (!updated || !tokenUpdated) return sendAdminUserMutationNotFound(res);
             disconnectUserSessions(targetId);
             res.json({ success: true, role: nextRole });
         } catch (e) {
@@ -453,7 +466,8 @@ module.exports = function initAdminDashboard(app, context) {
             if (newPassword.length < 6) {
                 return res.status(400).json({ error: 'Password must be at least 6 characters long' });
             }
-            authDb.resetPassword(targetId, newPassword);
+            const updated = authDb.resetPassword(targetId, newPassword);
+            if (!updated) return sendAdminUserMutationNotFound(res);
             disconnectUserSessions(targetId);
             res.json({ success: true });
         } catch (e) {
@@ -465,7 +479,8 @@ module.exports = function initAdminDashboard(app, context) {
         try {
             const targetId = req.params.id;
             if (!getMutableAdminTarget(req, res)) return;
-            authDb.bumpTokenVersion(targetId);
+            const updated = authDb.bumpTokenVersion(targetId);
+            if (!updated) return sendAdminUserMutationNotFound(res);
             disconnectUserSessions(targetId);
             res.json({ success: true });
         } catch (e) {

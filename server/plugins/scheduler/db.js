@@ -3,6 +3,11 @@ const path = require('path');
 const Database = require('better-sqlite3');
 const { isUserDbDeleting } = require('../../db');
 
+function normalizeDbTaskId(taskId) {
+    const parsed = Number(taskId);
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 const userDbs = new Map();
 
 function getSchedulerDb(userId) {
@@ -51,20 +56,30 @@ function getSchedulerDb(userId) {
             const stmt = db.prepare("SELECT * FROM scheduled_tasks WHERE is_enabled = 1");
             return stmt.all();
         },
-        addTask: (charId, cronExpr, taskPrompt, actionType, isEnabled = 1, batchSize = 80) => {
+        addTask: (taskOrCharId, cronExpr, taskPrompt, actionType, isEnabled = 1, batchSize = 80) => {
+            const task = typeof taskOrCharId === 'object'
+                ? taskOrCharId
+                : { character_id: taskOrCharId, cron_expr: cronExpr, task_prompt: taskPrompt, action_type: actionType, is_enabled: isEnabled, batch_size: batchSize };
             const stmt = db.prepare("INSERT INTO scheduled_tasks (character_id, cron_expr, task_prompt, action_type, is_enabled, batch_size) VALUES (?, ?, ?, ?, ?, ?)");
-            const info = stmt.run(charId, cronExpr, taskPrompt, actionType, isEnabled ? 1 : 0, batchSize);
+            const info = stmt.run(task.character_id, task.cron_expr, task.task_prompt, task.action_type, task.is_enabled === 1 ? 1 : 0, task.batch_size);
             return info.lastInsertRowid;
         },
-        updateTask: (taskId, charId, cronExpr, taskPrompt, actionType, isEnabled, batchSize = 80) => {
+        updateTask: (taskId, taskOrCharId, cronExpr, taskPrompt, actionType, isEnabled, batchSize = 80) => {
+            const id = normalizeDbTaskId(taskId);
+            if (!id) return false;
+            const task = typeof taskOrCharId === 'object'
+                ? taskOrCharId
+                : { character_id: taskOrCharId, cron_expr: cronExpr, task_prompt: taskPrompt, action_type: actionType, is_enabled: isEnabled, batch_size: batchSize };
             const stmt = db.prepare("UPDATE scheduled_tasks SET character_id = ?, cron_expr = ?, task_prompt = ?, action_type = ?, is_enabled = ?, batch_size = ? WHERE id = ?");
-            stmt.run(charId, cronExpr, taskPrompt, actionType, isEnabled ? 1 : 0, batchSize, taskId);
-            return true;
+            const info = stmt.run(task.character_id, task.cron_expr, task.task_prompt, task.action_type, task.is_enabled === 1 ? 1 : 0, task.batch_size, id);
+            return (info.changes || 0) > 0;
         },
         deleteTask: (taskId) => {
+            const id = normalizeDbTaskId(taskId);
+            if (!id) return false;
             const stmt = db.prepare("DELETE FROM scheduled_tasks WHERE id = ?");
-            stmt.run(taskId);
-            return true;
+            const info = stmt.run(id);
+            return (info.changes || 0) > 0;
         },
         deleteTasksForCharacter: (charId) => {
             const stmt = db.prepare("DELETE FROM scheduled_tasks WHERE character_id = ?");

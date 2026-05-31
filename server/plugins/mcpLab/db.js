@@ -1,3 +1,5 @@
+const { McpLabValidationError } = require('./inputGuards');
+
 function safeParseJson(value, fallback) {
     if (!value) return fallback;
     if (typeof value !== 'string') return value;
@@ -6,6 +8,14 @@ function safeParseJson(value, fallback) {
     } catch (e) {
         return fallback;
     }
+}
+
+function normalizeDbLimit(value, fallback, max) {
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > max) {
+        throw new McpLabValidationError('Invalid numeric value');
+    }
+    return parsed;
 }
 
 function stringifyJson(value, fallback = '[]') {
@@ -181,7 +191,7 @@ function initMcpLabDb(rawDb) {
         if (!q) return [];
         const terms = q.split(/\s+/).map(v => v.trim()).filter(Boolean).slice(0, 8);
         const characterId = String(options.character_id || '');
-        const limit = Math.max(1, Math.min(30, Number(options.limit || 8) || 8));
+        const limit = normalizeDbLimit(options.limit ?? 8, 8, 30);
         const rows = rawDb.prepare(`
             SELECT
                 c.id AS chunk_id,
@@ -238,7 +248,7 @@ function initMcpLabDb(rawDb) {
 
     function listExternalKnowledgeDocs(options = {}) {
         const characterId = String(options.character_id || '');
-        const limit = Math.max(1, Math.min(100, Number(options.limit || 30) || 30));
+        const limit = normalizeDbLimit(options.limit ?? 30, 30, 100);
         return rawDb.prepare(`
             SELECT * FROM external_knowledge_docs
             WHERE (? = '' OR character_id = '' OR character_id = ?)
@@ -275,7 +285,7 @@ function initMcpLabDb(rawDb) {
     }
 
     function listTasks(ownerId = '', limit = 80) {
-        const normalizedLimit = Math.max(1, Math.min(200, Number(limit || 80) || 80));
+        const normalizedLimit = normalizeDbLimit(limit ?? 80, 80, 200);
         return rawDb.prepare(`
             SELECT * FROM mcp_lab_tasks
             WHERE owner_id = ?

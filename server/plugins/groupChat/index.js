@@ -11,10 +11,95 @@ function initGroupChatPlugin(app, context) {
         wss, getWsClients, authDb, authMiddleware,
         getUserDb, getEngine, getMemory, callLLM
     } = context;
+    const GROUP_HIDDEN_TAG_REGEX = /\[(?:CHAR_AFFINITY|AFFINITY|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|PRESSURE|TIMER|TRANSFER|DIARY_PASSWORD|Red Packet|REDPACKET_SEND)[^\]]*\]/gi;
 
     function recordGroupTokenUsage(db, characterId, contextType, usage) {
         if (!usage || !characterId || !db?.addTokenUsage) return;
         db.addTokenUsage(characterId, contextType, usage.prompt_tokens || 0, usage.completion_tokens || 0);
+    }
+
+    function broadcastMomentUpdate(wsClients) {
+        const payload = JSON.stringify({ type: 'moment_update' });
+        wsClients.forEach(c => { if (c.readyState === 1) c.send(payload); });
+    }
+
+    function stripGroupHiddenTags(text) {
+        return String(text || '')
+            .replace(GROUP_HIDDEN_TAG_REGEX, '')
+            .replace(/\[\s*\]/g, '')
+            .replace(/\n{3,}/g, '\n\n')
+            .trim();
+    }
+
+    function normalizeGeneratedMomentId(value) {
+        const text = String(value ?? '').trim();
+        if (!/^\d+$/.test(text)) return null;
+        const id = Number(text);
+        return Number.isSafeInteger(id) && id > 0 ? id : null;
+    }
+
+    function validateGeneratedMomentInteractions(db, text) {
+        const raw = String(text || '');
+        const likeRegex = /\[MOMENT_LIKE:\s*([^\]]*)\]/gi;
+        let likeMatch;
+        while ((likeMatch = likeRegex.exec(raw)) !== null) {
+            const momentId = normalizeGeneratedMomentId(likeMatch[1]);
+            if (!momentId || !db.getMoment?.(momentId)) {
+                throw new Error('Group AI returned invalid moment like target. Please retry.');
+            }
+        }
+
+        const commentRegex = /\[MOMENT_COMMENT:\s*([^\]]*)\]/gi;
+        let commentMatch;
+        while ((commentMatch = commentRegex.exec(raw)) !== null) {
+            const payload = String(commentMatch[1] || '');
+            const splitAt = payload.indexOf(':');
+            if (splitAt < 0) throw new Error('Group AI returned malformed moment comment tag. Please retry.');
+            const momentId = normalizeGeneratedMomentId(payload.slice(0, splitAt));
+            const comment = payload.slice(splitAt + 1).trim();
+            if (!momentId || !comment || !db.getMoment?.(momentId)) {
+                throw new Error('Group AI returned invalid moment comment target. Please retry.');
+            }
+        }
+    }
+
+    function normalizeGeneratedIntegerInRange(value, min, max) {
+        const text = String(value ?? '').trim();
+        if (!/^[+-]?\d+$/.test(text)) return null;
+        const parsed = Number(text);
+        return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+    }
+
+    function parseGeneratedAffinityDelta(text) {
+        const match = String(text || '').match(/\[AFFINITY:\s*([^\]]*)\]/i);
+        if (!match) return null;
+        const delta = normalizeGeneratedIntegerInRange(match[1], -100, 100);
+        if (delta === null) throw new Error('Group AI returned invalid affinity delta. Please retry.');
+        return delta;
+    }
+
+    function parseGeneratedCharAffinityDeltas(db, text, options = {}) {
+        const raw = String(text || '');
+        const selfId = String(options.selfId || '').trim();
+        const allowedTargetIds = options.allowedTargetIds instanceof Set ? options.allowedTargetIds : null;
+        const deltas = [];
+        const tagRegex = /\[CHAR_AFFINITY:\s*([^\]]*)\]/gi;
+        let match;
+        while ((match = tagRegex.exec(raw)) !== null) {
+            const payload = String(match[1] || '').trim();
+            const splitAt = payload.lastIndexOf(':');
+            if (splitAt <= 0) throw new Error('Group AI returned malformed character affinity tag. Please retry.');
+            const targetId = payload.slice(0, splitAt).trim();
+            const delta = normalizeGeneratedIntegerInRange(payload.slice(splitAt + 1), -100, 100);
+            if (!targetId || delta === null) {
+                throw new Error('Group AI returned invalid character affinity delta. Please retry.');
+            }
+            if (targetId === selfId || (allowedTargetIds && !allowedTargetIds.has(targetId)) || !db.getCharacter?.(targetId)) {
+                throw new Error('Group AI returned invalid character affinity target. Please retry.');
+            }
+            deltas.push({ targetId, delta });
+        }
+        return deltas;
     }
 
     function getCachedGroupPromptBlock(db, characterId, blockType, sourcePayload, buildFn) {
@@ -46,6 +131,59 @@ function initGroupChatPlugin(app, context) {
         if (!cleaned) return '';
         if (cleaned.length <= maxLength) return cleaned;
         return `${cleaned.slice(0, Math.max(12, maxLength - 1)).trim()}…`;
+    }
+
+    function normalizeGroupMemberIds(value) {
+        if (!Array.isArray(value)) return [];
+        return Array.from(new Set(value
+            .map(memberId => String(memberId || '').trim())
+            .filter(Boolean)));
+    }
+
+    function getInvalidGroupMemberIds(db, memberIds) {
+        return memberIds.filter(memberId => memberId === 'user' || !db.getCharacter(memberId));
+    }
+
+    function normalizeGroupIntegerSetting(value, min, max) {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < min || parsed > max) return null;
+        return parsed;
+    }
+
+    function normalizeGroupName(value) {
+        if (typeof value !== 'string') return '';
+        return value.trim();
+    }
+
+    function normalizeGroupMessageLimit(value) {
+        if (value === undefined) return 100;
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+        return Math.min(parsed, 200);
+    }
+
+    const GENERATED_RED_PACKET_TYPES = new Set(['fixed', 'lucky']);
+
+    function normalizeGeneratedRedPacketType(value) {
+        const type = String(value || '').trim().toLowerCase();
+        if (!GENERATED_RED_PACKET_TYPES.has(type)) throw new Error('Invalid REDPACKET_SEND type');
+        return type;
+    }
+
+    function normalizeGeneratedRedPacketAmount(value) {
+        const text = String(value || '').trim();
+        if (!/^\d+(?:\.\d{1,2})?$/.test(text)) throw new Error('Invalid REDPACKET_SEND amount');
+        const amount = Number(text);
+        if (!Number.isFinite(amount) || amount < 1 || amount > 200) throw new Error('Invalid REDPACKET_SEND amount');
+        return +amount.toFixed(2);
+    }
+
+    function normalizeGeneratedRedPacketCount(value) {
+        const text = String(value || '').trim();
+        if (!/^\d+$/.test(text)) throw new Error('Invalid REDPACKET_SEND count');
+        const count = Number(text);
+        if (!Number.isSafeInteger(count) || count < 1 || count > 20) throw new Error('Invalid REDPACKET_SEND count');
+        return count;
     }
 
     function buildCompactGroupAntiRepeat(character, messages) {
@@ -122,17 +260,23 @@ function initGroupChatPlugin(app, context) {
         const wsClients = getWsClients(req.user.id);
         try {
             const { name, member_ids } = req.body;
-            if (!name || !member_ids || member_ids.length === 0) {
+            const groupName = normalizeGroupName(name);
+            const memberIds = normalizeGroupMemberIds(member_ids);
+            if (!groupName || memberIds.length === 0) {
                 return res.status(400).json({ error: 'name and member_ids are required' });
+            }
+            const invalidMemberIds = getInvalidGroupMemberIds(db, memberIds);
+            if (invalidMemberIds.length > 0) {
+                return res.status(400).json({ error: 'Invalid group member ids', invalid_member_ids: invalidMemberIds });
             }
             const id = 'group_' + Date.now();
             // Generate a group avatar mosaic from members
-            const firstMember = db.getCharacter(member_ids[0]);
+            const firstMember = db.getCharacter(memberIds[0]);
             const avatar = firstMember?.avatar || 'https://api.dicebear.com/7.x/shapes/svg?seed=' + id;
-            db.createGroup(id, name, member_ids, avatar);
+            db.createGroup(id, groupName, memberIds, avatar);
             res.json({ success: true, group: db.getGroup(id) });
         } catch (e) {
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({ error: e.message, invalid_member_ids: e.invalid_member_ids });
         }
     });
 
@@ -146,9 +290,27 @@ function initGroupChatPlugin(app, context) {
             // Use raw SQL update since db wrapper doesn't have updateGroup
             const updates = [];
             const values = [];
-            if (inject_limit !== undefined) { updates.push('inject_limit = ?'); values.push(Math.max(0, parseInt(inject_limit) || 0)); }
-            if (name !== undefined && name.trim()) { updates.push('name = ?'); values.push(name.trim()); }
-            if (context_msg_limit !== undefined) { updates.push('context_msg_limit = ?'); values.push(Math.max(1, parseInt(context_msg_limit) || 60)); }
+            if (inject_limit !== undefined) {
+                const injectLimit = normalizeGroupIntegerSetting(inject_limit, 0, 30);
+                if (injectLimit === null) return res.status(400).json({ error: 'Invalid inject limit' });
+                updates.push('inject_limit = ?');
+                values.push(injectLimit);
+            }
+            if (name !== undefined) {
+                const groupName = normalizeGroupName(name);
+                if (groupName) {
+                    updates.push('name = ?');
+                    values.push(groupName);
+                } else {
+                    return res.status(400).json({ error: 'Invalid group name' });
+                }
+            }
+            if (context_msg_limit !== undefined) {
+                const contextLimit = normalizeGroupIntegerSetting(context_msg_limit, 10, 200);
+                if (contextLimit === null) return res.status(400).json({ error: 'Invalid context message limit' });
+                updates.push('context_msg_limit = ?');
+                values.push(contextLimit);
+            }
             if (updates.length > 0) {
                 values.push(req.params.id);
                 db.rawRun(`UPDATE group_chats SET ${updates.join(', ')} WHERE id = ?`, values);
@@ -169,8 +331,11 @@ function initGroupChatPlugin(app, context) {
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            const limit = parseInt(req.query.limit) || 100;
-            res.json(db.getGroupMessages(req.params.id, limit));
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            const limit = normalizeGroupMessageLimit(req.query.limit);
+            if (!limit) return res.status(400).json({ error: 'Invalid message limit' });
+            res.json(db.getGroupMessages(group.id, limit));
         } catch (e) {
             res.status(500).json({ error: e.message });
         }
@@ -185,12 +350,21 @@ function initGroupChatPlugin(app, context) {
         const wsClients = getWsClients(req.user.id);
         try {
             const { member_id } = req.body;
-            if (!member_id) return res.status(400).json({ error: 'member_id is required' });
-            db.addGroupMember(req.params.id, member_id);
+            const memberId = String(member_id || '').trim();
+            if (!memberId) return res.status(400).json({ error: 'member_id is required' });
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            if (memberId === 'user' || !db.getCharacter(memberId)) {
+                return res.status(400).json({ error: 'Invalid group member id' });
+            }
+            const alreadyMember = group.members.some(m => String(m.member_id) === memberId);
+            if (alreadyMember) return res.status(409).json({ error: 'Group member already exists' });
+            const added = db.addGroupMember(req.params.id, memberId);
+            if (!added) return res.status(400).json({ error: 'Unable to add group member' });
 
             // Insert system announcement message
-            const char = db.getCharacter(member_id);
-            const charName = char?.name || member_id;
+            const char = db.getCharacter(memberId);
+            const charName = char?.name || memberId;
             const sysContent = '[System] ' + charName + ' 加入了群聊';
             const sysMsgId = db.addGroupMessage(req.params.id, 'system', sysContent, 'System', '');
             const sysMsg = { id: sysMsgId, group_id: req.params.id, sender_id: 'system', content: sysContent, timestamp: Date.now(), sender_name: 'System', sender_avatar: '' };
@@ -204,7 +378,7 @@ function initGroupChatPlugin(app, context) {
 
             // Trigger AI chain so all members (including new one) react to the joining
             setTimeout(() => {
-                triggerGroupAIChain(req.user.id, req.params.id, wsClients, [member_id], true);
+                triggerGroupAIChain(req.user.id, req.params.id, wsClients, [memberId], true);
             }, 1500);
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -218,11 +392,17 @@ function initGroupChatPlugin(app, context) {
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            const memberId = String(req.params.memberId || '').trim();
+            if (!memberId || memberId === 'user') return res.status(400).json({ error: 'Invalid group member id' });
+            const isMember = group.members.some(m => String(m.member_id) === memberId);
+            if (!isMember) return res.status(404).json({ error: 'Group member not found' });
             // Get char name before removing
-            const char = db.getCharacter(req.params.memberId);
-            const charName = char?.name || req.params.memberId;
+            const char = db.getCharacter(memberId);
+            const charName = char?.name || memberId;
 
-            db.removeGroupMember(req.params.id, req.params.memberId);
+            db.removeGroupMember(req.params.id, memberId);
 
             // Insert system announcement message
             const sysContent = '[System] ' + charName + ' 被移出了群聊';
@@ -241,7 +421,7 @@ function initGroupChatPlugin(app, context) {
                 triggerGroupAIChain(req.user.id, req.params.id, wsClients, [], false, false);
             }, 1500);
         } catch (e) {
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({ error: e.message });
         }
     });
 
@@ -252,7 +432,11 @@ function initGroupChatPlugin(app, context) {
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            db.deleteGroup(req.params.id);
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            engine.stopGroupProactiveTimer(group.id);
+            db.deleteGroup(group.id);
+            clearGroupRuntimeState(group.id);
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -266,7 +450,9 @@ function initGroupChatPlugin(app, context) {
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
         try {
-            db.clearGroupMessages(req.params.id);
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            db.clearGroupMessages(group.id);
             res.json({ success: true });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -281,7 +467,9 @@ function initGroupChatPlugin(app, context) {
             if (!messageIds || !Array.isArray(messageIds) || messageIds.length === 0) {
                 return res.status(400).json({ error: 'messageIds array required' });
             }
-            const deleted = db.deleteGroupMessages(req.params.id, messageIds);
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            const deleted = db.deleteGroupMessages(group.id, messageIds);
             res.json({ success: true, deleted });
         } catch (e) {
             res.status(500).json({ error: e.message });
@@ -297,28 +485,51 @@ function initGroupChatPlugin(app, context) {
     const noChainGroups = new Set(); // groups where AI-to-AI secondary @-mention chains are blocked
     const groupPendingMentions = {}; // { groupId: { ids: Set, isAtAll: bool } } accumulates mentions across debounce resets
 
+    function clearGroupRuntimeState(groupId) {
+        const id = String(groupId || '').trim();
+        if (!id) return;
+        pausedGroups.delete(id);
+        noChainGroups.delete(id);
+        if (groupDebounceTimers[id]) {
+            clearTimeout(groupDebounceTimers[id]);
+            delete groupDebounceTimers[id];
+        }
+        delete groupReplyLock[id];
+        delete groupInterrupt[id];
+        delete groupPendingMentions[id];
+    }
+
     // 14.10 Set AI pause for a group
     app.post('/api/groups/:id/ai-pause', authMiddleware, (req, res) => {
         const db = getUserDb(req.user.id);
         const engine = getEngine(req.user.id);
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
-        const id = req.params.id;
-        // Allow explicitly setting state from request body, otherwise fallback to toggle
-        const wantsPause = req.body && req.body.paused !== undefined ? req.body.paused : !pausedGroups.has(id);
+        try {
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            const id = group.id;
+            // Allow explicitly setting state from request body, otherwise fallback to toggle
+            const requestedPause = req.body?.paused;
+            const wantsPause = requestedPause !== undefined
+                ? requestedPause === true || requestedPause === 1 || requestedPause === '1' || String(requestedPause).toLowerCase() === 'true'
+                : !pausedGroups.has(id);
 
-        if (!wantsPause) {
-            pausedGroups.delete(id);
-            // Restart proactive timer if it was running
-            engine.scheduleGroupProactive(id, wsClients);
-            res.json({ paused: false });
-        } else {
-            pausedGroups.add(id);
-            engine.stopGroupProactiveTimer(id);
-            // Clear any pending debounce/chaining locks instantly
-            if (groupDebounceTimers[id]) { clearTimeout(groupDebounceTimers[id]); delete groupDebounceTimers[id]; }
-            delete groupReplyLock[id];
-            res.json({ paused: true });
+            if (!wantsPause) {
+                pausedGroups.delete(id);
+                // Restart proactive timer if it was running
+                engine.scheduleGroupProactive(id, wsClients);
+                res.json({ paused: false });
+            } else {
+                pausedGroups.add(id);
+                engine.stopGroupProactiveTimer(id);
+                // Clear any pending debounce/chaining locks instantly
+                if (groupDebounceTimers[id]) { clearTimeout(groupDebounceTimers[id]); delete groupDebounceTimers[id]; }
+                delete groupReplyLock[id];
+                res.json({ paused: true });
+            }
+        } catch (e) {
+            res.status(500).json({ error: e.message });
         }
     });
 
@@ -327,7 +538,13 @@ function initGroupChatPlugin(app, context) {
         const engine = getEngine(req.user.id);
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
-        res.json({ paused: pausedGroups.has(req.params.id) });
+        try {
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            res.json({ paused: pausedGroups.has(group.id) });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
     });
 
     // 14.11 Toggle AI-to-AI secondary @-mention chain for a group
@@ -336,13 +553,19 @@ function initGroupChatPlugin(app, context) {
         const engine = getEngine(req.user.id);
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
-        const id = req.params.id;
-        if (noChainGroups.has(id)) {
-            noChainGroups.delete(id);
-            res.json({ noChain: false });
-        } else {
-            noChainGroups.add(id);
-            res.json({ noChain: true });
+        try {
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            const id = group.id;
+            if (noChainGroups.has(id)) {
+                noChainGroups.delete(id);
+                res.json({ noChain: false });
+            } else {
+                noChainGroups.add(id);
+                res.json({ noChain: true });
+            }
+        } catch (e) {
+            res.status(500).json({ error: e.message });
         }
     });
 
@@ -351,7 +574,13 @@ function initGroupChatPlugin(app, context) {
         const engine = getEngine(req.user.id);
         const memory = getMemory(req.user.id);
         const wsClients = getWsClients(req.user.id);
-        res.json({ noChain: noChainGroups.has(req.params.id) });
+        try {
+            const group = db.getGroup(req.params.id);
+            if (!group) return res.status(404).json({ error: 'Group not found' });
+            res.json({ noChain: noChainGroups.has(group.id) });
+        } catch (e) {
+            res.status(500).json({ error: e.message });
+        }
     });
 
     function triggerGroupAIChain(userId, groupId, wsClients, mentionedIds = [], isAtAll = false, isSecondaryChain = false, carriedRedPacketFeedback = []) {
@@ -639,6 +868,9 @@ function initGroupChatPlugin(app, context) {
                         recordGroupTokenUsage(db, char.id, 'group_chat', usage);
 
 
+                        if (!reply || !reply.trim()) {
+                            throw new Error('Group AI returned no reply. Please retry.');
+                        }
                         if (reply && reply.trim()) {
                             let cleanReply = reply.trim();
                             // Strip AI's own name prefix; AI sometimes mimics the history format.
@@ -646,6 +878,19 @@ function initGroupChatPlugin(app, context) {
                             const nameEscaped = char.name.replace(/[.*+?^()|[\]\\{}$]/g, '\\$&');
                             const namePrefixRegex = new RegExp('^(?:\\[)?' + nameEscaped + '(?:\\])?[:：]\\s*', 'i');
                             cleanReply = cleanReply.replace(namePrefixRegex, '').trim();
+                            const visibleGroupReply = stripGroupHiddenTags(cleanReply);
+                            if (!visibleGroupReply) {
+                                throw new Error('Group AI returned no visible reply. Please retry.');
+                            }
+                            const groupMemberIds = new Set((group.members || [])
+                                .map(member => String(member.member_id || '').trim())
+                                .filter(memberId => memberId && memberId !== 'user'));
+                            validateGeneratedMomentInteractions(db, cleanReply);
+                            const generatedCharAffinityDeltas = parseGeneratedCharAffinityDeltas(db, cleanReply, {
+                                selfId: char.id,
+                                allowedTargetIds: groupMemberIds
+                            });
+                            const generatedUserAffinityDelta = parseGeneratedAffinityDelta(cleanReply);
 
                             recordGroupLlmDebug(db, char, 'output', cleanReply, {
                                 context_type: 'group_chat',
@@ -658,20 +903,14 @@ function initGroupChatPlugin(app, context) {
                             });
 
                             // Parse [CHAR_AFFINITY:targetId:delta] inter-character affinity changes.
-                            const charAffinityRegex = /\[CHAR_AFFINITY:([^:]+):([+-]?\d+)\]/gi;
-                            let affinityMatch;
-                            while ((affinityMatch = charAffinityRegex.exec(cleanReply)) !== null) {
-                                const targetId = affinityMatch[1].trim();
-                                const delta = parseInt(affinityMatch[2], 10);
-                                if (targetId && !isNaN(delta)) {
-                                    const groupSource = 'group:' + groupId;
-                                    const existing = db.getCharRelationship(char.id, targetId);
-                                    const existingGroupRow = existing?.sources?.find(s => s.source === groupSource);
-                                    const currentGroupAffinity = existingGroupRow?.affinity || 50;
-                                    const newAffinity = Math.max(0, Math.min(100, currentGroupAffinity + delta));
-                                    db.updateCharRelationship(char.id, targetId, groupSource, { affinity: newAffinity });
-                                    console.log('[Social] ' + char.name + ' -> ' + targetId + ': group affinity delta ' + delta + ', now ' + newAffinity);
-                                }
+                            for (const { targetId, delta } of generatedCharAffinityDeltas) {
+                                const groupSource = 'group:' + groupId;
+                                const existing = db.getCharRelationship(char.id, targetId);
+                                const existingGroupRow = existing?.sources?.find(s => s.source === groupSource);
+                                const currentGroupAffinity = existingGroupRow?.affinity || 50;
+                                const newAffinity = Math.max(0, Math.min(100, currentGroupAffinity + delta));
+                                const updated = db.updateCharRelationship(char.id, targetId, groupSource, { affinity: newAffinity });
+                                if (updated) console.log('[Social] ' + char.name + ' -> ' + targetId + ': group affinity delta ' + delta + ', now ' + newAffinity);
                             }
 
                             // Parse [MOMENT:content] char posts to their Moments feed.
@@ -679,6 +918,7 @@ function initGroupChatPlugin(app, context) {
                             if (momentMatch?.[1]) {
                                 db.addMoment(char.id, momentMatch[1].trim());
                                 console.log('[GroupChat] ' + char.name + ' posted a Moment from group chat.');
+                                broadcastMomentUpdate(wsClients);
                             }
 
                             // Parse [MOMENT_LIKE:id] char likes a Moment.
@@ -688,6 +928,7 @@ function initGroupChatPlugin(app, context) {
                                 if (mLikeMatch[1]) {
                                     db.toggleLike(parseInt(mLikeMatch[1], 10), char.id);
                                     console.log('[GroupChat] ' + char.name + ' liked moment ' + mLikeMatch[1]);
+                                    broadcastMomentUpdate(wsClients);
                                 }
                             }
 
@@ -698,6 +939,7 @@ function initGroupChatPlugin(app, context) {
                                 if (mCommentMatch[1] && mCommentMatch[2]) {
                                     db.addComment(parseInt(mCommentMatch[1], 10), char.id, mCommentMatch[2].trim());
                                     console.log('[GroupChat] ' + char.name + ' commented on moment ' + mCommentMatch[1] + ': ' + mCommentMatch[2]);
+                                    broadcastMomentUpdate(wsClients);
                                 }
                             }
 
@@ -709,9 +951,8 @@ function initGroupChatPlugin(app, context) {
                             }
 
                             // Parse [AFFINITY:+/-N] char's affinity toward user changes.
-                            const affinityUserMatch = cleanReply.match(/\[AFFINITY:\s*([+-]?\d+)\s*\]/i);
-                            if (affinityUserMatch?.[1]) {
-                                const delta = parseInt(affinityUserMatch[1], 10);
+                            if (generatedUserAffinityDelta !== null) {
+                                const delta = generatedUserAffinityDelta;
                                 const freshChar = db.getCharacter(char.id);
                                 if (freshChar) {
                                     const newAff = Math.max(0, Math.min(100, freshChar.affinity + delta));
@@ -721,13 +962,13 @@ function initGroupChatPlugin(app, context) {
                             }
 
                             // Parse [REDPACKET_SEND:type|amount|count|note] char sends a red packet.
-                            const rpSendMatch = cleanReply.match(/\[REDPACKET_SEND:([^|]+)\|([\d.]+)\|(\d+)\|([^\]]*)\]/i);
+                            const rpSendMatch = cleanReply.match(/\[REDPACKET_SEND:([^|]+)\|([^|]+)\|([^|]+)\|([^\]]*)\]/i);
                             if (rpSendMatch) {
                                 try {
-                                    const rpType = rpSendMatch[1].trim().toLowerCase() === 'fixed' ? 'fixed' : 'lucky';
-                                    const rpTotal = Math.min(200, Math.max(1, parseFloat(rpSendMatch[2])));
-                                    const rpCount = Math.min(20, Math.max(1, parseInt(rpSendMatch[3])));
-                                    const rpNote = rpSendMatch[4]?.trim() || (char.name + ' 的红包');
+                                    const rpType = normalizeGeneratedRedPacketType(rpSendMatch[1]);
+                                    const rpTotal = normalizeGeneratedRedPacketAmount(rpSendMatch[2]);
+                                    const rpCount = normalizeGeneratedRedPacketCount(rpSendMatch[3]);
+                                    const rpNote = String(rpSendMatch[4] || '').trim().slice(0, 80) || (char.name + ' 的红包');
                                     const packetId = db.createRedPacket({ groupId, senderId: char.id, type: rpType, totalAmount: rpTotal, perAmount: rpType === 'fixed' ? +(rpTotal / rpCount).toFixed(2) : null, count: rpCount, note: rpNote });
                                     // Broadcast red packet message
                                     const rpContent = '[REDPACKET:' + packetId + ']';
@@ -747,8 +988,7 @@ function initGroupChatPlugin(app, context) {
                             }
 
                             // Strip ALL action tags before saving/broadcasting.
-                            const globalStripRegex = /\[(?:CHAR_AFFINITY|AFFINITY|MOMENT|MOMENT_LIKE|MOMENT_COMMENT|DIARY|UNLOCK_DIARY|PRESSURE|TIMER|TRANSFER|DIARY_PASSWORD|Red Packet|REDPACKET_SEND)[^\]]*\]/gi;
-                            cleanReply = cleanReply.replace(globalStripRegex, '').trim();
+                            cleanReply = stripGroupHiddenTags(cleanReply);
 
                             if (cleanReply.length > 0) {
                                 let msgMetadata = null;

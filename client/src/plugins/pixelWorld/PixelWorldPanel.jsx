@@ -4075,6 +4075,11 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     }
   }
 
+  function formatBehaviorRequestError(error, fallback = '请求失败，请重试。') {
+    if (error?.name === 'AbortError') return '请求超时，请重试。';
+    return error?.message || fallback;
+  }
+
   function resolveBehaviorAction(actionId = behaviorAction) {
     return commercialV2BehaviorActions.find((item) => item.id === actionId) || commercialV2BehaviorActions[0];
   }
@@ -4125,7 +4130,22 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
   function summarizeBehaviorTreeForPayload() {
     const nodes = behaviorTreeState?.nodes || {};
     const compactNodes = {};
-    Object.entries(nodes).slice(0, 60).forEach(([id, node]) => {
+    const patchHistory = Array.isArray(behaviorTreeState?.patch_history) ? behaviorTreeState.patch_history : [];
+    const prioritizedNodeIds = [
+      behaviorTreeState?.active_node_id,
+      ...(Array.isArray(nodes.player_interaction?.children_ids) ? nodes.player_interaction.children_ids : []),
+      ...patchHistory.slice(0, 12).map((item) => item?.node_id || item?.nodeId || item?.next_active_node_id || item?.nextActiveNodeId)
+    ].map((id) => String(id || '').trim()).filter(Boolean);
+    const orderedEntries = [];
+    const seenNodeIds = new Set();
+    function pushBehaviorNode(id) {
+      if (!id || seenNodeIds.has(id) || !nodes[id]) return;
+      seenNodeIds.add(id);
+      orderedEntries.push([id, nodes[id]]);
+    }
+    prioritizedNodeIds.forEach(pushBehaviorNode);
+    Object.keys(nodes).forEach(pushBehaviorNode);
+    orderedEntries.slice(0, 60).forEach(([id, node]) => {
       compactNodes[id] = {
         id: node.id || id,
         type: node.type || 'Node',
@@ -4147,9 +4167,7 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
       active_node_id: behaviorTreeState?.active_node_id || '',
       nodes: compactNodes,
       memory: behaviorTreeState?.memory || {},
-      patch_history: Array.isArray(behaviorTreeState?.patch_history)
-        ? behaviorTreeState.patch_history.slice(0, 8)
-        : []
+      patch_history: patchHistory.slice(0, 8)
     };
   }
 
@@ -4198,6 +4216,14 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
         ]
       },
       behavior_tree: summarizeBehaviorTreeForPayload()
+    };
+  }
+
+  function buildBehaviorPendingInput(options = {}, note = '当前前端请求；服务端会重新补齐 large_input。') {
+    return {
+      ...buildBehaviorPayload(options),
+      debug_source: 'client_pending_behavior_request',
+      debug_note: note
     };
   }
 
@@ -4271,11 +4297,18 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     }
     setBehaviorLoading(true);
     setBehaviorStatus('正在读取大输入背景...');
+    const requestPayload = buildBehaviorPayload();
+    setBehaviorInput({
+      ...requestPayload,
+      debug_source: 'client_pending_behavior_input_request',
+      debug_note: '正在请求服务端补齐 large_input。'
+    });
+    setBehaviorOutput(null);
     try {
       const response = await fetch(`${apiUrl}/city/characters/${encodeURIComponent(behaviorCharacterId)}/behavior-input`, {
         method: 'POST',
         headers: getBehaviorAuthHeaders(),
-        body: JSON.stringify(buildBehaviorPayload())
+        body: JSON.stringify(requestPayload)
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || `读取失败 ${response.status}`);
@@ -4302,34 +4335,50 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     setBehaviorLoading(true);
     setBehaviorStatus('正在生成玩家特殊枝丫...');
     setPlayerActionBubble(selectedAction?.label || '互动');
+    const requestPayload = buildBehaviorPayload({ actionId, placeId });
+    setBehaviorInput(buildBehaviorPendingInput(
+      { actionId, placeId },
+      '当前点击选项产生的请求；服务端会重新补齐 large_input。'
+    ));
+    setBehaviorOutput(null);
     try {
-      const response = await fetch(`${apiUrl}/city/characters/${encodeURIComponent(behaviorCharacterId)}/behavior-branch`, {
+      const { response, data } = await fetchBehaviorJsonWithTimeout(`${apiUrl}/city/characters/${encodeURIComponent(behaviorCharacterId)}/behavior-branch`, {
         method: 'POST',
         headers: getBehaviorAuthHeaders(),
         body: JSON.stringify({
-          ...buildBehaviorPayload({ actionId, placeId }),
+          ...requestPayload,
           api_endpoint: behaviorConfig.api_endpoint,
           api_key: behaviorConfig.api_key,
           model_name: behaviorConfig.model_name
         })
-      });
-      const data = await response.json();
+      }, 45000);
       if (!response.ok) throw new Error(data?.error || `生成失败 ${response.status}`);
       setBehaviorInput(data.input || null);
-      const source = data.fallback ? 'fallback' : 'ai';
+      const source = 'ai';
       const patchResult = mergeBehaviorTreePatch(data.tree_patch || data.patch, data.branch, source);
       setBehaviorOutput({
         branch: data.branch || null,
         tree_patch: patchResult?.patch || data.tree_patch || data.patch || null,
         tree_version: patchResult?.tree?.version || behaviorTreeState.version,
-        fallback: Boolean(data.fallback),
+        fallback: false,
         error: data.error || '',
         raw_output: data.raw_output || ''
       });
       if (patchResult?.activeBranch) activateBehaviorBranch(patchResult.activeBranch, source);
-      setBehaviorStatus(data.fallback ? '已生成 fallback patch，并合并进完整行为树。' : 'AI patch 已合并进完整行为树。');
+      setBehaviorStatus('AI patch 已合并进完整行为树。');
+      return { ok: true, patchResult };
     } catch (error) {
-      setBehaviorStatus(`特殊枝丫生成失败：${error.message}`);
+      const message = formatBehaviorRequestError(error, '特殊枝丫生成失败，请重试。');
+      setBehaviorStatus(`特殊枝丫生成失败：${message}`);
+      setBehaviorOutput({
+        branch: null,
+        tree_patch: null,
+        tree_version: behaviorTreeState.version,
+        fallback: false,
+        error: message,
+        raw_output: ''
+      });
+      return { ok: false, error: message };
     } finally {
       setBehaviorLoading(false);
     }
@@ -4342,12 +4391,19 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     }
     setBehaviorLoading(true);
     setBehaviorStatus('正在生成基础枝丫包...');
+    const requestPayload = buildBehaviorPayload();
+    setBehaviorInput({
+      ...requestPayload,
+      debug_source: 'client_pending_behavior_base_request',
+      debug_note: '当前基础枝丫生成请求；服务端会重新补齐 large_input。'
+    });
+    setBehaviorOutput(null);
     try {
       const response = await fetch(`${apiUrl}/city/characters/${encodeURIComponent(behaviorCharacterId)}/behavior-base-branches`, {
         method: 'POST',
         headers: getBehaviorAuthHeaders(),
         body: JSON.stringify({
-          ...buildBehaviorPayload(),
+          ...requestPayload,
           api_endpoint: behaviorConfig.api_endpoint,
           api_key: behaviorConfig.api_key,
           model_name: behaviorConfig.model_name
@@ -4356,22 +4412,20 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data?.error || `生成失败 ${response.status}`);
       setBehaviorInput(data.input || null);
-      const source = data.fallback ? 'fallback-base' : 'ai-base';
+      const source = 'ai-base';
       const patchResult = mergeBehaviorTreePatches(data.base_patches || [], source);
       const branchCount = patchResult?.patches?.length || data.base_branches?.length || 0;
       setBehaviorOutput({
         base_branches: data.base_branches || [],
         base_patches: patchResult?.patches || data.base_patches || [],
         tree_version: patchResult?.tree?.version || behaviorTreeState.version,
-        fallback: Boolean(data.fallback),
+        fallback: false,
         error: data.error || '',
         raw_output: data.raw_output || ''
       });
       autonomousBehaviorCursorRef.current = 0;
       autonomousBehaviorRecentRef.current = [];
-      setBehaviorStatus(data.fallback
-        ? `已生成 fallback 基础枝丫 ${branchCount} 条，并合并进基础池。`
-        : `AI 基础枝丫 ${branchCount} 条已合并进基础池。`);
+      setBehaviorStatus(`AI 基础枝丫 ${branchCount} 条已合并进基础池。`);
     } catch (error) {
       setBehaviorStatus(`基础枝丫生成失败：${error.message}`);
     } finally {
@@ -4472,6 +4526,8 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     if (!behaviorInteractionState.nearby || behaviorLoading) return;
     const selectedAction = resolveBehaviorAction(actionId);
     const selectedPlace = resolveBehaviorPlace(behaviorPlaceId);
+    const selectedPlaceId = selectedPlace?.id || behaviorPlaceId || 'restaurant';
+    const selectedPlaceLabel = selectedPlace?.label || '街区';
     if (actionId !== behaviorAction) setBehaviorAction(actionId);
     setInteractionMenuOpen(false);
     if (behaviorRuntimeRef.current?.source === 'base') {
@@ -4479,12 +4535,32 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     }
     const presetBranch = createCommercialV2PresetInteractionBranch(
       actionId,
-      selectedPlace?.id || behaviorPlaceId || 'restaurant',
-      selectedPlace?.label || '街区'
+      selectedPlaceId,
+      selectedPlaceLabel
     );
+    setBehaviorInput(buildBehaviorPendingInput(
+      { actionId, placeId: selectedPlaceId },
+      '当前预制互动请求；枝丫末尾选项会用这个动作继续生成。'
+    ));
     executeBehaviorBranch(presetBranch, 'preset');
     setPlayerActionBubble(selectedAction?.label || '互动');
     setBehaviorStatus(`已触发预制互动：${presetBranch.title}。请选择枝丫末尾选项生成后续。`);
+  }
+
+  function resolveBehaviorChoiceTrigger(choice = {}) {
+    return [
+      choice?.trigger,
+      choice?.action_id,
+      choice?.actionId,
+      choice?.next_action,
+      choice?.nextAction,
+      choice?.player_action,
+      choice?.playerAction,
+      choice?.id,
+      choice?.action
+    ]
+      .map((value) => String(value || '').trim())
+      .find((value) => commercialV2BehaviorActionIds.has(value)) || '';
   }
 
   function normalizeBehaviorDialogChoices(choices) {
@@ -4492,14 +4568,18 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
     return choices.slice(0, 4).map((choice, index) => {
       if (typeof choice === 'string') {
         const label = choice.trim();
-        return label ? { id: `choice_${index + 1}`, label } : null;
+        const trigger = commercialV2BehaviorActionIds.has(label) ? label : '';
+        return label && trigger ? { id: trigger, label, trigger } : null;
       }
       if (!choice || typeof choice !== 'object') return null;
       const label = String(choice.label || choice.text || choice.title || `选项 ${index + 1}`).trim();
+      const trigger = resolveBehaviorChoiceTrigger(choice);
+      if (!trigger) return null;
       return {
         ...choice,
-        id: String(choice.id || choice.trigger || `choice_${index + 1}`),
-        label: label || `选项 ${index + 1}`
+        id: String(choice.id || trigger || `choice_${index + 1}`),
+        label: label || `选项 ${index + 1}`,
+        trigger
       };
     }).filter(Boolean);
   }
@@ -4517,28 +4597,22 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
   }
 
   async function chooseBehaviorDialogChoice(choice) {
-    if (behaviorChoicePendingRef.current || behaviorLoading) return;
-    const triggerAction = [
-      choice?.trigger,
-      choice?.action_id,
-      choice?.actionId,
-      choice?.next_action,
-      choice?.action
-    ].map((value) => String(value || '').trim()).find((value) => commercialV2BehaviorActionIds.has(value));
+    if (behaviorChoicePendingRef.current || behaviorLoading) {
+      setBehaviorStatus('正在处理上一个玩家回应，请稍等。');
+      return;
+    }
+    const triggerAction = resolveBehaviorChoiceTrigger(choice);
     const nextPlaceId = String(choice?.place_id || choice?.placeId || choice?.to_place_id || choice?.toPlaceId || behaviorPlaceId || '').trim();
     if (!triggerAction) {
-      continueBehaviorDialog();
+      setBehaviorStatus('该选项缺少有效后续动作，请换一个回应。');
+      setActiveBehaviorDialog((current) => current
+        ? { ...current, text: '该选项缺少有效后续动作，请换一个回应。' }
+        : current);
       return;
     }
     behaviorChoicePendingRef.current = true;
     const selectedLabel = String(choice?.label || choice?.text || '这个回应').trim();
-    const runtime = behaviorRuntimeRef.current;
-    if (runtime && activeBehaviorDialog?.runtimeId === runtime.id) {
-      runtime.waitingForDialog = false;
-      runtime.waitingForChoice = false;
-      runtime.stepIndex += 1;
-      runtime.waitingUntil = Date.now() + 120;
-    }
+    const previousDialog = activeBehaviorDialog;
     setInteractionMenuOpen(false);
     setBehaviorStatus(`已选择“${selectedLabel}”，正在生成后续特殊枝丫...`);
     setActiveBehaviorDialog({
@@ -4551,10 +4625,23 @@ function CommercialStreetEditor({ apiUrl = '/api', userProfile = null }) {
       totalSteps: activeBehaviorDialog?.totalSteps || 1
     });
     try {
-      await generateBehaviorBranch({ actionId: triggerAction, placeId: nextPlaceId || behaviorPlaceId });
+      const branchResult = await generateBehaviorBranch({ actionId: triggerAction, placeId: nextPlaceId || behaviorPlaceId });
+      if (!branchResult?.ok) {
+        setActiveBehaviorDialog({
+          ...(previousDialog || {}),
+          runtimeId: previousDialog?.runtimeId || '',
+          type: 'choice',
+          title: previousDialog?.title || behaviorCharacter?.name || '角色',
+          text: `后续枝丫生成失败：${branchResult?.error || '请重试。'}`,
+          choices: previousDialog?.choices?.length ? previousDialog.choices : [choice],
+          stepIndex: previousDialog?.stepIndex || 0,
+          totalSteps: previousDialog?.totalSteps || 1
+        });
+        return;
+      }
+      setActiveBehaviorDialog((current) => current?.type === 'pending' ? null : current);
     } finally {
       behaviorChoicePendingRef.current = false;
-      setActiveBehaviorDialog((current) => current?.type === 'pending' ? null : current);
     }
   }
 

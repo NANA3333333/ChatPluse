@@ -1622,13 +1622,96 @@ function getEngine(userId) {
         return Math.max(min, Math.min(max, value));
     }
 
-    function parseTaggedDelta(text, tagName, min, max) {
-        const regex = new RegExp(`\\[${tagName}:\\s*([+-]?\\d+)\\s*\\]`, 'i');
+    function normalizeGeneratedIntegerInRange(value, min, max) {
+        const text = String(value ?? '').trim();
+        if (!/^[+-]?\d+$/.test(text)) return null;
+        const parsed = Number(text);
+        return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+    }
+
+    function parseGeneratedBoundedTag(text, tagName, min, max, errorMessage) {
+        const regex = new RegExp(`\\[${tagName}:\\s*([^\\]]*)\\]`, 'i');
         const match = String(text || '').match(regex);
-        if (!match || !match[1]) return null;
-        const parsed = parseInt(match[1], 10);
-        if (!Number.isFinite(parsed)) return null;
-        return clamp(parsed, min, max);
+        if (!match) return null;
+        const parsed = normalizeGeneratedIntegerInRange(match[1], min, max);
+        if (parsed === null) throw new Error(errorMessage);
+        return parsed;
+    }
+
+    function parseTaggedDelta(text, tagName, min, max) {
+        return parseGeneratedBoundedTag(text, tagName, min, max, `AI returned invalid ${tagName} value. Please retry.`);
+    }
+
+    function parseGeneratedAffinityDelta(text) {
+        return parseGeneratedBoundedTag(text, 'AFFINITY', -100, 100, 'AI returned invalid affinity delta. Please retry.');
+    }
+
+    function parseGeneratedCharAffinityDeltas(text, options = {}) {
+        const raw = String(text || '');
+        const selfId = String(options.selfId || '').trim();
+        const allowedTargetIds = options.allowedTargetIds instanceof Set ? options.allowedTargetIds : null;
+        const deltas = [];
+        const tagRegex = /\[CHAR_AFFINITY:\s*([^\]]*)\]/gi;
+        let match;
+        while ((match = tagRegex.exec(raw)) !== null) {
+            const payload = String(match[1] || '').trim();
+            const splitAt = payload.lastIndexOf(':');
+            if (splitAt <= 0) throw new Error('AI returned malformed character affinity tag. Please retry.');
+            const targetId = payload.slice(0, splitAt).trim();
+            const delta = normalizeGeneratedIntegerInRange(payload.slice(splitAt + 1), -100, 100);
+            if (!targetId || delta === null) {
+                throw new Error('AI returned invalid character affinity delta. Please retry.');
+            }
+            if (targetId === selfId || (allowedTargetIds && !allowedTargetIds.has(targetId)) || !db.getCharacter?.(targetId)) {
+                throw new Error('AI returned invalid character affinity target. Please retry.');
+            }
+            deltas.push({ targetId, delta });
+        }
+        return deltas;
+    }
+
+    function normalizeGeneratedTransferAmount(value) {
+        const text = String(value ?? '').trim();
+        if (!/^\d+(?:\.\d{1,2})?$/.test(text)) return null;
+        const amount = Number(text);
+        if (!Number.isFinite(amount) || amount <= 0) return null;
+        return +amount.toFixed(2);
+    }
+
+    function normalizeGeneratedPressureLevel(value) {
+        return normalizeGeneratedIntegerInRange(value, 0, 4);
+    }
+
+    function normalizeGeneratedMomentId(value) {
+        const text = String(value ?? '').trim();
+        if (!/^\d+$/.test(text)) return null;
+        const id = Number(text);
+        return Number.isSafeInteger(id) && id > 0 ? id : null;
+    }
+
+    function validateGeneratedMomentInteractions(text) {
+        const raw = String(text || '');
+        const likeRegex = /\[MOMENT_LIKE:\s*([^\]]*)\]/gi;
+        let likeMatch;
+        while ((likeMatch = likeRegex.exec(raw)) !== null) {
+            const momentId = normalizeGeneratedMomentId(likeMatch[1]);
+            if (!momentId || !db.getMoment?.(momentId)) {
+                throw new Error('AI returned invalid moment like target. Please retry.');
+            }
+        }
+
+        const commentRegex = /\[MOMENT_COMMENT:\s*([^\]]*)\]/gi;
+        let commentMatch;
+        while ((commentMatch = commentRegex.exec(raw)) !== null) {
+            const payload = String(commentMatch[1] || '');
+            const splitAt = payload.indexOf(':');
+            if (splitAt < 0) throw new Error('AI returned malformed moment comment tag. Please retry.');
+            const momentId = normalizeGeneratedMomentId(payload.slice(0, splitAt));
+            const comment = payload.slice(splitAt + 1).trim();
+            if (!momentId || !comment || !db.getMoment?.(momentId)) {
+                throw new Error('AI returned invalid moment comment target. Please retry.');
+            }
+        }
     }
 
     function addUsageTotals(baseUsage, extraUsage) {
@@ -3739,6 +3822,39 @@ ${dynamicPromptBase}`;
                 return;
             }
 
+            const visibleGeneratedText = stripHistoryMetadataPrefixFromOutput(stripHiddenTagsForVisibleMessage(generatedText));
+            if (!visibleGeneratedText) {
+                throw new Error('AI returned no visible reply. Please retry.');
+            }
+
+            const generatedTransferMatch = String(generatedText || '').match(/\[TRANSFER:\s*([^\]|\s]+)\s*(?:\|\s*([\s\S]*?))?\s*\]/i);
+            const generatedTransferIntent = generatedTransferMatch
+                ? {
+                    amount: normalizeGeneratedTransferAmount(generatedTransferMatch[1]),
+                    note: (generatedTransferMatch[2] || '').trim()
+                }
+                : null;
+            if (generatedTransferMatch && !generatedTransferIntent.amount) {
+                throw new Error('AI returned invalid transfer amount. Please retry.');
+            }
+            const generatedPressureMatch = charCheck.sys_pressure !== 0
+                ? String(generatedText || '').match(/\[PRESSURE:\s*([^\]\s]+)\s*\]/i)
+                : null;
+            const generatedPressureLevel = generatedPressureMatch
+                ? normalizeGeneratedPressureLevel(generatedPressureMatch[1])
+                : null;
+            if (generatedPressureMatch && generatedPressureLevel == null) {
+                throw new Error('AI returned invalid pressure level. Please retry.');
+            }
+            const generatedMoodDelta = parseTaggedDelta(generatedText, 'MOOD_DELTA', -12, 12);
+            const generatedPressureDelta = parseTaggedDelta(generatedText, 'PRESSURE_DELTA', -2, 2);
+            const generatedJealousyLevel = charCheck.sys_jealousy !== 0
+                ? parseGeneratedBoundedTag(generatedText, 'JEALOUSY', 0, 100, 'AI returned invalid jealousy level. Please retry.')
+                : null;
+            const generatedAffinityDelta = parseGeneratedAffinityDelta(generatedText);
+            const generatedCharAffinityDeltas = parseGeneratedCharAffinityDeltas(generatedText, { selfId: character.id });
+            validateGeneratedMomentInteractions(generatedText);
+
             if (generatedText) {
                 // Check for self-scheduled timer tags like [TIMER: 60]
                 const timerRegex = /\[TIMER:\s*(\d+)\s*\]/i;
@@ -3753,11 +3869,8 @@ ${dynamicPromptBase}`;
                 }
 
                 // Check for transfer tags like [TRANSFER: 5.20 | Sorry!]
-                const transferRegex = /\[TRANSFER:\s*([\d.]+)\s*(?:\|\s*([\s\S]*?))?\s*\]/i;
-                const transferMatch = generatedText.match(transferRegex);
-                if (transferMatch && transferMatch[1]) {
-                    const amount = parseFloat(transferMatch[1]);
-                    const note = (transferMatch[2] || '').trim();
+                if (generatedTransferIntent) {
+                    const { amount, note } = generatedTransferIntent;
                     console.log(`[Engine] ${charCheck.name} wants to send a transfer of 楼${amount} note: "${note}"`);
 
                     // Create traceable transfer record in DB (also deducts char wallet)
@@ -3823,15 +3936,13 @@ ${dynamicPromptBase}`;
                 const diaryPwMatch = generatedText.match(diaryPwRegex);
                 if (diaryPwMatch && diaryPwMatch[1]) {
                     const pw = diaryPwMatch[1].trim();
-                    console.log(`[Engine] ${charCheck.name} set a diary password: ${pw}`);
+                    console.log(`[Engine] ${charCheck.name} set a diary password.`);
                     db.setDiaryPassword(character.id, pw);
                 }
 
                 // Check for Affinity changes (AI-evaluated)
-                const affinityRegex = /\[AFFINITY:\s*([+-]?\d+)\s*\]/i;
-                const affinityMatch = generatedText.match(affinityRegex);
-                if (affinityMatch && affinityMatch[1]) {
-                    const delta = parseInt(affinityMatch[1], 10);
+                if (generatedAffinityDelta !== null) {
+                    const delta = generatedAffinityDelta;
                     const newAff = Math.max(0, Math.min(100, charCheck.affinity + delta));
                     console.log(`[Engine] ${charCheck.name} evaluation: Affinity changed by ${delta}, now ${newAff}`);
                     db.updateCharacter(character.id, { affinity: newAff });
@@ -3847,8 +3958,8 @@ ${dynamicPromptBase}`;
                 let combinedEmotionSource = '';
                 const combinedEmotionReasons = [];
 
-                const moodDelta = parseTaggedDelta(generatedText, 'MOOD_DELTA', -12, 12);
-                const pressureDelta = parseTaggedDelta(generatedText, 'PRESSURE_DELTA', -2, 2);
+                const moodDelta = generatedMoodDelta;
+                const pressureDelta = generatedPressureDelta;
                 if (moodDelta !== null) {
                     combinedEmotionPatch.mood = clamp((charCheck.mood ?? 50) + moodDelta, 0, 100);
                     combinedEmotionSource = combinedEmotionSource || 'ai_combined_emotion_update';
@@ -3873,30 +3984,21 @@ ${dynamicPromptBase}`;
                 }
 
                 // Check for Pressure changes (AI-evaluated resets)
-                if (charCheck.sys_pressure !== 0) {
-                    const pressureRegex = /\[PRESSURE:\s*(\d+)\s*\]/i;
-                    const pressureMatch = generatedText.match(pressureRegex);
-                    if (pressureMatch && pressureMatch[1]) {
-                        const newPressure = parseInt(pressureMatch[1], 10);
-                        console.log(`[Engine] ${charCheck.name} evaluation: Pressure set to ${newPressure}`);
-                        combinedEmotionPatch.pressure_level = newPressure;
-                        combinedEmotionSource = combinedEmotionSource || 'ai_combined_emotion_update';
-                        combinedEmotionReasons.push('角色在回复中主动调整了自己的焦虑值。');
-                    }
+                if (generatedPressureLevel !== null) {
+                    console.log(`[Engine] ${charCheck.name} evaluation: Pressure set to ${generatedPressureLevel}`);
+                    combinedEmotionPatch.pressure_level = generatedPressureLevel;
+                    combinedEmotionSource = combinedEmotionSource || 'ai_combined_emotion_update';
+                    combinedEmotionReasons.push('角色在回复中主动调整了自己的焦虑值。');
                 }
 
                 // Parse [JEALOUSY:N] tag; AI self-regulates jealousy cooldown.
-                if (charCheck.sys_jealousy !== 0) {
-                    const jealousyRegex = /\[JEALOUSY:\s*(\d+)\s*\]/i;
-                    const jealousyMatch = generatedText.match(jealousyRegex);
-                    if (jealousyMatch && jealousyMatch[1]) {
-                        const newJealousy = Math.min(100, Math.max(0, parseInt(jealousyMatch[1], 10)));
-                        combinedEmotionPatch.jealousy_level = newJealousy;
-                        if (newJealousy === 0) combinedEmotionPatch.jealousy_target = '';
-                        combinedEmotionSource = combinedEmotionSource || 'ai_combined_emotion_update';
-                        combinedEmotionReasons.push('角色在回复中主动调整了自己的嫉妒值。');
-                        console.log(`[Engine] ${character.name} jealousy self-adjusted to ${newJealousy}`);
-                    }
+                if (generatedJealousyLevel !== null) {
+                    const newJealousy = generatedJealousyLevel;
+                    combinedEmotionPatch.jealousy_level = newJealousy;
+                    if (newJealousy === 0) combinedEmotionPatch.jealousy_target = '';
+                    combinedEmotionSource = combinedEmotionSource || 'ai_combined_emotion_update';
+                    combinedEmotionReasons.push('角色在回复中主动调整了自己的嫉妒值。');
+                    console.log(`[Engine] ${character.name} jealousy self-adjusted to ${newJealousy}`);
                 }
 
                 if (Object.keys(combinedEmotionPatch).length > 0) {
@@ -3928,25 +4030,19 @@ ${dynamicPromptBase}`;
                     if (mCommentMatch[1] && mCommentMatch[2]) {
                         db.addComment(parseInt(mCommentMatch[1], 10), character.id, mCommentMatch[2].trim());
                         console.log(`[Engine] ${charCheck.name} commented on moment ${mCommentMatch[1]}: ${mCommentMatch[2]}`);
-                        broadcastNewMessage(wsClients, { type: 'moment_update' });
+                        broadcastEvent(wsClients, { type: 'moment_update' });
                     }
                 }
 
                 // Check for CHAR_AFFINITY changes (inter-character affinity from private chat context)
-                const charAffinityRegex = /\[CHAR_AFFINITY:([^:]+):([+-]?\d+)\]/gi;
-                let charAffMatch;
-                while ((charAffMatch = charAffinityRegex.exec(generatedText)) !== null) {
-                    const targetId = charAffMatch[1].trim();
-                    const delta = parseInt(charAffMatch[2], 10);
-                    if (targetId && !isNaN(delta)) {
-                        const source = `private:${character.id}`;
-                        const existing = db.getCharRelationship(character.id, targetId);
-                        const existingRow = existing?.sources?.find(s => s.source === source);
-                        const currentAffinity = existingRow?.affinity || 50;
-                        const newAffinity = Math.max(0, Math.min(100, currentAffinity + delta));
-                        db.updateCharRelationship(character.id, targetId, source, { affinity: newAffinity });
-                        console.log(`[Social] ${charCheck.name} -> ${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
-                    }
+                for (const { targetId, delta } of generatedCharAffinityDeltas) {
+                    const source = `private:${character.id}`;
+                    const existing = db.getCharRelationship(character.id, targetId);
+                    const existingRow = existing?.sources?.find(s => s.source === source);
+                    const currentAffinity = existingRow?.affinity || 50;
+                    const newAffinity = Math.max(0, Math.min(100, currentAffinity + delta));
+                    const updated = db.updateCharRelationship(character.id, targetId, source, { affinity: newAffinity });
+                    if (updated) console.log(`[Social] ${charCheck.name} -> ${targetId}: private affinity delta ${delta}, now ${newAffinity}`);
                 }
 
                 let cityIntentHandled = false;
@@ -3955,22 +4051,17 @@ ${dynamicPromptBase}`;
                 if (cityActionMatch && cityActionMatch[1] && cityReplyActionCallback) {
                     try {
                         const rawCityAction = cityActionMatch[1].trim();
-                        let parsedCityAction = null;
-                        try {
-                            parsedCityAction = JSON.parse(rawCityAction);
-                        } catch (cityActionParseErr) {
-                            const repaired = rawCityAction
-                                .replace(/,\s*([\]}])/g, '$1')
-                                .replace(/\/\/.*$/gm, '')
-                                .trim();
-                            parsedCityAction = JSON.parse(repaired);
+                        const parsedCityAction = JSON.parse(rawCityAction);
+                        if (!parsedCityAction || typeof parsedCityAction !== 'object' || Array.isArray(parsedCityAction)) {
+                            throw new Error('CITY_ACTION payload must be a JSON object');
                         }
-                        if (parsedCityAction && typeof parsedCityAction === 'object') {
-                            await cityReplyActionCallback(userId, character.id, parsedCityAction, generatedText);
-                            cityIntentHandled = true;
+                        const cityActionResult = await cityReplyActionCallback(userId, character.id, parsedCityAction, generatedText);
+                        if (cityActionResult?.canRetry) {
+                            throw new Error(cityActionResult.reason || 'city action retry required');
                         }
+                        cityIntentHandled = true;
                     } catch (cityActionErr) {
-                        console.warn(`[Engine] City reply action sync failed for ${character.name}: ${cityActionErr.message}`);
+                        throw new Error(`AI returned invalid city action. Please retry. ${cityActionErr.message}`);
                     }
                 }
 
@@ -3978,10 +4069,13 @@ ${dynamicPromptBase}`;
                 const cityIntentMatch = generatedText.match(cityIntentRegex);
                 if (!cityIntentHandled && cityIntentMatch && cityIntentMatch[1] && cityReplyIntentCallback) {
                     try {
-                        await cityReplyIntentCallback(userId, character.id, cityIntentMatch[1].trim(), generatedText);
+                        const cityIntentResult = await cityReplyIntentCallback(userId, character.id, cityIntentMatch[1].trim(), generatedText);
+                        if (cityIntentResult?.canRetry) {
+                            throw new Error(cityIntentResult.reason || 'city intent retry required');
+                        }
                         cityIntentHandled = true;
                     } catch (cityIntentErr) {
-                        console.warn(`[Engine] City reply intent sync failed for ${character.name}: ${cityIntentErr.message}`);
+                        throw new Error(`AI returned invalid city intent. Please retry. ${cityIntentErr.message}`);
                     }
                 }
 
@@ -3998,41 +4092,6 @@ ${dynamicPromptBase}`;
                         await cityReplyStateSyncCallback(userId, character.id, generatedText);
                     } catch (citySyncErr) {
                         console.warn(`[Engine] City reply state sync failed for ${character.name}: ${citySyncErr.message}`);
-                    }
-                }
-
-                if (generatedText.length === 0) {
-                    // The AI outputted only tags or failed to generate text. Use a randomized fallback.
-                    const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
-                    if (isUserReply) {
-                        generatedText = pick(["嗯。", "嗯哼", "好的", "好呀", "知道了", "嗯嗯"]);
-                    } else if (charCheck.pressure_level >= 3) {
-                        generatedText = pick([
-                            "你到底在干嘛啊...为什么一直不理我...",
-                            "我是不是做错什么了...你怎么都不回我...",
-                            "真的好难过，你是不是不想理我了？",
-                            "我一直在等你回消息...算了吧...",
-                            "你再不理我我就真的要生气了！",
-                            "是不是把我忘了啊...好吧..."
-                        ]);
-                    } else if (charCheck.pressure_level >= 1) {
-                        generatedText = pick([
-                            "人呢，在忙吗？",
-                            "在干嘛呢，怎么不说话？",
-                            "你还在线吗？",
-                            "喂？有人吗？",
-                            "怎么这么安静？",
-                            "你去哪里了啊"
-                        ]);
-                    } else {
-                        generatedText = pick([
-                            "哈喽，在干嘛呢？",
-                            "喂，最近怎么样？",
-                            "今天过得怎么样呀",
-                            "你在忙什么呢",
-                            "突然想找你聊聊天",
-                            "无聊了，来找你说说话。"
-                        ]);
                     }
                 }
 
@@ -4546,6 +4605,7 @@ ${dynamicPromptBase}`;
 
         console.log(`[GroupProactive] Group ${groupId}: next fire in ${Math.round(delay / 60000)} min`);
         const handle = setTimeout(() => {
+            groupProactiveTimers.delete(groupId);
             queueEngineTask(
                 `group:${groupId}`,
                 () => triggerGroupProactive(groupId, wsClients),

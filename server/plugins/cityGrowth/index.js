@@ -1,5 +1,9 @@
 const initCityGrowthDb = require('./growthDb');
 const schoolLogic = require('./schoolLogic');
+const {
+    isCityGrowthValidationError,
+    normalizeCityGrowthCoursePayload
+} = require('./inputGuards');
 
 module.exports = function initCityGrowthPlugin(app, context) {
     const { authMiddleware } = context;
@@ -27,26 +31,11 @@ module.exports = function initCityGrowthPlugin(app, context) {
     app.post('/api/city-growth/courses', authMiddleware, (req, res) => {
         try {
             const growthDb = ensureCityGrowthDb(req.db);
-            const payload = req.body || {};
-            const id = String(payload.id || '').trim().toLowerCase().replace(/\s+/g, '_');
-            const name = String(payload.name || '').trim();
-            if (!id || !name) {
-                return res.status(400).json({ success: false, error: '课程 id 和名称不能为空' });
-            }
-            growthDb.upsertSchoolCourse({
-                id,
-                name,
-                emoji: String(payload.emoji || '📘').trim() || '📘',
-                description: String(payload.description || '').trim(),
-                category: String(payload.category || 'general').trim() || 'general',
-                prompt_effect_basic: String(payload.prompt_effect_basic || '').trim(),
-                prompt_effect_advanced: String(payload.prompt_effect_advanced || '').trim(),
-                sort_order: Number(payload.sort_order || 0) || 0,
-                is_enabled: Number(payload.is_enabled ?? 1) === 1 ? 1 : 0,
-            });
-            res.json({ success: true, course: growthDb.getSchoolCourse(id) });
+            const payload = normalizeCityGrowthCoursePayload(req.body || {});
+            growthDb.upsertSchoolCourse(payload);
+            res.json({ success: true, course: growthDb.getSchoolCourse(payload.id) });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isCityGrowthValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
@@ -59,7 +48,7 @@ module.exports = function initCityGrowthPlugin(app, context) {
             }
             res.json({ success: true, course });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isCityGrowthValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 

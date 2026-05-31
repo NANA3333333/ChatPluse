@@ -244,8 +244,8 @@ function generateInviteCode(options = {}) {
     // Use crypto for unpredictable invite codes (12 chars)
     const code = crypto.randomBytes(9).toString('base64url').substring(0, 12).toUpperCase();
     const createdAt = Date.now();
-    const maxUses = Math.max(1, Number(options.maxUses || 1));
-    const expiresAt = Math.max(0, Number(options.expiresAt || 0));
+    const maxUses = normalizeInviteMaxUses(options.maxUses);
+    const expiresAt = normalizeInviteExpiresAt(options.expiresAt);
     const note = String(options.note || '').trim();
     const createdBy = String(options.createdBy || '').trim();
     db.prepare(`
@@ -261,6 +261,16 @@ function getInviteCodes() {
         FROM invite_codes
         ORDER BY created_at DESC
     `).all();
+}
+
+function getInviteCode(code) {
+    const cleanCode = String(code || '').trim();
+    if (!cleanCode) return null;
+    return db.prepare(`
+        SELECT code, used_by, created_at, max_uses, use_count, expires_at, note, created_by, status
+        FROM invite_codes
+        WHERE code = ?
+    `).get(cleanCode) || null;
 }
 
 function getAllUsers() {
@@ -279,37 +289,101 @@ function updateLastActive(id) {
     }
 }
 
+const USER_STATUSES = new Set(['active', 'banned']);
+const MUTABLE_USER_ROLES = new Set(['user', 'admin']);
+
+function normalizeUserId(id) {
+    return String(id || '').trim();
+}
+
 function deleteUser(id) {
-    db.prepare('DELETE FROM users WHERE id = ?').run(id);
+    const cleanId = normalizeUserId(id);
+    if (!cleanId) return 0;
+    return db.prepare('DELETE FROM users WHERE id = ?').run(cleanId).changes || 0;
 }
 
 function setUserStatus(id, status) {
-    db.prepare('UPDATE users SET status = ? WHERE id = ?').run(status, id);
+    const cleanId = normalizeUserId(id);
+    const nextStatus = String(status || '').trim();
+    if (!cleanId || !USER_STATUSES.has(nextStatus)) return 0;
+    return db.prepare('UPDATE users SET status = ? WHERE id = ?').run(nextStatus, cleanId).changes || 0;
 }
 
 function setUserRole(id, role) {
-    db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, id);
+    const cleanId = normalizeUserId(id);
+    const nextRole = String(role || '').trim();
+    if (!cleanId || !MUTABLE_USER_ROLES.has(nextRole)) return 0;
+    return db.prepare('UPDATE users SET role = ? WHERE id = ?').run(nextRole, cleanId).changes || 0;
 }
 
 function bumpTokenVersion(id) {
-    db.prepare('UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = ?').run(id);
+    const cleanId = normalizeUserId(id);
+    if (!cleanId) return 0;
+    return db.prepare('UPDATE users SET token_version = COALESCE(token_version, 0) + 1 WHERE id = ?').run(cleanId).changes || 0;
 }
 
 function resetPassword(id, newPassword) {
+    const cleanId = normalizeUserId(id);
+    if (!cleanId) return 0;
     const passwordHash = bcrypt.hashSync(newPassword, 10);
-    db.prepare('UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?').run(passwordHash, id);
+    return db.prepare('UPDATE users SET password_hash = ?, token_version = COALESCE(token_version, 0) + 1 WHERE id = ?').run(passwordHash, cleanId).changes || 0;
 }
 
 function deleteInviteCode(code) {
-    db.prepare('DELETE FROM invite_codes WHERE code = ?').run(code);
+    const cleanCode = String(code || '').trim();
+    if (!cleanCode) return 0;
+    return db.prepare('DELETE FROM invite_codes WHERE code = ?').run(cleanCode).changes || 0;
+}
+
+const MAX_INVITE_USES = 100000;
+const INVITE_STATUSES = new Set(['active', 'used', 'revoked']);
+
+class AuthValidationError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'AuthValidationError';
+        this.statusCode = 400;
+    }
+}
+
+function hasInviteValue(value) {
+    return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function normalizeInviteMaxUses(value, fallback = 1) {
+    if (!hasInviteValue(value)) return fallback;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > MAX_INVITE_USES) {
+        throw new AuthValidationError('Invalid invite max uses');
+    }
+    return parsed;
+}
+
+function normalizeInviteExpiresAt(value, fallback = 0) {
+    if (!hasInviteValue(value)) return fallback;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+        throw new AuthValidationError('Invalid invite expiry');
+    }
+    return parsed;
+}
+
+function normalizeInviteStatus(value) {
+    const status = String(value || '').trim();
+    if (!INVITE_STATUSES.has(status)) {
+        throw new AuthValidationError('Invalid invite status');
+    }
+    return status;
 }
 
 function updateInviteCode(code, data = {}) {
+    const cleanCode = String(code || '').trim();
+    if (!cleanCode) return 0;
     const fields = [];
     const values = [];
     if (data.status) {
         fields.push('status = ?');
-        values.push(data.status);
+        values.push(normalizeInviteStatus(data.status));
     }
     if (typeof data.note !== 'undefined') {
         fields.push('note = ?');
@@ -317,15 +391,15 @@ function updateInviteCode(code, data = {}) {
     }
     if (typeof data.maxUses !== 'undefined') {
         fields.push('max_uses = ?');
-        values.push(Math.max(1, Number(data.maxUses || 1)));
+        values.push(normalizeInviteMaxUses(data.maxUses));
     }
     if (typeof data.expiresAt !== 'undefined') {
         fields.push('expires_at = ?');
-        values.push(Math.max(0, Number(data.expiresAt || 0)));
+        values.push(normalizeInviteExpiresAt(data.expiresAt));
     }
-    if (!fields.length) return;
-    values.push(code);
-    db.prepare(`UPDATE invite_codes SET ${fields.join(', ')} WHERE code = ?`).run(...values);
+    if (!fields.length) return getInviteCode(cleanCode) ? 1 : 0;
+    values.push(cleanCode);
+    return db.prepare(`UPDATE invite_codes SET ${fields.join(', ')} WHERE code = ?`).run(...values).changes || 0;
 }
 
 function getLatestAnnouncement() {
@@ -344,6 +418,7 @@ module.exports = {
     getUserById,
     generateInviteCode,
     getInviteCodes,
+    getInviteCode,
     getAllUsers,
     updateLastActive,
     deleteUser,

@@ -1,3 +1,9 @@
+const {
+    normalizeCityGrowthCourseId,
+    normalizeCityGrowthCoursePayload,
+    normalizeCityGrowthMasteryGain
+} = require('./inputGuards');
+
 module.exports = function initCityGrowthDb(rawDb) {
     const db = rawDb?.prepare ? rawDb : (typeof rawDb?.getRawDb === 'function' ? rawDb.getRawDb() : rawDb);
     function quoteSqlIdentifier(identifier) {
@@ -123,37 +129,40 @@ module.exports = function initCityGrowthDb(rawDb) {
     }
 
     function getSchoolCourse(id) {
-        return db.prepare('SELECT * FROM city_school_courses WHERE id = ?').get(id);
+        const courseId = normalizeCityGrowthCourseId(id);
+        return db.prepare('SELECT * FROM city_school_courses WHERE id = ?').get(courseId);
     }
 
     function upsertSchoolCourse(data) {
+        const payload = normalizeCityGrowthCoursePayload(data);
         db.prepare(`
             INSERT OR REPLACE INTO city_school_courses
             (id, name, emoji, description, category, prompt_effect_basic, prompt_effect_advanced, sort_order, is_enabled)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
-            data.id,
-            data.name,
-            data.emoji || '📘',
-            data.description || '',
-            data.category || 'general',
-            data.prompt_effect_basic || '',
-            data.prompt_effect_advanced || '',
-            data.sort_order ?? 0,
-            data.is_enabled ?? 1
+            payload.id,
+            payload.name,
+            payload.emoji,
+            payload.description,
+            payload.category,
+            payload.prompt_effect_basic,
+            payload.prompt_effect_advanced,
+            payload.sort_order,
+            payload.is_enabled
         );
     }
 
     function toggleSchoolCourse(id) {
-        const row = getSchoolCourse(id);
+        const courseId = normalizeCityGrowthCourseId(id);
+        const row = getSchoolCourse(courseId);
         if (!row) return null;
         const next = Number(row.is_enabled || 0) === 1 ? 0 : 1;
         db.prepare(`
             UPDATE city_school_courses
             SET is_enabled = ?
             WHERE id = ?
-        `).run(next, id);
-        return getSchoolCourse(id);
+        `).run(next, courseId);
+        return getSchoolCourse(courseId);
     }
 
     function getCharacterCourseProgress(charId) {
@@ -174,23 +183,31 @@ module.exports = function initCityGrowthDb(rawDb) {
     }
 
     function addCharacterCourseMastery(charId, courseId, delta = 0) {
-        const gain = Math.max(0, Number(delta || 0));
+        const cleanCharId = String(charId || '').trim();
+        const cleanCourseId = normalizeCityGrowthCourseId(courseId);
+        const gain = normalizeCityGrowthMasteryGain(delta);
+        if (!cleanCharId || !db.prepare('SELECT id FROM characters WHERE id = ?').get(cleanCharId)) {
+            throw new Error('角色不存在');
+        }
+        if (!getSchoolCourse(cleanCourseId)) {
+            throw new Error('课程不存在');
+        }
         const now = Date.now();
         const existing = db.prepare(`
             SELECT * FROM city_character_courses WHERE character_id = ? AND course_id = ?
-        `).get(charId, courseId);
+        `).get(cleanCharId, cleanCourseId);
         if (existing) {
             const nextMastery = Math.max(0, Math.min(100, Number(existing.mastery || 0) + gain));
             db.prepare(`
                 UPDATE city_character_courses
                 SET mastery = ?, last_studied_at = ?
                 WHERE character_id = ? AND course_id = ?
-            `).run(nextMastery, now, charId, courseId);
+            `).run(nextMastery, now, cleanCharId, cleanCourseId);
         } else {
             db.prepare(`
                 INSERT INTO city_character_courses (character_id, course_id, mastery, last_studied_at)
                 VALUES (?, ?, ?, ?)
-            `).run(charId, courseId, Math.max(0, Math.min(100, gain)), now);
+            `).run(cleanCharId, cleanCourseId, Math.max(0, Math.min(100, gain)), now);
         }
         return db.prepare(`
             SELECT p.character_id, p.course_id, p.mastery, p.last_studied_at,
@@ -198,7 +215,7 @@ module.exports = function initCityGrowthDb(rawDb) {
             FROM city_character_courses p
             JOIN city_school_courses c ON p.course_id = c.id
             WHERE p.character_id = ? AND p.course_id = ?
-        `).get(charId, courseId);
+        `).get(cleanCharId, cleanCourseId);
     }
 
     return {

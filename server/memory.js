@@ -1123,6 +1123,33 @@ ${contextLine}
         };
     }
 
+    function cleanMemoryJsonReply(responseText) {
+        return String(responseText || '')
+            .replace(/```(?:json)?\s*/gi, '')
+            .replace(/```/g, '')
+            .trim();
+    }
+
+    function parseStrictMemoryJsonObject(responseText, label = 'Memory model') {
+        const cleaned = cleanMemoryJsonReply(responseText);
+        if (!cleaned) throw new Error(`${label} returned empty JSON.`);
+        const parsed = JSON.parse(cleaned);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            throw new Error(`${label} did not return a JSON object.`);
+        }
+        return parsed;
+    }
+
+    function parseStrictMemoryJsonArray(responseText, label = 'Memory model') {
+        const cleaned = cleanMemoryJsonReply(responseText);
+        if (!cleaned) throw new Error(`${label} returned empty JSON.`);
+        const parsed = JSON.parse(cleaned);
+        if (!Array.isArray(parsed)) {
+            throw new Error(`${label} did not return a JSON array.`);
+        }
+        return parsed;
+    }
+
     function looksLikeMeaningRepairUserText(text = '') {
         const value = String(text || '').trim();
         if (!value) return false;
@@ -1133,103 +1160,6 @@ ${contextLine}
         const value = String(text || '').trim();
         if (!value) return false;
         return /(你是说|所以你是在说|那现在呢|如果不是调情|是你在逗我玩|我理解错了|我真的分不清|其实你只是在|误读成了调情|不是调情，是我自作多情)/i.test(value);
-    }
-
-    function buildFallbackConversationDigest(character, existingDigest, deltaMessages, latestMessageId) {
-        const sourceMessages = Array.isArray(deltaMessages) ? deltaMessages : [];
-        const recentTail = sourceMessages.slice(-12);
-        const latestUser = [...recentTail].reverse().find(m => m.role === 'user');
-        const latestAssistant = [...recentTail].reverse().find(m => m.role === 'character');
-        const latestUserText = stripCompressedOpener(compactDigestText(latestUser?.content || '', 160));
-        const latestAssistantText = stripCompressedOpener(compactDigestText(latestAssistant?.content || '', 180));
-        const digestSummaryParts = [];
-        if (latestUserText) digestSummaryParts.push(`Recent user message: ${latestUserText}`);
-        if (latestAssistantText) digestSummaryParts.push(`Recent reply from ${character.name}: ${latestAssistantText}`);
-        const previousOpenLoops = normalizeDigestList(existingDigest?.open_loops_json || [], PRIVATE_DIGEST_LIMITS.openLoopItems);
-        const mergedOpenLoops = latestUser && /[？?]/.test(String(latestUser.content || ''))
-            ? normalizeDigestList([latestUserText, ...previousOpenLoops], PRIVATE_DIGEST_LIMITS.openLoopItems)
-            : previousOpenLoops;
-        const relationshipState = normalizeDigestList(existingDigest?.relationship_state_json || [], PRIVATE_DIGEST_LIMITS.relationshipItems);
-        const strippedAssistant = stripInlineTags(latestAssistant?.content || '');
-        if (/别的AI|别人|只.*我|独占|吃醋|酸/i.test(strippedAssistant) && !relationshipState.includes('Still wants exclusive attention')) {
-            relationshipState.unshift('Still wants exclusive attention');
-        }
-        if (/哄|安慰|安心|陪/i.test(strippedAssistant) && !relationshipState.includes('Needs reassurance to settle down')) {
-            relationshipState.unshift('Needs reassurance to settle down');
-        }
-        const sceneState = normalizeDigestList(existingDigest?.scene_state_json || [], PRIVATE_DIGEST_LIMITS.sceneStateItems);
-        if ((character.city_status || '').includes('rest') || /睡|被窝|困|休息/i.test(strippedAssistant)) {
-            if (!sceneState.includes('Resting / half-awake')) sceneState.unshift('Resting / half-awake');
-        }
-        if ((character.satiety || 0) < 35 || /饿|肚子/i.test(strippedAssistant)) {
-            if (!sceneState.includes('Hungry or physically empty')) sceneState.unshift('Hungry or physically empty');
-        }
-        const expandedFacts = normalizeDigestList(sourceMessages.map((m) => {
-            const speaker = m.role === 'user' ? 'User' : character.name;
-            return `${speaker}: ${stripCompressedOpener(compactDigestText(m.content, 180))}`;
-        }), PRIVATE_DIGEST_LIMITS.recentFactItems);
-        return {
-            character_id: character.id,
-            digest_text: compactDigestText(
-                [
-                    digestSummaryParts.join(' | '),
-                    existingDigest?.digest_text || '',
-                    sourceMessages.slice(-Math.min(24, sourceMessages.length)).map((m) => {
-                        const speaker = m.role === 'user' ? 'User' : character.name;
-                        return `${speaker}: ${stripCompressedOpener(compactDigestText(m.content, 140))}`;
-                    }).join(' | ')
-                ].filter(Boolean).join(' | '),
-                PRIVATE_DIGEST_LIMITS.digestText
-            ),
-            emotion_state: compactDigestText(character.hidden_state || existingDigest?.emotion_state || '', PRIVATE_DIGEST_LIMITS.emotionState),
-            relationship_state_json: relationshipState.slice(0, PRIVATE_DIGEST_LIMITS.relationshipItems),
-            open_loops_json: mergedOpenLoops,
-            recent_facts_json: expandedFacts,
-            scene_state_json: sceneState.slice(0, PRIVATE_DIGEST_LIMITS.sceneStateItems),
-            last_message_id: latestMessageId
-        };
-    }
-
-    function buildFallbackGroupConversationDigest(character, group, existingDigest, deltaMessages, latestMessageId) {
-        const db = getDb();
-        const recentTail = (Array.isArray(deltaMessages) ? deltaMessages : []).slice(-6);
-        const compactedFacts = normalizeDigestList(recentTail.map((m) => {
-            const senderName = m.sender_id === 'user'
-                ? (db.getUserProfile?.()?.name || 'User')
-                : (db.getCharacter?.(m.sender_id)?.name || m.sender_name || m.sender_id || 'Unknown');
-            return `${senderName}: ${stripCompressedOpener(compactDigestText(m.content, 48))}`;
-        }), 5);
-        const latestUser = [...recentTail].reverse().find(m => m.sender_id === 'user');
-        const latestMention = [...recentTail].reverse().find(m => {
-            const senderName = db.getCharacter?.(m.sender_id)?.name || m.sender_name || '';
-            return typeof m.content === 'string' && (m.content.includes(`@${character.name}`) || (senderName && m.content.includes(senderName)));
-        });
-        const relationshipState = normalizeDigestList(existingDigest?.relationship_state_json || [], 5);
-        if (latestMention && !relationshipState.includes('Recently pulled into the spotlight')) {
-            relationshipState.unshift('Recently pulled into the spotlight');
-        }
-        if (latestUser && /今天|去哪|做了什么|怎么样|最近/i.test(String(latestUser.content || '')) && !relationshipState.includes('User is asking about current state')) {
-            relationshipState.unshift('User is asking about current state');
-        }
-        const openLoops = normalizeDigestList(existingDigest?.open_loops_json || [], 5);
-        if (latestUser && /[？?]/.test(String(latestUser.content || ''))) {
-            openLoops.unshift(compactDigestText(latestUser.content, 52));
-        }
-        const sceneState = normalizeDigestList(existingDigest?.scene_state_json || [], 4);
-        if (group?.name && !sceneState.includes(`In group ${group.name}`)) {
-            sceneState.unshift(`In group ${group.name}`);
-        }
-        return {
-            group_id: group?.id || '',
-            character_id: character.id,
-            digest_text: compactDigestText(compactedFacts.slice(0, 2).join(' | ') || existingDigest?.digest_text || '', 140),
-            emotion_state: compactDigestText(character.hidden_state || existingDigest?.emotion_state || '', 28),
-            relationship_state_json: relationshipState.slice(0, 3).map(v => compactDigestText(v, 36)),
-            open_loops_json: openLoops.slice(0, 3).map(v => compactDigestText(v, 42)),
-            recent_facts_json: compactedFacts.slice(0, 3).map(v => compactDigestText(v, 44)),
-            scene_state_json: sceneState.slice(0, 2).map(v => compactDigestText(v, 28)),
-            last_message_id: latestMessageId
-        };
     }
 
     function updateSweepStatus(characterId, patch = {}) {
@@ -2824,30 +2754,23 @@ Output exactly in this JSON format (and nothing else):
                 group_id: groupId || ''
             });
 
-            // Parse JSON safely
-            const startIdx = responseText.indexOf('{');
-            const endIdx = responseText.lastIndexOf('}');
-            if (startIdx !== -1 && endIdx !== -1) {
-                const jsonText = responseText.slice(startIdx, endIdx + 1);
-                const parsed = JSON.parse(jsonText);
-
-                if (parsed.action === 'add' || parsed.action === 'update') {
-                    parsed.source_context = sourceContext;
-                    parsed.scene_tag = sceneTag;
-                    parsed.source_started_at = sourceTimeMeta.source_started_at;
-                    parsed.source_ended_at = sourceTimeMeta.source_ended_at;
-                    parsed.source_time_text = parsed.source_time_text || sourceTimeMeta.source_time_text;
-                    parsed.source_message_count = sourceTimeMeta.source_message_count;
-                    if (!Array.isArray(parsed.source_message_ids_json) || parsed.source_message_ids_json.length === 0) {
-                        parsed.source_message_ids_json = sourceTimeMeta.source_message_ids_json;
-                    }
-                    if (!shouldWriteImmediateMemory(parsed)) {
-                        console.log(`[Memory] Skipped immediate memory for ${character.id}: below high-value threshold (${parsed.summary || parsed.event || 'untitled'})`);
-                        return null;
-                    }
-                    await saveExtractedMemory(character.id, parsed, groupId);
-                    return parsed;
+            const parsed = parseStrictMemoryJsonObject(responseText, 'Memory extraction');
+            if (parsed.action === 'add' || parsed.action === 'update') {
+                parsed.source_context = sourceContext;
+                parsed.scene_tag = sceneTag;
+                parsed.source_started_at = sourceTimeMeta.source_started_at;
+                parsed.source_ended_at = sourceTimeMeta.source_ended_at;
+                parsed.source_time_text = parsed.source_time_text || sourceTimeMeta.source_time_text;
+                parsed.source_message_count = sourceTimeMeta.source_message_count;
+                if (!Array.isArray(parsed.source_message_ids_json) || parsed.source_message_ids_json.length === 0) {
+                    parsed.source_message_ids_json = sourceTimeMeta.source_message_ids_json;
                 }
+                if (!shouldWriteImmediateMemory(parsed)) {
+                    console.log(`[Memory] Skipped immediate memory for ${character.id}: below high-value threshold (${parsed.summary || parsed.event || 'untitled'})`);
+                    return null;
+                }
+                await saveExtractedMemory(character.id, parsed, groupId);
+                return parsed;
             }
         } catch (e) {
             console.error(`[Memory] Extraction failed for ${character.id}:`, e.message);
@@ -3122,30 +3045,6 @@ ${previousDigestText}
 [New Group Dialogue Delta]
 ${deltaText}`;
 
-        const fallbackDigest = () => buildFallbackGroupConversationDigest(character, group, existingDigest, deltaMessages, latestMessageId);
-        const persistFallback = (extra = {}) => {
-            const digest = fallbackDigest();
-            db.upsertGroupConversationDigest?.({
-                group_id: groupId,
-                character_id: character.id,
-                source_hash: crypto.createHash('sha256').update(JSON.stringify({
-                    fallback: true,
-                    latestMessageId,
-                    groupId,
-                    extra,
-                    delta: deltaMessages.map(m => [m.id, m.sender_id, m.content])
-                })).digest('hex'),
-                digest_text: digest.digest_text,
-                emotion_state: digest.emotion_state,
-                relationship_state_json: digest.relationship_state_json,
-                open_loops_json: digest.open_loops_json,
-                recent_facts_json: digest.recent_facts_json,
-                scene_state_json: digest.scene_state_json,
-                last_message_id: digest.last_message_id
-            });
-            return db.getGroupConversationDigest?.(groupId, character.id, { trackHit: false }) || digest;
-        };
-
         try {
             const { content: responseText, usage } = await callLLM({
                 endpoint: memoryConfig.endpoint,
@@ -3167,15 +3066,17 @@ ${deltaText}`;
             });
             recordMemoryTokenUsage(character.id, 'group_conversation_digest_update', usage);
 
-            const startIdx = responseText.indexOf('{');
-            const endIdx = responseText.lastIndexOf('}');
-            if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
-                return persistFallback({ invalidJson: true });
+            const cleaned = String(responseText || '')
+                .replace(/```(?:json)?\s*/gi, '')
+                .replace(/```/g, '')
+                .trim();
+            if (!cleaned) {
+                throw new Error('群聊上下文总结模型没有返回 JSON。');
             }
-            const parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
+            const parsed = JSON.parse(cleaned);
             const normalized = normalizeCompactGroupDigestPayload(parsed);
             if (!normalized.digest_text) {
-                return persistFallback({ emptyDigest: true });
+                throw new Error('群聊上下文总结缺少 digest_text。');
             }
             const sourceHash = crypto.createHash('sha256')
                 .update(JSON.stringify({
@@ -3205,20 +3106,13 @@ ${deltaText}`;
             };
         } catch (e) {
             console.error(`[Memory] Group conversation digest update failed for ${character.id}/${groupId}:`, e.message);
-            return persistFallback({ error: e.message || '' });
+            const errorText = String(e?.message || e || 'unknown_error');
+            throw new Error(`群聊上下文总结失败，请检查记忆小模型后重试：${errorText}`);
         }
     }
 
     function parseMemoryArrayFromResponse(responseText) {
-        const startIdx = responseText.indexOf('[');
-        const endIdx = responseText.lastIndexOf(']');
-        if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
-        try {
-            const parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
-            return Array.isArray(parsed) ? parsed : [];
-        } catch (e) {
-            return [];
-        }
+        return parseStrictMemoryJsonArray(responseText, 'Memory aggregation');
     }
 
     async function aggregateDailyMemoriesChunked(character, hoursAgo = 24, options = {}) {
@@ -3551,25 +3445,16 @@ Output exactly in this JSON format (and nothing else):
             });
             recordMemoryTokenUsage(character.id, 'memory_daily_aggregate', usage);
 
-            const startIdx = responseText.indexOf('[');
-            const endIdx = responseText.lastIndexOf(']');
-            if (startIdx !== -1 && endIdx !== -1) {
-                const jsonText = responseText.slice(startIdx, endIdx + 1);
-                let parsed = [];
-                try { parsed = JSON.parse(jsonText); } catch (e) { }
-
-                let savedCount = 0;
-                if (Array.isArray(parsed)) {
-                    for (const mem of parsed) {
-                        if (mem.importance >= 3 && mem.event) {
-                            await saveExtractedMemory(character.id, mem, null);
-                            savedCount++;
-                        }
-                    }
+            const parsed = parseMemoryArrayFromResponse(responseText);
+            let savedCount = 0;
+            for (const mem of parsed) {
+                if (mem.importance >= 3 && mem.event) {
+                    await saveExtractedMemory(character.id, mem, null);
+                    savedCount++;
                 }
-                console.log(`[Memory] Daily aggregation completed for ${character.name}, saved ${savedCount} memories.`);
-                return savedCount;
             }
+            console.log(`[Memory] Daily aggregation completed for ${character.name}, saved ${savedCount} memories.`);
+            return savedCount;
         } catch (e) {
             console.error(`[Memory] Daily aggregation failed for ${character.id}:`, e.message);
         }
@@ -3909,23 +3794,9 @@ Output exactly in this JSON format (and nothing else):
                     source_message_count: batchTimeMeta.source_message_count
                 });
 
-                const startIdx = responseText.indexOf('{');
-                const endIdx = responseText.lastIndexOf('}');
-                if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) {
-                    updateSweepStatus(character.id, {
-                        sweep_last_error: `Batch ${batchIndex + 1}/${totalBatches} did not return a JSON object.`,
-                        sweep_last_saved_count: 0
-                    });
-                    return {
-                        status: 'failed',
-                        savedCount: 0,
-                        error: `Batch ${batchIndex + 1}/${totalBatches} did not return a JSON object.`
-                    };
-                }
-
                 let parsed = null;
                 try {
-                    parsed = JSON.parse(responseText.slice(startIdx, endIdx + 1));
+                    parsed = parseStrictMemoryJsonObject(responseText, 'Memory sweep');
                 } catch (e) {
                     updateSweepStatus(character.id, {
                         sweep_last_error: `Batch ${batchIndex + 1}/${totalBatches} returned invalid JSON.`,

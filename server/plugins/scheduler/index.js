@@ -1,5 +1,11 @@
 const express = require('express');
 const { getSchedulerDb } = require('./db');
+const {
+    isSchedulerValidationError,
+    normalizeSchedulerBatchSize,
+    normalizeSchedulerTaskId,
+    normalizeSchedulerTaskPayload
+} = require('./inputGuards');
 
 function init(app, context) {
     const { authMiddleware, authDb, getUserDb, getEngine, getMemory } = context;
@@ -9,7 +15,11 @@ function init(app, context) {
     router.get('/scheduler/:charId', authMiddleware, (req, res) => {
         try {
             const db = getSchedulerDb(req.user.id);
+            const userDb = getUserDb(req.user.id);
             const charId = req.params.charId;
+            if (charId !== 'all' && !userDb.getCharacter(charId)) {
+                return res.status(404).json({ error: 'Character not found' });
+            }
             const tasks = charId === 'all' ? db.getTasks() : db.getTasks(charId);
             res.json(tasks);
         } catch (e) {
@@ -22,16 +32,16 @@ function init(app, context) {
     router.post('/scheduler', authMiddleware, (req, res) => {
         try {
             const db = getSchedulerDb(req.user.id);
-            const { character_id, cron_expr, task_prompt, action_type, is_enabled, batch_size } = req.body;
-            if (!character_id || !cron_expr || !action_type) {
-                return res.status(400).json({ error: 'Missing required fields' });
+            const userDb = getUserDb(req.user.id);
+            const payload = normalizeSchedulerTaskPayload(req.body || {});
+            if (!userDb.getCharacter(payload.character_id)) {
+                return res.status(404).json({ error: 'Character not found' });
             }
-            const normalizedBatchSize = Math.max(10, Math.min(500, Number(batch_size) || 80));
-            const newId = db.addTask(character_id, cron_expr, task_prompt, action_type, is_enabled, normalizedBatchSize);
+            const newId = db.addTask(payload);
             res.json({ success: true, id: newId });
         } catch (e) {
             console.error('[Scheduler] POST task error:', e);
-            res.status(500).json({ error: 'Internal Server Error' });
+            res.status(isSchedulerValidationError(e) ? 400 : 500).json({ error: isSchedulerValidationError(e) ? e.message : 'Internal Server Error' });
         }
     });
 
@@ -39,13 +49,18 @@ function init(app, context) {
     router.put('/scheduler/:id', authMiddleware, (req, res) => {
         try {
             const db = getSchedulerDb(req.user.id);
-            const { character_id, cron_expr, task_prompt, action_type, is_enabled, batch_size } = req.body;
-            const normalizedBatchSize = Math.max(10, Math.min(500, Number(batch_size) || 80));
-            db.updateTask(req.params.id, character_id, cron_expr, task_prompt, action_type, is_enabled, normalizedBatchSize);
+            const userDb = getUserDb(req.user.id);
+            const payload = normalizeSchedulerTaskPayload(req.body || {});
+            if (!userDb.getCharacter(payload.character_id)) {
+                return res.status(404).json({ error: 'Character not found' });
+            }
+            const taskId = normalizeSchedulerTaskId(req.params.id);
+            const updated = db.updateTask(taskId, payload);
+            if (!updated) return res.status(404).json({ error: 'Task not found' });
             res.json({ success: true });
         } catch (e) {
             console.error('[Scheduler] PUT task error:', e);
-            res.status(500).json({ error: 'Internal Server Error' });
+            res.status(isSchedulerValidationError(e) ? 400 : 500).json({ error: isSchedulerValidationError(e) ? e.message : 'Internal Server Error' });
         }
     });
 
@@ -53,11 +68,13 @@ function init(app, context) {
     router.delete('/scheduler/:id', authMiddleware, (req, res) => {
         try {
             const db = getSchedulerDb(req.user.id);
-            db.deleteTask(req.params.id);
+            const taskId = normalizeSchedulerTaskId(req.params.id);
+            const deleted = db.deleteTask(taskId);
+            if (!deleted) return res.status(404).json({ error: 'Task not found' });
             res.json({ success: true });
         } catch (e) {
             console.error('[Scheduler] DELETE task error:', e);
-            res.status(500).json({ error: 'Internal Server Error' });
+            res.status(isSchedulerValidationError(e) ? 400 : 500).json({ error: isSchedulerValidationError(e) ? e.message : 'Internal Server Error' });
         }
     });
 
@@ -120,7 +137,7 @@ function init(app, context) {
                                 console.log(`[Scheduler] Starting daily memory aggregation for ${char.name}...`);
                                 try {
                                     await memory.aggregateDailyMemories(char, 24, {
-                                        batchSize: Math.max(10, Math.min(500, Number(task.batch_size) || 80))
+                                        batchSize: normalizeSchedulerBatchSize(task.batch_size, 80)
                                     });
                                 } catch (e) {
                                     console.error(`[Scheduler] Memory aggregation failed for ${char.name}:`, e);

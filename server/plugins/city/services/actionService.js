@@ -1,3 +1,12 @@
+const { normalizeCityConfigValue } = require('../utils/inputGuards');
+
+function normalizeCityActionConfigNumber(config, key, fallback) {
+    const normalized = normalizeCityConfigValue(key, config?.[key]);
+    if (normalized === null) return fallback;
+    const parsed = Number(normalized);
+    return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 function createActionService(deps = {}) {
     const {
         normalizeSurvivalState,
@@ -45,8 +54,8 @@ function createActionService(deps = {}) {
             }
         }
 
-        const inflation = parseFloat(config.inflation) || 1.0;
-        const workBonus = parseFloat(config.work_bonus) || 1.0;
+        const inflation = normalizeCityActionConfigNumber(config, 'inflation', 1.0);
+        const workBonus = normalizeCityActionConfigNumber(config, 'work_bonus', 1.0);
         const taskNarrationText = [
             richNarrations?.log,
             richNarrations?.chat,
@@ -156,8 +165,8 @@ function createActionService(deps = {}) {
             primaryActionLogId = db.city.logAction(char.id, 'QUEST', questLog, dCal, dMoney, district.id);
             if (richNarrations) broadcastCityToChat(userId, char, questLog, 'QUEST', richNarrations);
         } else if (district.type === 'gambling') {
-            const winRate = parseFloat(config.gambling_win_rate) || 0.35;
-            const payout = parseFloat(config.gambling_payout) || 3.0;
+            const winRate = normalizeCityActionConfigNumber(config, 'gambling_win_rate', 0.35);
+            const payout = normalizeCityActionConfigNumber(config, 'gambling_payout', 3.0);
             const didWin = Math.random() < winRate;
             if (didWin) {
                 dMoney = districtMoneyCost * payout;
@@ -167,7 +176,7 @@ function createActionService(deps = {}) {
                     moneyDelta: dMoney,
                     calDelta: dCal
                 }, richNarrations);
-                const winLog = String(gamblingNarrations.log || `${char.name} 在 ${district.emoji}${district.name} 赢了一大笔钱 😎`).trim();
+                const winLog = String(gamblingNarrations.log || '').trim();
                 primaryActionLogId = db.city.logAction(char.id, district.id.toUpperCase(), winLog, dCal, dMoney, district.id);
                 richNarrations = gamblingNarrations;
                 broadcastCityToChat(userId, char, winLog, 'GAMBLING_WIN', richNarrations);
@@ -179,7 +188,7 @@ function createActionService(deps = {}) {
                     moneyDelta: dMoney,
                     calDelta: dCal
                 }, richNarrations);
-                const loseLog = String(gamblingNarrations.log || `${char.name} 在 ${district.emoji}${district.name} 输光了 😵`).trim();
+                const loseLog = String(gamblingNarrations.log || '').trim();
                 primaryActionLogId = db.city.logAction(char.id, district.id.toUpperCase(), loseLog, dCal, dMoney, district.id);
                 richNarrations = gamblingNarrations;
                 broadcastCityToChat(userId, char, loseLog, 'GAMBLING_LOSE', richNarrations);
@@ -340,7 +349,7 @@ function createActionService(deps = {}) {
                     char,
                     district,
                     config,
-                    baseLog: getLogText(buildCollapsedCityLog(char, '行动文案生成失败', { district }), { forceDefault: false })
+                    baseLog: getLogText(normalLog, { forceDefault: false })
                 });
             } catch (webErr) {
                 console.warn(`[City/Web] ${char.name} 联网活动失败: ${webErr.message}`);

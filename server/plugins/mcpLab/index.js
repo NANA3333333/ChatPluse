@@ -1,5 +1,16 @@
 const crypto = require('crypto');
 const initMcpLabDb = require('./db');
+const {
+    isMcpLabValidationError,
+    normalizeMcpHttpUrl,
+    normalizeMcpKnowledgeListOptions,
+    normalizeMcpKnowledgePayload,
+    normalizeMcpKnowledgeSearchPayload,
+    normalizeMcpProvider,
+    normalizeMcpSearchPayload,
+    normalizeMcpTaskListOptions,
+    normalizeMcpTaskPayload
+} = require('./inputGuards');
 
 const WEB_SEARCH_PROVIDERS = [
     {
@@ -63,11 +74,7 @@ function ensureMcpLabDb(db) {
 }
 
 function assertHttpUrl(rawUrl) {
-    const url = new URL(String(rawUrl || '').trim());
-    if (!['http:', 'https:'].includes(url.protocol)) {
-        throw new Error('Only http/https URLs are allowed.');
-    }
-    return url.toString();
+    return normalizeMcpHttpUrl(rawUrl);
 }
 
 async function fetchWithTimeout(url, options = {}) {
@@ -580,7 +587,7 @@ function initMcpLab(app, context) {
             }
             res.json({ success: true, context: inspectContext(req.db, req.params.characterId) });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(e.message === 'Character not found.' ? 404 : 500).json({ success: false, error: e.message });
         }
     });
 
@@ -588,15 +595,16 @@ function initMcpLab(app, context) {
         let task = null;
         let labDb = null;
         try {
-            const resolved = resolveSearchProvider(req.db, req.body?.provider);
+            const payload = normalizeMcpSearchPayload(req.body || {});
+            const resolved = resolveSearchProvider(req.db, payload.provider);
             labDb = ensureMcpLabDb(req.db);
-            const query = String(req.body?.query || '').trim();
+            const query = payload.query;
             task = labDb.saveTask({
                 id: makeId(),
                 owner_id: req.user?.id || '',
                 title: safeText(query || 'Web search', 160),
                 kind: 'web_search',
-                input: { query, provider: req.body?.provider || resolved.id },
+                input: { query, provider: payload.provider || resolved.id, fetch_pages: payload.fetch_pages, fetch_page_limit: payload.fetch_page_limit },
                 status: 'running',
                 output: null,
                 error: '',
@@ -607,8 +615,8 @@ function initMcpLab(app, context) {
             task.output = await runWebSearch(query, {
                 provider: resolved.id,
                 apiKey: resolved.key,
-                fetchPages: req.body?.fetch_pages !== false,
-                fetchPageLimit: req.body?.fetch_page_limit || 3
+                fetchPages: payload.fetch_pages,
+                fetchPageLimit: payload.fetch_page_limit
             });
             task.status = 'done';
             task.finished_at = nowIso();
@@ -625,7 +633,7 @@ function initMcpLab(app, context) {
                 task.finished_at = nowIso();
                 labDb.saveTask(task);
             }
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
@@ -701,10 +709,7 @@ function initMcpLab(app, context) {
                     if (value) keys[provider.id] = value;
                 }
             }
-            const preferred = String(req.body?.preferred_provider || profile.web_search_provider || 'auto').trim();
-            const validProvider = preferred === 'auto' || preferred === 'duckduckgo' || WEB_SEARCH_PROVIDERS.some(item => item.id === preferred)
-                ? preferred
-                : 'auto';
+            const validProvider = normalizeMcpProvider(req.body?.preferred_provider || profile.web_search_provider || 'auto');
             req.db.updateUserProfile?.({
                 serper_api_key: String(keys.serper || ''),
                 web_search_keys_json: JSON.stringify(keys),
@@ -721,7 +726,7 @@ function initMcpLab(app, context) {
                 providers: config.providers.map(({ id, label, env, docs, has_key, masked, source }) => ({ id, label, env, docs, has_key, masked, source }))
             });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
@@ -730,7 +735,7 @@ function initMcpLab(app, context) {
         let labDb = null;
         try {
             labDb = ensureMcpLabDb(req.db);
-            const url = String(req.body?.url || '').trim();
+            const url = normalizeMcpHttpUrl(req.body?.url);
             task = labDb.saveTask({
                 id: makeId(),
                 owner_id: req.user?.id || '',
@@ -756,26 +761,27 @@ function initMcpLab(app, context) {
                 task.finished_at = nowIso();
                 labDb.saveTask(task);
             }
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
     app.get('/api/mcp-lab/tasks', authMiddleware, (req, res) => {
         try {
-            res.json({ success: true, tasks: ensureMcpLabDb(req.db).listTasks(req.user?.id || '') });
+            const options = normalizeMcpTaskListOptions(req.query || {});
+            res.json({ success: true, tasks: ensureMcpLabDb(req.db).listTasks(req.user?.id || '', options.limit) });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
     app.post('/api/mcp-lab/tasks', authMiddleware, async (req, res) => {
         try {
-            const kind = String(req.body?.kind || 'web_search').trim();
+            const payload = normalizeMcpTaskPayload(req.body || {});
             const task = {
                 id: makeId(),
-                title: safeText(req.body?.title || req.body?.input?.query || req.body?.input?.url || kind, 160),
-                kind,
-                input: req.body?.input || {},
+                title: payload.title,
+                kind: payload.kind,
+                input: payload.input,
                 status: 'queued',
                 output: null,
                 error: '',
@@ -789,7 +795,7 @@ function initMcpLab(app, context) {
             if (req.body?.run_now !== false) await runTask(task, { db: req.db });
             res.json({ success: true, task: labDb.getTask(task.id, req.user?.id || '') || task });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
@@ -806,7 +812,9 @@ function initMcpLab(app, context) {
 
     app.delete('/api/mcp-lab/tasks/:id', authMiddleware, (req, res) => {
         try {
-            res.json({ success: true, deleted: ensureMcpLabDb(req.db).deleteTask(req.params.id, req.user?.id || '') });
+            const deleted = ensureMcpLabDb(req.db).deleteTask(req.params.id, req.user?.id || '');
+            if (!deleted) return res.status(404).json({ success: false, error: 'Task not found.' });
+            res.json({ success: true, deleted });
         } catch (e) {
             res.status(500).json({ success: false, error: e.message });
         }
@@ -814,52 +822,56 @@ function initMcpLab(app, context) {
 
     app.get('/api/mcp-lab/knowledge', authMiddleware, (req, res) => {
         try {
+            const options = normalizeMcpKnowledgeListOptions(req.query || {});
+            if (options.character_id && !req.db.getCharacter?.(options.character_id)) {
+                return res.status(404).json({ success: false, error: 'Character not found.' });
+            }
             const labDb = ensureMcpLabDb(req.db);
             res.json({
                 success: true,
-                docs: labDb.listExternalKnowledgeDocs({
-                    character_id: req.query.character_id || '',
-                    limit: req.query.limit || 30
-                })
+                docs: labDb.listExternalKnowledgeDocs(options)
             });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
     app.post('/api/mcp-lab/knowledge', authMiddleware, (req, res) => {
         try {
-            const content = String(req.body?.content || '').trim();
-            const title = safeText(req.body?.title || req.body?.source_url || 'External note', 240);
+            const payload = normalizeMcpKnowledgePayload(req.body || {});
+            if (payload.character_id && !req.db.getCharacter?.(payload.character_id)) {
+                return res.status(404).json({ success: false, error: 'Character not found.' });
+            }
             const labDb = ensureMcpLabDb(req.db);
             const doc = labDb.saveExternalKnowledge({
                 owner_id: req.user?.id || '',
-                character_id: req.body?.character_id || '',
-                title,
-                content,
-                source_url: req.body?.source_url || '',
-                source_type: req.body?.source_type || 'note',
-                trust_level: req.body?.trust_level || 'raw',
-                tags: req.body?.tags || []
-            }, labDb.chunkText(content), makeId);
+                character_id: payload.character_id,
+                title: payload.title,
+                content: payload.content,
+                source_url: payload.source_url,
+                source_type: payload.source_type,
+                trust_level: payload.trust_level,
+                tags: payload.tags
+            }, labDb.chunkText(payload.content), makeId);
             res.json({ success: true, doc });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 
     app.post('/api/mcp-lab/knowledge/search', authMiddleware, (req, res) => {
         try {
+            const payload = normalizeMcpKnowledgeSearchPayload(req.body || {});
+            if (payload.character_id && !req.db.getCharacter?.(payload.character_id)) {
+                return res.status(404).json({ success: false, error: 'Character not found.' });
+            }
             const labDb = ensureMcpLabDb(req.db);
             res.json({
                 success: true,
-                results: labDb.searchExternalKnowledge(req.body?.query || '', {
-                    character_id: req.body?.character_id || '',
-                    limit: req.body?.limit || 8
-                })
+                results: labDb.searchExternalKnowledge(payload.query, payload)
             });
         } catch (e) {
-            res.status(500).json({ success: false, error: e.message });
+            res.status(isMcpLabValidationError(e) ? 400 : 500).json({ success: false, error: e.message });
         }
     });
 

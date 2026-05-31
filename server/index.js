@@ -41,6 +41,15 @@ const { getMemory, extractMemoryFromContext, setWsClientsResolver, getEmbeddingD
 const { getTokenCount } = require('./utils/tokenizer');
 const { enqueueBackgroundTask, getBackgroundQueueStats } = require('./backgroundQueue');
 const { synthesizeSpeech, getTencentVoiceList } = require('./tts');
+const {
+    normalizeMemoryId,
+    normalizeMemoryIdList,
+    normalizeMemoryMaintenanceAutoRunControls,
+    normalizeMemoryMaintenanceBatchOptions,
+    normalizeMemoryMaintenanceLibraryOptions,
+    normalizeMemoryMaintenanceSettingsPatch,
+    normalizeOptionalMemoryId
+} = require('./memoryInputGuards');
 const qdrant = require('./qdrant');
 const crypto = require('crypto');
 
@@ -60,6 +69,26 @@ function yieldToServerLoop() {
 function buildDefaultAvatarUrl(seed = 'User') {
     const safeSeed = encodeURIComponent(String(seed || 'User').trim() || 'User');
     return `https://api.dicebear.com/7.x/shapes/svg?seed=${safeSeed}&backgroundColor=e8f0ff,fff5d6,e9f7ef,f5eafa,f1f5f9`;
+}
+
+function normalizePositiveMoney(value) {
+    const amount = Number(value);
+    if (!Number.isFinite(amount) || amount <= 0) return null;
+    const rounded = +amount.toFixed(2);
+    return rounded > 0 ? rounded : null;
+}
+
+function normalizePaymentNote(value, fallback = '') {
+    if (value === undefined || value === null) return fallback;
+    if (typeof value !== 'string') return null;
+    return value.trim().slice(0, 120);
+}
+
+function normalizeQueryLimit(value, fallback, max) {
+    if (value === undefined || value === null || String(value).trim() === '') return fallback;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+    return Math.min(parsed, max);
 }
 
 function getEngineWithPluginHooks(userId) {
@@ -298,7 +327,6 @@ const upload = multer({
 });
 
 const MEMORY_IMPORT_MAX_ITEMS = 500;
-const MEMORY_BULK_MAX_IDS = 10000;
 const memoryImportUpload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 128 * 1024 * 1024, files: 1 },
@@ -1245,7 +1273,7 @@ function normalizeExternalImportResult(parsed = {}, context = {}) {
 }
 
 function chunkExternalImportMessages(messages = [], limit = 10, maxBatches = null) {
-    const safeLimit = Math.max(1, Math.min(100, Number(limit || 10) || 10));
+    const safeLimit = normalizeMemoryMaintenanceBatchOptions({ limit }, { limitFallback: 10 }).limit;
     const chunks = [];
     for (let start = 0; start < messages.length; start += safeLimit) {
         if (maxBatches !== null && chunks.length >= maxBatches) break;
@@ -2297,9 +2325,10 @@ function buildMemoryMaintenancePayload(row, now = Date.now()) {
 }
 
 function getMemoryMaintenanceBatch(rawDb, characterId, options = {}) {
-    const limit = Math.max(1, Math.min(100, Number(options.limit || 30) || 30));
-    const afterId = Math.max(0, Number(options.after_id || 0) || 0);
-    const offset = Math.max(0, Number(options.offset || 0) || 0);
+    const batchOptions = normalizeMemoryMaintenanceBatchOptions(options, { limitFallback: 30 });
+    const limit = batchOptions.limit;
+    const afterId = batchOptions.after_id;
+    const offset = batchOptions.offset;
     const includeArchived = !!options.include_archived;
     const status = String(options.status || 'pending').trim().toLowerCase();
     const where = ['character_id = ?'];
@@ -2458,8 +2487,9 @@ function getExternalImportPendingStatsByCharacter(rawDb) {
 }
 
 function getExternalImportMaintenanceBatch(rawDb, characterId, options = {}) {
-    const limit = Math.max(1, Math.min(100, Number(options.limit || 30) || 30));
-    const offset = Math.max(0, Number(options.offset || 0) || 0);
+    const batchOptions = normalizeMemoryMaintenanceBatchOptions(options, { limitFallback: 30 });
+    const limit = batchOptions.limit;
+    const offset = batchOptions.offset;
     const allItems = buildExternalImportPendingItems(rawDb, characterId);
     const now = Date.now();
     const items = allItems.slice(offset, offset + limit).map((entry, index) => {
@@ -2573,8 +2603,9 @@ function buildMemoryTemporalBindingPayload(row, source = 'new') {
 }
 
 function getMemoryTemporalBindingBatch(rawDb, characterId, options = {}) {
-    const limit = Math.max(1, Math.min(100, Number(options.limit || 40) || 40));
-    const offset = Math.max(0, Number(options.offset || 0) || 0);
+    const batchOptions = normalizeMemoryMaintenanceBatchOptions(options, { limitFallback: 40 });
+    const limit = batchOptions.limit;
+    const offset = batchOptions.offset;
     const source = normalizeMemoryTemporalBindingSource(options.source || 'new');
     const includeArchived = !!options.include_archived;
     const where = ['character_id = ?'];
@@ -2851,21 +2882,26 @@ ${JSON.stringify(source)}`;
 
 function extractJsonObjectFromText(text = '') {
     const raw = String(text || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-    const start = raw.indexOf('{');
-    const end = raw.lastIndexOf('}');
-    if (start === -1 || end === -1 || end <= start) {
+    if (!raw) {
         const error = new Error('小模型没有返回 JSON 对象，后端找不到完整的 { ... }。');
         error.code = 'small_model_json_missing';
         error.payload = { raw_response: raw };
         throw error;
     }
-    const jsonText = raw.slice(start, end + 1);
     try {
-        return JSON.parse(jsonText);
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+            const error = new Error('小模型返回的 JSON 不是对象。');
+            error.code = 'small_model_invalid_json';
+            error.payload = { raw_response: raw, json_preview: clipMemoryDisplayText(raw, 1600) };
+            throw error;
+        }
+        return parsed;
     } catch (e) {
+        if (e?.code === 'small_model_invalid_json') throw e;
         const error = new Error(`小模型返回的 JSON 格式不合法：${e.message}`);
         error.code = 'small_model_invalid_json';
-        error.payload = { raw_response: raw, json_preview: clipMemoryDisplayText(jsonText, 1600) };
+        error.payload = { raw_response: raw, json_preview: clipMemoryDisplayText(raw, 1600) };
         throw error;
     }
 }
@@ -3597,11 +3633,13 @@ async function applyExternalImportMigrationItems(rawDb, memory, characterId, nor
 
 async function runMemoryMaintenanceBatch(rawDb, memory, character, settings, options = {}) {
     const characterId = character.id;
-    const limit = Math.max(1, Math.min(100, Number(options.limit || settings.batch_size || 30) || 30));
+    const batchOptions = normalizeMemoryMaintenanceBatchOptions(options, {
+        limitFallback: settings.batch_size || 30
+    });
     const batch = getMemoryMaintenanceBatch(rawDb, characterId, {
-        limit,
-        offset: options.offset,
-        after_id: options.after_id,
+        limit: batchOptions.limit,
+        offset: batchOptions.offset,
+        after_id: batchOptions.after_id,
         status: options.status || 'pending',
         include_archived: parseBooleanFlag(options.include_archived)
     });
@@ -3719,10 +3757,12 @@ async function runMemoryMaintenanceBatch(rawDb, memory, character, settings, opt
 
 async function runMemoryTemporalBindingBatch(rawDb, character, settings, options = {}) {
     const characterId = character.id;
-    const limit = Math.max(1, Math.min(100, Number(options.limit || settings.batch_size || 40) || 40));
+    const batchOptions = normalizeMemoryMaintenanceBatchOptions(options, {
+        limitFallback: settings.batch_size || 40
+    });
     const batch = getMemoryTemporalBindingBatch(rawDb, characterId, {
-        limit,
-        offset: options.offset,
+        limit: batchOptions.limit,
+        offset: batchOptions.offset,
         source: options.source || 'new',
         include_archived: parseBooleanFlag(options.include_archived)
     });
@@ -4808,22 +4848,7 @@ function getMemoryMaintenanceSettings(db) {
 }
 
 function updateMemoryMaintenanceSettings(db, body = {}) {
-    const patch = {};
-    if (Object.prototype.hasOwnProperty.call(body, 'api_endpoint')) {
-        patch.memory_maintenance_api_endpoint = String(body.api_endpoint || '').trim();
-    }
-    if (Object.prototype.hasOwnProperty.call(body, 'api_key')) {
-        patch.memory_maintenance_api_key = String(body.api_key || '').trim();
-    }
-    if (Object.prototype.hasOwnProperty.call(body, 'model_name')) {
-        patch.memory_maintenance_model_name = String(body.model_name || '').trim();
-    }
-    if (Object.prototype.hasOwnProperty.call(body, 'batch_size')) {
-        patch.memory_maintenance_batch_size = Math.max(10, Math.min(100, parseInt(body.batch_size, 10) || 30));
-    }
-    if (Object.prototype.hasOwnProperty.call(body, 'max_output_tokens')) {
-        patch.memory_maintenance_max_tokens = Math.max(1000, Math.min(20000, parseInt(body.max_output_tokens, 10) || 8000));
-    }
+    const patch = normalizeMemoryMaintenanceSettingsPatch(body);
     db.updateUserProfile?.(patch);
     return getMemoryMaintenanceSettings(db);
 }
@@ -5566,7 +5591,7 @@ app.put('/api/memory-maintenance/settings', authMiddleware, (req, res) => {
     try {
         res.json({ success: true, settings: updateMemoryMaintenanceSettings(req.db, req.body || {}) });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -5588,22 +5613,16 @@ app.get('/api/memory-maintenance/library', authMiddleware, (req, res) => {
     try {
         const rawDb = typeof req.db.getRawDb === 'function' ? req.db.getRawDb() : null;
         if (!rawDb) return res.status(500).json({ error: 'Raw database handle is unavailable.' });
+        const options = normalizeMemoryMaintenanceLibraryOptions(req.query || {});
+        if (options.character_id && !req.db.getCharacter(options.character_id)) {
+            return res.status(404).json({ success: false, error: 'Character not found' });
+        }
         res.json({
             success: true,
-            library: getMemoryMaintenanceLibrary(rawDb, {
-                character_id: req.query.character_id,
-                all: req.query.all,
-                source: req.query.source || 'new',
-                temporal_filter: req.query.temporal_filter,
-                timeline_filter: req.query.timeline_filter || 'strong_time_bound',
-                timeline_all: req.query.timeline_all,
-                timeline_limit: req.query.timeline_limit,
-                limit_per_group: req.query.limit_per_group,
-                forgetting_limit: req.query.forgetting_limit
-            })
+            library: getMemoryMaintenanceLibrary(rawDb, options)
         });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -5748,6 +5767,7 @@ app.put('/api/characters/:id', authMiddleware, (req, res) => {
         const data = req.body;
         if (!id) return res.status(400).json({ error: 'Missing ID' });
         const prevCharacter = typeof db.getCharacter === 'function' ? db.getCharacter(id) : null;
+        if (!prevCharacter) return res.status(404).json({ error: 'Character not found' });
 
         db.updateCharacter(id, data);
         // Changing S only changes future batch size; keep summaries/baseline so failed pending messages stay pending.
@@ -5847,8 +5867,16 @@ app.get('/api/messages/:characterId', authMiddleware, (req, res) => {
     const db = req.db;
     try {
         const charId = req.params.characterId;
-        const limit = parseInt(req.query.limit) || 100;
-        const before = req.query.before;  // message ID cursor for older messages
+        const charObj = db.getCharacter(charId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
+        const limit = normalizeQueryLimit(req.query.limit, 100, 200);
+        if (!limit) return res.status(400).json({ error: 'Invalid message limit' });
+        const before = req.query.before !== undefined && req.query.before !== null && String(req.query.before).trim() !== ''
+            ? Number(req.query.before)
+            : 0;  // message ID cursor for older messages
+        if (req.query.before !== undefined && (!Number.isSafeInteger(before) || before <= 0)) {
+            return res.status(400).json({ error: 'Invalid before cursor' });
+        }
 
         let messages;
         if (before) {
@@ -5871,9 +5899,12 @@ app.get('/api/messages/:characterId', authMiddleware, (req, res) => {
 app.get('/api/characters/:characterId/emotion-logs', authMiddleware, (req, res) => {
     const db = req.db;
     try {
-        const limit = Math.max(1, Math.min(100, parseInt(req.query.limit, 10) || 50));
+        const charObj = db.getCharacter(req.params.characterId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
+        const limit = normalizeQueryLimit(req.query.limit, 50, 100);
+        if (!limit) return res.status(400).json({ error: 'Invalid emotion log limit' });
         const logs = typeof db.getEmotionLogs === 'function'
-            ? db.getEmotionLogs(req.params.characterId, limit)
+            ? db.getEmotionLogs(charObj.id, limit)
             : [];
         res.json({ success: true, logs });
     } catch (e) {
@@ -5884,9 +5915,12 @@ app.get('/api/characters/:characterId/emotion-logs', authMiddleware, (req, res) 
 app.get('/api/characters/:characterId/llm-debug-logs', authMiddleware, (req, res) => {
     const db = req.db;
     try {
-        const limit = Math.max(1, Math.min(200, parseInt(req.query.limit, 10) || 50));
+        const charObj = db.getCharacter(req.params.characterId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
+        const limit = normalizeQueryLimit(req.query.limit, 50, 200);
+        if (!limit) return res.status(400).json({ error: 'Invalid LLM debug log limit' });
         const logs = typeof db.getLlmDebugLogs === 'function'
-            ? db.getLlmDebugLogs(req.params.characterId, limit)
+            ? db.getLlmDebugLogs(charObj.id, limit)
             : [];
         res.json({ success: true, logs });
     } catch (e) {
@@ -5906,9 +5940,10 @@ app.post('/api/messages', authMiddleware, async (req, res) => {
         const requestId = createRequestTraceId('msg');
 
         const charObj = db.getCharacter(characterId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
 
         // If character has blocked the user, save message but return blocked flag
-        if (!charObj || charObj.is_blocked) {
+        if (charObj.is_blocked) {
             const { id: msgId, timestamp: msgTs } = db.addMessage(characterId, 'user', content);
             const savedMessage = { id: msgId, character_id: characterId, role: 'user', content, timestamp: msgTs, isBlocked: true };
             engine.broadcastNewMessage?.(wsClients, savedMessage);
@@ -5964,6 +5999,8 @@ app.post('/api/messages/:characterId/retry', authMiddleware, (req, res) => {
     try {
         const { characterId } = req.params;
         const { failedMessageId } = req.body;
+        const charObj = db.getCharacter(characterId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
         const requestId = createRequestTraceId('retry');
         let retryEvent = null;
 
@@ -5974,7 +6011,7 @@ app.post('/api/messages/:characterId/retry', authMiddleware, (req, res) => {
                 ? failedMessage.metadata
                 : null;
             retryEvent = metadata?.systemEventReply || null;
-            db.deleteMessage(failedMessageId);
+            if (failedMessage) db.deleteMessage(failedMessage.id, characterId);
         }
 
         if (retryEvent?.extraSystemDirective) {
@@ -6019,6 +6056,9 @@ app.get('/api/tts/audio/:messageId', authMiddleware, (req, res) => {
             return res.status(404).json({ error: 'TTS audio not found.' });
         }
         const messageCharId = db.getMessageCharacterId?.(req.params.messageId);
+        if (!messageCharId) {
+            return res.status(404).json({ error: 'TTS audio not found.' });
+        }
         if (messageCharId && String(messageCharId) !== String(row.character_id)) {
             return res.status(403).json({ error: 'TTS audio does not match message.' });
         }
@@ -6033,7 +6073,7 @@ app.get('/api/tts/audio/:messageId', authMiddleware, (req, res) => {
         res.setHeader('Cache-Control', 'private, max-age=86400');
         res.sendFile(audioPath);
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -6082,7 +6122,8 @@ app.get('/api/debug/reply-dispatch/:characterId', authMiddleware, (req, res) => 
     const db = req.db;
     try {
         const { characterId } = req.params;
-        const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 50));
+        const limit = normalizeQueryLimit(req.query.limit, 50, 200);
+        if (!limit) return res.status(400).json({ error: 'Invalid reply dispatch log limit' });
         if (typeof db.getReplyDispatchLogs !== 'function') {
             return res.status(501).json({ error: 'Reply dispatch debug is unavailable' });
         }
@@ -6097,16 +6138,25 @@ app.post('/api/messages/batch-delete', authMiddleware, (req, res) => {
     const db = req.db;
     try {
         const { messageIds } = req.body;
-        if (!Array.isArray(messageIds) || messageIds.length === 0) {
+        const ids = Array.from(new Set((Array.isArray(messageIds) ? messageIds : [])
+            .map(id => Number(id || 0))
+            .filter(id => Number.isSafeInteger(id) && id > 0)))
+            .slice(0, 500);
+        if (ids.length === 0) {
             return res.status(400).json({ error: 'messageIds array required' });
         }
+        const requestedCharacterId = String(req.body?.characterId || '').trim();
         const affectedCharacterIds = new Set();
         let deleted = 0;
-        for (const id of messageIds) {
+        for (const id of ids) {
             const characterId = db.getMessageCharacterId?.(id);
-            if (characterId) affectedCharacterIds.add(characterId);
-            db.deleteMessage(id);
-            deleted++;
+            if (!characterId) continue;
+            if (requestedCharacterId && String(characterId) !== requestedCharacterId) continue;
+            const changes = db.deleteMessage(id, characterId);
+            if (changes > 0) {
+                affectedCharacterIds.add(characterId);
+                deleted += changes;
+            }
         }
         for (const characterId of affectedCharacterIds) {
             db.clearCharacterMessageCaches?.(characterId);
@@ -6132,14 +6182,17 @@ app.post('/api/transfer', authMiddleware, (req, res) => {
         if (!char) return res.status(404).json({ error: 'Character not found' });
 
         // Create traceable transfer record in DB (deducts user wallet)
-        const transferNote = note || 'Transfer';
+        const transferAmount = normalizePositiveMoney(amount);
+        if (!transferAmount) return res.status(400).json({ error: 'Invalid amount' });
+        const transferNote = normalizePaymentNote(note, 'Transfer');
+        if (transferNote === null) return res.status(400).json({ error: 'Invalid note' });
         let tid;
         try {
             tid = db.createTransfer({
                 charId: characterId,
                 senderId: 'user',
                 recipientId: characterId,
-                amount: parseFloat(amount) || 0.01,
+                amount: transferAmount,
                 note: transferNote,
                 messageId: null
             });
@@ -6148,7 +6201,7 @@ app.post('/api/transfer', authMiddleware, (req, res) => {
         }
 
         // Add user transfer message to DB
-        const transferText = `[TRANSFER]${tid}|${amount || 0.01}|${transferNote}`;
+        const transferText = `[TRANSFER]${tid}|${transferAmount}|${transferNote}`;
         const { id: msgId, timestamp: msgTs } = db.addMessage(characterId, 'user', transferText);
         const savedMessage = { id: msgId, character_id: characterId, role: 'user', content: transferText, timestamp: msgTs };
 
@@ -6177,6 +6230,51 @@ app.post('/api/transfer', authMiddleware, (req, res) => {
         res.status(500).json({ error: e.message });
     }
 });
+
+function parseGeneratedCharacterReply(replyText) {
+    const cleanText = String(replyText || '')
+        .replace(/```(?:json)?\s*/gi, '')
+        .replace(/```/g, '')
+        .trim();
+    if (!cleanText) throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
+    const parsed = JSON.parse(cleanText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('Generated character must be a JSON object.');
+    }
+    return parsed;
+}
+
+function requireGeneratedCharacterText(value, field, maxLength = 6000) {
+    const text = String(value || '').trim();
+    if (!text) throw new Error(`Generated character is missing ${field}.`);
+    return text.slice(0, maxLength);
+}
+
+function requireGeneratedCharacterInteger(value, field, min, max) {
+    if (!Number.isSafeInteger(value) || value < min || value > max) {
+        throw new Error(`Generated character has invalid ${field}.`);
+    }
+    return value;
+}
+
+function normalizeGeneratedCharacterPayload(parsed) {
+    const intervalMin = requireGeneratedCharacterInteger(parsed.interval_min, 'interval_min', 1, 10080);
+    const intervalMax = requireGeneratedCharacterInteger(parsed.interval_max, 'interval_max', 1, 10080);
+    if (intervalMax < intervalMin) {
+        throw new Error('Generated character has invalid interval range.');
+    }
+    return {
+        name: requireGeneratedCharacterText(parsed.name, 'name', 80),
+        persona: requireGeneratedCharacterText(parsed.persona, 'persona'),
+        world_info: requireGeneratedCharacterText(parsed.world_info, 'world_info'),
+        affinity: requireGeneratedCharacterInteger(parsed.affinity, 'affinity', 0, 100),
+        sys_pressure: requireGeneratedCharacterInteger(parsed.sys_pressure, 'sys_pressure', 0, 1),
+        sys_jealousy: requireGeneratedCharacterInteger(parsed.sys_jealousy, 'sys_jealousy', 0, 1),
+        interval_min: intervalMin,
+        interval_max: intervalMax,
+        target_emoji: requireGeneratedCharacterText(parsed.target_emoji, 'target_emoji', 16)
+    };
+}
 
 // 4.55 Generate Character via LLM
 app.post('/api/characters/generate', authMiddleware, async (req, res) => {
@@ -6210,7 +6308,7 @@ The JSON MUST have the EXACT following keys:
 `;
 
         const existingChars = db.getCharacters();
-        const usedEmojis = Array.from(new Set(existingChars.map(c => c.emoji).filter(e => e && e !== '馃懁')));
+        const usedEmojis = Array.from(new Set(existingChars.map(c => c.emoji).filter(e => e && e !== '👤')));
         const excludeEmojiStr = usedEmojis.length > 0
             ? `\nCRITICAL EMOJI RULE: Do NOT use any of these emojis because they are already taken by other characters: ${usedEmojis.join(', ')}. You MUST pick a unique one.`
             : '';
@@ -6228,36 +6326,25 @@ The JSON MUST have the EXACT following keys:
 
         console.log(`[Character Generator] LLM returned ${String(generatedText || '').length} chars.`);
 
-        // Aggressively strip markdown formatting
-        let cleanText = String(generatedText || '').replace(/```json/gi, '').replace(/```/g, '').trim();
-
-        const startIdx = cleanText.indexOf('{');
-        const endIdx = cleanText.lastIndexOf('}');
-        if (startIdx !== -1 && endIdx !== -1) {
-            const jsonText = cleanText.slice(startIdx, endIdx + 1);
-            let parsed;
-            try {
-                parsed = JSON.parse(jsonText);
-            } catch (err) {
-                console.error(`[Character Generator] JSON.parse failed. responseLength=${jsonText.length}`);
-                throw new Error('LLM JSON Syntax Error: ' + err.message);
-            }
-
-            // Set defaults and formatting
-            parsed.avatar = buildDefaultAvatarUrl(parsed.name || 'AI');
-            parsed.api_endpoint = api_endpoint;
-            parsed.api_key = api_key;
-            parsed.model_name = model_name;
-            parsed.sys_timer = 1;
-            parsed.sys_proactive = 1;
-            parsed.emoji = parsed.target_emoji || '馃懁';
-            delete parsed.target_emoji;
-
-            return res.json({ success: true, character: parsed });
-        } else {
-            console.error(`[Character Generator] Failed to find JSON brackets. responseLength=${cleanText.length}`);
-            throw new Error('LLM did not return a valid JSON object. Check Server Logs.');
+        let parsed;
+        try {
+            parsed = normalizeGeneratedCharacterPayload(parseGeneratedCharacterReply(generatedText));
+        } catch (err) {
+            console.error(`[Character Generator] JSON validation failed. responseLength=${String(generatedText || '').length}`);
+            throw new Error('LLM JSON Syntax Error: ' + err.message);
         }
+
+        // Set local integration fields only after the generated payload validates.
+        parsed.avatar = buildDefaultAvatarUrl(parsed.name);
+        parsed.api_endpoint = api_endpoint;
+        parsed.api_key = api_key;
+        parsed.model_name = model_name;
+        parsed.sys_timer = 1;
+        parsed.sys_proactive = 1;
+        parsed.emoji = parsed.target_emoji;
+        delete parsed.target_emoji;
+
+        return res.json({ success: true, character: parsed });
     } catch (e) {
         console.error('Generation Error:', e.message);
         res.status(500).json({ error: e.message });
@@ -6272,6 +6359,8 @@ app.delete('/api/messages/:characterId', authMiddleware, (req, res) => {
     const wsClients = getWsClients(req.user.id);
     try {
         const characterId = req.params.characterId;
+        const character = typeof db.getCharacter === 'function' ? db.getCharacter(characterId) : null;
+        if (!character) return res.status(404).json({ error: 'Character not found' });
         db.clearMessages(characterId);
         db.clearCharacterMessageCaches?.(characterId);
         res.json({ success: true });
@@ -6288,8 +6377,10 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
     const wsClients = getWsClients(req.user.id);
     try {
         const id = req.params.characterId;
+        const char = db.getCharacter(id);
+        if (!char) return res.status(404).json({ error: 'Character not found' });
 
-        // 鈿?Stop the engine timer FIRST to minimize race-condition window
+        // Stop the engine timer first to minimize the race-condition window.
         engine.stopTimer(id);
 
         // Clear all data
@@ -6308,7 +6399,6 @@ app.delete('/api/data/:characterId', authMiddleware, async (req, res) => {
         await memory.wipeIndex(id);
 
         // Reset core emotional stats, wallet, AND diary lock state
-        const char = db.getCharacter(id);
         const resetAffinity = char?.initial_affinity ?? 50;
 
         db.updateCharacter(id, {
@@ -6395,14 +6485,16 @@ app.post('/api/data/:characterId/import', authMiddleware, (req, res) => {
             const characterId = req.params.characterId;
             const payload = parseCharacterArchiveRequest(req);
             const existing = db.getCharacter(characterId);
-            if (!existing && !payload.character) {
-                return res.status(404).json({ error: 'Target character does not exist, and the archive has no character object to create it.' });
-            }
-
             const mode = String(req.query.mode ?? req.body?.mode ?? '').trim().toLowerCase();
             const merge = mode === 'merge' || parseBooleanFlag(req.query.merge ?? req.body?.merge);
             const replace = !merge && (mode === '' || mode === 'replace' || parseBooleanFlag(req.query.replace ?? req.body?.replace));
             const includeCharacter = !parseBooleanFlag(req.query.skip_character ?? req.body?.skip_character);
+            if (!existing && (!includeCharacter || !payload.character)) {
+                return res.status(404).json({ error: 'Target character does not exist, and the archive cannot create it with the current import options.' });
+            }
+            if (!existing && !String(payload.character?.name || '').trim()) {
+                return res.status(400).json({ error: 'Archive character name is required to create a missing target character.' });
+            }
             const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
             if (!rawDb) return res.status(500).json({ error: 'Raw database handle is unavailable.' });
 
@@ -6457,7 +6549,7 @@ app.post('/api/data/:characterId/import', authMiddleware, (req, res) => {
             });
         } catch (e) {
             console.error('Character archive import failed:', e);
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({ error: e.message });
         }
     });
 });
@@ -6707,8 +6799,10 @@ app.get('/api/memories/:characterId', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
+        const charObj = db.getCharacter(req.params.characterId);
+        if (!charObj) return res.status(404).json({ error: 'Character not found' });
         const includeArchived = String(req.query.include_archived || '').trim() === '1';
-        const mems = db.getMemories(req.params.characterId)
+        const mems = db.getMemories(charObj.id)
             .filter(mem => includeArchived || Number(mem.is_archived || 0) === 0);
         res.json(mems);
     } catch (e) {
@@ -7049,7 +7143,7 @@ app.post('/api/memory-import/external/auto-run', authMiddleware, (req, res) => {
                 return res.status(400).json({ error: '请先配置“记忆库管理小模型”的 URL、Key 和模型。' });
             }
 
-            let continueImportId = Number(req.body?.continue_import_id || req.body?.import_id || 0);
+            let continueImportId = normalizeOptionalMemoryId(req.body?.continue_import_id || req.body?.import_id, 'import_id');
             if (!continueImportId && parseBooleanFlag(req.body?.retry_latest_external_import)) {
                 const latestImport = rawDb.prepare(`
                     SELECT id
@@ -7069,17 +7163,27 @@ app.post('/api/memory-import/external/auto-run', authMiddleware, (req, res) => {
                 ? 'multi_role'
                 : normalizeExternalImportMode(req.body?.import_mode || req.body?.mode, sourceApp));
             const targetCharacterName = normalizeExternalCharacterName(req.body?.target_character_name || req.body?.character_name, getExternalSourceAppLabel(sourceApp));
-            const limit = Math.max(1, Math.min(100, Number(req.body?.limit || settings.batch_size || 10) || 10));
-            const requestedContinueOffset = Math.max(0, Math.floor(Number(req.body?.continue_from_offset ?? req.body?.start_offset ?? 0) || 0));
-            const rawMaxBatches = req.body?.max_batches;
-            const runUntilEmpty = rawMaxBatches === undefined
-                || rawMaxBatches === null
-                || String(rawMaxBatches || '').trim() === ''
-                || String(rawMaxBatches || '').trim().toLowerCase() === 'all'
-                || req.body?.run_until_empty === true
-                || req.body?.run_until_empty === 'true';
-            const maxBatches = runUntilEmpty ? null : Math.max(1, Math.floor(Number(rawMaxBatches || 1) || 1));
-            const maxRerolls = Math.max(0, Math.min(3, Math.floor(Number(req.body?.max_rerolls ?? 0) || 0)));
+            const batchOptions = normalizeMemoryMaintenanceBatchOptions({
+                limit: req.body?.limit,
+                offset: req.body?.continue_from_offset ?? req.body?.start_offset
+            }, {
+                limitFallback: settings.batch_size || 10
+            });
+            const runControls = normalizeMemoryMaintenanceAutoRunControls({
+                ...req.body,
+                limit: batchOptions.limit
+            }, {
+                limitFallback: batchOptions.limit,
+                maxBatchesFallback: 1,
+                maxRerollsFallback: 0,
+                maxRerollsMax: 3,
+                missingMaxBatchesMeansAll: true
+            });
+            const limit = runControls.limit;
+            const requestedContinueOffset = batchOptions.offset;
+            const runUntilEmpty = runControls.run_until_empty;
+            const maxBatches = runControls.max_batches;
+            const maxRerolls = runControls.max_rerolls;
             const dryRun = parseBooleanFlag(req.body?.dry_run);
             const backgroundRun = req.body?.background === true || req.body?.background === 'true';
             const runCharacterId = '__external_import__';
@@ -7628,8 +7732,7 @@ app.post('/api/memory-import/external/:importId/commit', authMiddleware, async (
     const db = req.db;
     const memory = req.memory;
     try {
-        const importId = Number(req.params.importId || 0);
-        if (!importId) return res.status(400).json({ error: 'Missing import id.' });
+        const importId = normalizeMemoryId(req.params.importId);
         const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
         if (!rawDb) return res.status(500).json({ error: 'Raw database handle is unavailable.' });
         const row = rawDb.prepare('SELECT * FROM external_memory_imports WHERE id = ?').get(importId);
@@ -7761,10 +7864,11 @@ app.get('/api/memories/:characterId/maintenance/batch', authMiddleware, (req, re
         if (!charObj) return res.status(404).json({ error: 'Character not found' });
         const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
         if (!rawDb) return res.status(500).json({ error: 'Raw database handle is unavailable.' });
+        const batchOptions = normalizeMemoryMaintenanceBatchOptions(req.query || {}, { limitFallback: 30 });
         const batch = getMemoryMaintenanceBatch(rawDb, characterId, {
-            limit: req.query.limit,
-            offset: req.query.offset,
-            after_id: req.query.after_id,
+            limit: batchOptions.limit,
+            offset: batchOptions.offset,
+            after_id: batchOptions.after_id,
             status: req.query.status || 'pending',
             include_archived: parseBooleanFlag(req.query.include_archived)
         });
@@ -7796,7 +7900,7 @@ app.get('/api/memories/:characterId/maintenance/batch', authMiddleware, (req, re
             ...batch
         });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -7808,9 +7912,10 @@ app.get('/api/memories/:characterId/maintenance/temporal-binding-batch', authMid
         if (!charObj) return res.status(404).json({ error: 'Character not found' });
         const rawDb = typeof db.getRawDb === 'function' ? db.getRawDb() : null;
         if (!rawDb) return res.status(500).json({ error: 'Raw database handle is unavailable.' });
+        const batchOptions = normalizeMemoryMaintenanceBatchOptions(req.query || {}, { limitFallback: 40 });
         const batch = getMemoryTemporalBindingBatch(rawDb, characterId, {
-            limit: req.query.limit,
-            offset: req.query.offset,
+            limit: batchOptions.limit,
+            offset: batchOptions.offset,
             source: normalizeMemoryTemporalBindingSource(req.query.source || 'new'),
             include_archived: parseBooleanFlag(req.query.include_archived)
         });
@@ -7853,7 +7958,7 @@ app.get('/api/memories/:characterId/maintenance/temporal-binding-batch', authMid
             ...batch
         });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -7902,7 +8007,7 @@ app.post('/api/memories/:characterId/maintenance/temporal-binding-run', authMidd
             return res.status(e.status || 500).json(e.payload);
         }
         console.error('Memory temporal binding run failed:', e);
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -7918,8 +8023,9 @@ app.post('/api/memories/:characterId/maintenance/temporal-binding-auto-run', aut
         if (!settings.api_endpoint || !settings.api_key || !settings.model_name) {
             return res.status(400).json({ error: 'Memory maintenance model URL, key, and model are required.' });
         }
-        const limit = Math.max(1, Math.min(100, Number(req.body?.limit || settings.batch_size || 40) || 40));
         const source = normalizeMemoryTemporalBindingSource(req.body?.source || 'new');
+        const batchOptions = normalizeMemoryMaintenanceBatchOptions(req.body || {}, { limitFallback: settings.batch_size || 40 });
+        const limit = batchOptions.limit;
         const totalBatch = getMemoryTemporalBindingBatch(rawDb, characterId, {
             limit: 1,
             offset: 0,
@@ -7928,13 +8034,18 @@ app.post('/api/memories/:characterId/maintenance/temporal-binding-auto-run', aut
         });
         const totalMatching = Number(totalBatch.total_matching || 0);
         const totalBatches = Math.max(0, Math.ceil(totalMatching / limit));
-        const rawMaxBatches = req.body?.max_batches;
-        const runUntilEmpty = req.body?.run_until_empty === true
-            || rawMaxBatches === null
-            || String(rawMaxBatches || '').trim().toLowerCase() === 'all';
-        const parsedMaxBatches = Math.floor(Number(rawMaxBatches || totalBatches || 1) || 1);
-        const maxBatches = runUntilEmpty ? totalBatches : Math.min(totalBatches, Math.max(1, parsedMaxBatches));
-        const maxRerolls = Math.max(0, Math.min(10, Math.floor(Number(req.body?.max_rerolls ?? 3) || 3)));
+        const runControls = normalizeMemoryMaintenanceAutoRunControls({
+            ...req.body,
+            limit
+        }, {
+            limitFallback: limit,
+            maxBatchesFallback: totalBatches || 1,
+            maxRerollsFallback: 3,
+            maxRerollsMax: 10
+        });
+        const runUntilEmpty = runControls.run_until_empty;
+        const maxBatches = runUntilEmpty ? totalBatches : Math.min(totalBatches, runControls.max_batches);
+        const maxRerolls = runControls.max_rerolls;
         const dryRun = parseBooleanFlag(req.body?.dry_run);
         const backgroundRun = req.body?.background === true;
         if (backgroundRun) {
@@ -8247,7 +8358,7 @@ app.post('/api/memories/:characterId/maintenance/temporal-binding-auto-run', aut
                 message: `自动补充停止：${e.message || 'error'}。`
             });
             if (!res.headersSent) {
-                res.status(500).json({ error: e.message });
+                res.status(e.status || 500).json({ error: e.message });
             }
         };
 
@@ -8282,7 +8393,7 @@ app.post('/api/memories/:characterId/maintenance/temporal-binding-auto-run', aut
     } catch (e) {
         console.error('Memory temporal binding auto-run failed:', e);
         if (!res.headersSent) {
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({ error: e.message });
         }
     }
 });
@@ -8333,7 +8444,7 @@ app.post('/api/memories/:characterId/maintenance/run', authMiddleware, async (re
             return res.status(e.status || 500).json(e.payload);
         }
         console.error('Memory maintenance run failed:', e);
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -8380,14 +8491,16 @@ app.post('/api/memories/:characterId/maintenance/auto-run', authMiddleware, asyn
         if (!settings.api_endpoint || !settings.api_key || !settings.model_name) {
             return res.status(400).json({ error: 'Memory maintenance model URL, key, and model are required.' });
         }
-        const limit = Math.max(1, Math.min(100, Number(req.body?.limit || settings.batch_size || 30) || 30));
-        const rawMaxBatches = req.body?.max_batches;
-        const runUntilEmpty = req.body?.run_until_empty === true
-            || rawMaxBatches === null
-            || String(rawMaxBatches || '').trim().toLowerCase() === 'all';
-        const parsedMaxBatches = Math.floor(Number(rawMaxBatches || 10) || 10);
-        const maxBatches = runUntilEmpty ? null : Math.max(1, parsedMaxBatches);
-        const maxRerolls = Math.max(0, Math.min(10, Math.floor(Number(req.body?.max_rerolls ?? 3) || 3)));
+        const runControls = normalizeMemoryMaintenanceAutoRunControls(req.body || {}, {
+            limitFallback: settings.batch_size || 30,
+            maxBatchesFallback: 10,
+            maxRerollsFallback: 3,
+            maxRerollsMax: 10
+        });
+        const limit = runControls.limit;
+        const runUntilEmpty = runControls.run_until_empty;
+        const maxBatches = runControls.max_batches;
+        const maxRerolls = runControls.max_rerolls;
         const dryRun = parseBooleanFlag(req.body?.dry_run);
         const backgroundRun = req.body?.background === true;
         if (backgroundRun) {
@@ -8741,7 +8854,7 @@ app.post('/api/memories/:characterId/maintenance/auto-run', authMiddleware, asyn
                 message: `自动总结停止：${e.message || 'error'}。`
             });
             if (!res.headersSent) {
-                res.status(500).json({ error: e.message });
+                res.status(e.status || 500).json({ error: e.message });
             }
         };
 
@@ -8776,7 +8889,7 @@ app.post('/api/memories/:characterId/maintenance/auto-run', authMiddleware, asyn
     } catch (e) {
         console.error('Memory maintenance auto-run failed:', e);
         if (!res.headersSent) {
-            res.status(500).json({ error: e.message });
+            res.status(e.status || 500).json({ error: e.message });
         }
     }
 });
@@ -8919,11 +9032,7 @@ app.patch('/api/memories/bulk', authMiddleware, async (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const ids = Array.from(new Set((Array.isArray(req.body?.ids) ? req.body.ids : [])
-            .map(id => Number(id || 0))
-            .filter(id => id > 0)))
-            .slice(0, MEMORY_BULK_MAX_IDS);
-        if (ids.length === 0) return res.status(400).json({ error: 'No memory ids provided.' });
+        const ids = normalizeMemoryIdList(req.body?.ids);
         const patch = normalizeManualMemoryPatch(req.body?.patch || req.body || {});
         const characterIds = new Set();
         const idsByCharacter = new Map();
@@ -8964,8 +9073,7 @@ app.patch('/api/memories/:id', authMiddleware, async (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const memoryId = Number(req.params.id || 0);
-        if (!memoryId) return res.status(400).json({ error: 'Invalid memory id.' });
+        const memoryId = normalizeMemoryId(req.params.id);
         const mem = db.getMemory(memoryId);
         if (!mem) return res.status(404).json({ error: 'Memory not found' });
         const patch = normalizeManualMemoryPatch(req.body || {});
@@ -8994,11 +9102,7 @@ app.delete('/api/memories/bulk', authMiddleware, async (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const ids = Array.from(new Set((Array.isArray(req.body?.ids) ? req.body.ids : [])
-            .map(id => Number(id || 0))
-            .filter(id => id > 0)))
-            .slice(0, MEMORY_BULK_MAX_IDS);
-        if (ids.length === 0) return res.status(400).json({ error: 'No memory ids provided.' });
+        const ids = normalizeMemoryIdList(req.body?.ids);
         const rows = ids
             .map(id => db.getMemory(id))
             .filter(Boolean);
@@ -9071,8 +9175,7 @@ app.delete('/api/memories/:id', authMiddleware, async (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const memoryId = Number(req.params.id || 0);
-        if (!memoryId) return res.status(400).json({ error: 'Invalid memory id.' });
+        const memoryId = normalizeMemoryId(req.params.id);
         const mem = db.getMemory(memoryId);
         if (!mem) return res.status(404).json({ error: 'Memory not found' });
         const indexTargets = buildMemoryIndexTargets(db, [mem]);
@@ -9155,11 +9258,13 @@ app.post('/api/moments', authMiddleware, (req, res) => {
     const wsClients = getWsClients(req.user.id);
     try {
         const { content, image_url } = req.body;
-        if (!content) return res.status(400).json({ error: 'content required' });
-        const id = db.addMoment('user', content, image_url || null);
+        const momentContent = typeof content === 'string' ? content.trim() : '';
+        if (!momentContent) return res.status(400).json({ error: 'content required' });
+        const imageUrl = typeof image_url === 'string' ? image_url.trim() : '';
+        const id = db.addMoment('user', momentContent, imageUrl || null);
         res.json({ success: true, id });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -9170,10 +9275,16 @@ app.delete('/api/moments/:id', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        db.deleteMoment(req.params.id);
-        res.json({ success: true });
+        const moment = db.getMoment(req.params.id);
+        if (!moment) return res.status(404).json({ error: 'Moment not found' });
+        if (String(moment.character_id || '') !== 'user') {
+            return res.status(403).json({ error: 'Only user moments can be deleted here.' });
+        }
+        const deleted = db.deleteMoment(moment.id);
+        if (!deleted) return res.status(404).json({ error: 'Moment not found' });
+        res.json({ success: true, deleted });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -9185,6 +9296,7 @@ app.get('/api/moments/:characterId', authMiddleware, (req, res) => {
     const wsClients = getWsClients(req.user.id);
     try {
         const char = db.getCharacter(req.params.characterId);
+        if (!char) return res.status(404).json({ error: 'Character not found' });
         if (char && char.is_blocked) return res.json([]);
         const moments = db.getCharacterMoments(req.params.characterId);
         res.json(moments);
@@ -9200,13 +9312,13 @@ app.post('/api/moments/:id/like', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const liked = db.toggleLike(req.params.id, 'user');
-        const likers = db.getLikesForMoment(req.params.id).map(l => l.liker_id);
+        const moment = db.getMoment(req.params.id);
+        if (!moment) return res.status(404).json({ error: 'Moment not found' });
+        const liked = db.toggleLike(moment.id, 'user');
+        const likers = db.getLikesForMoment(moment.id).map(l => l.liker_id);
 
         // If the user liked it, potentially trigger a reaction from the AI
         if (liked) {
-            const allMoments = db.getMoments();
-            const moment = allMoments.find(m => m.id.toString() === req.params.id);
             if (moment && moment.character_id !== 'user') {
                 const userProfile = db.getUserProfile();
                 const reactionRate = userProfile?.moments_reaction_rate ?? 30; // 30% default
@@ -9237,7 +9349,7 @@ app.post('/api/moments/:id/like', authMiddleware, (req, res) => {
 
         res.json({ success: true, liked, likers });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -9249,12 +9361,13 @@ app.post('/api/moments/:id/comment', authMiddleware, (req, res) => {
     const wsClients = getWsClients(req.user.id);
     try {
         const { content } = req.body;
-        if (!content) return res.status(400).json({ error: 'content required' });
-        const commentId = db.addComment(req.params.id, 'user', content);
+        const comment = String(content || '').trim();
+        if (!comment) return res.status(400).json({ error: 'content required' });
+        const moment = db.getMoment(req.params.id);
+        if (!moment) return res.status(404).json({ error: 'Moment not found' });
+        const commentId = db.addComment(moment.id, 'user', comment);
 
         // If the user commented, potentially trigger a reaction
-        const allMoments = db.getMoments();
-        const moment = allMoments.find(m => m.id.toString() === req.params.id);
         if (moment && moment.character_id !== 'user') {
             const userProfile = db.getUserProfile();
             const reactionRate = userProfile?.moments_reaction_rate ?? 30;
@@ -9262,7 +9375,7 @@ app.post('/api/moments/:id/comment', authMiddleware, (req, res) => {
                 const char = db.getCharacter(moment.character_id);
                 if (char && !char.is_blocked) {
                     const userName = userProfile?.name || 'User';
-                    const contextContent = '[System] ' + userName + ' 刚刚评论了你的朋友圈动态：“' + moment.content.substring(0, 50) + '”，评论说：“' + content + '”。你可以在私聊中回应。';
+                    const contextContent = '[System] ' + userName + ' 刚刚评论了你的朋友圈动态：“' + moment.content.substring(0, 50) + '”，评论说：“' + comment + '”。你可以在私聊中回应。';
                     db.addMessage(char.id, 'system', contextContent);
                     console.log(`[Moments] User commented on ${char.name}'s moment. Triggering reaction (Rate: ${reactionRate}%).`);
                     setTimeout(() => {
@@ -9283,7 +9396,7 @@ app.post('/api/moments/:id/comment', authMiddleware, (req, res) => {
 
         res.json({ success: true, id: commentId });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -9295,9 +9408,10 @@ app.get('/api/diaries/:characterId', authMiddleware, (req, res) => {
     const wsClients = getWsClients(req.user.id);
     try {
         const char = db.getCharacter(req.params.characterId);
+        if (!char) return res.status(404).json({ error: 'Character not found' });
         const diaries = db.getDiaries(req.params.characterId);
         res.json({
-            isUnlocked: char ? char.is_diary_unlocked === 1 : false,
+            isUnlocked: char.is_diary_unlocked === 1,
             entries: diaries
         });
     } catch (e) {
@@ -9312,10 +9426,11 @@ app.delete('/api/diaries/:id', authMiddleware, (req, res) => {
         if (typeof db.deleteDiary !== 'function') {
             return res.status(501).json({ error: 'Not implemented' });
         }
-        db.deleteDiary(req.params.id);
-        res.json({ success: true });
+        const deleted = db.deleteDiary(req.params.id);
+        if (!deleted) return res.status(404).json({ error: 'Diary not found' });
+        res.json({ success: true, deleted });
     } catch (e) {
-        res.status(500).json({ error: e.message });
+        res.status(e.status || 500).json({ error: e.message });
     }
 });
 
@@ -9326,9 +9441,11 @@ app.post('/api/diaries/:characterId/unlock', authMiddleware, (req, res) => {
     const memory = req.memory;
     const wsClients = getWsClients(req.user.id);
     try {
-        const { password } = req.body;
+        const character = db.getCharacter(req.params.characterId);
+        if (!character) return res.status(404).json({ error: 'Character not found' });
+        const password = typeof req.body?.password === 'string' ? req.body.password.trim() : '';
         if (!password) return res.status(400).json({ success: false, reason: 'No password provided.' });
-        const result = db.verifyAndUnlockDiary(req.params.characterId, password);
+        const result = db.verifyAndUnlockDiary(character.id, password);
         if (result.success) {
             res.json({ success: true });
         } else {
@@ -10111,6 +10228,7 @@ app.delete('/api/characters/:id', authMiddleware, async (req, res) => {
     try {
         const charId = req.params.id;
         const charToDelete = db.getCharacter(charId);
+        if (!charToDelete) return res.status(404).json({ error: 'Character not found' });
         const charName = charToDelete?.name || '';
 
         // 1. Stop any running engine timers for this character
@@ -10124,6 +10242,7 @@ app.delete('/api/characters/:id', authMiddleware, async (req, res) => {
         }
 
         // 3. Clean up other characters' memories that mention the deleted char
+        const deletedMentionMemoryRows = [];
         if (charName) {
             const allChars = db.getCharacters();
             for (const otherChar of allChars) {
@@ -10132,10 +10251,56 @@ app.delete('/api/characters/:id', authMiddleware, async (req, res) => {
                 const otherMemories = db.getMemories(otherChar.id);
                 for (const mem of otherMemories) {
                     if (mem.people && mem.people.includes(charName)) {
-                        db.deleteMemory(mem.id);
+                        deletedMentionMemoryRows.push(mem);
                     }
                 }
             }
+        }
+        const deletedMentionIndexTargets = buildMemoryIndexTargets(db, deletedMentionMemoryRows);
+        const deletedMentionIdsByCharacter = new Map();
+        const deletedMentionRowsByCharacter = new Map();
+        for (const mem of deletedMentionMemoryRows) {
+            const memoryId = Number(mem.id || 0);
+            const targets = deletedMentionIndexTargets.get(memoryId) || new Map();
+            for (const target of targets.values()) {
+                const targetCharacterId = String(target.characterId || '').trim();
+                if (!targetCharacterId) continue;
+                if (!deletedMentionIdsByCharacter.has(targetCharacterId)) deletedMentionIdsByCharacter.set(targetCharacterId, []);
+                if (!deletedMentionRowsByCharacter.has(targetCharacterId)) deletedMentionRowsByCharacter.set(targetCharacterId, []);
+                deletedMentionIdsByCharacter.get(targetCharacterId).push(memoryId);
+                deletedMentionRowsByCharacter.get(targetCharacterId).push(target.previousRow || mem);
+            }
+        }
+        if (memory?.deleteMemoryIndexEntries) {
+            for (const [targetCharacterId, memoryIds] of deletedMentionIdsByCharacter.entries()) {
+                try {
+                    const result = await memory.deleteMemoryIndexEntries(targetCharacterId, memoryIds);
+                    if (Array.isArray(result?.errors) && result.errors.length > 0) {
+                        console.warn(`[Delete] Memory index delete warning for ${targetCharacterId}: ${result.errors.join('; ')}`);
+                    }
+                } catch (e) {
+                    console.warn(`[Delete] Failed to delete stale memory index entries for ${targetCharacterId}:`, e.message);
+                }
+            }
+        }
+        for (const mem of deletedMentionMemoryRows) {
+            db.deleteMemory(mem.id);
+        }
+        if (memory?.refreshMemoryIndexEntries) {
+            for (const [targetCharacterId, memoryIds] of deletedMentionIdsByCharacter.entries()) {
+                try {
+                    await memory.refreshMemoryIndexEntries(targetCharacterId, memoryIds, {
+                        previousRows: deletedMentionRowsByCharacter.get(targetCharacterId) || []
+                    });
+                } catch (e) {
+                    console.warn(`[Delete] Failed to refresh memory index entries for ${targetCharacterId}:`, e.message);
+                }
+            }
+        }
+        for (const targetCharacterId of deletedMentionIdsByCharacter.keys()) {
+            wsClients.forEach(c => {
+                if (c.readyState === 1) c.send(JSON.stringify({ type: 'memory_update', characterId: targetCharacterId }));
+            });
         }
 
         // 4. Delete the character (handles messages, moments, groups, relationships, etc.)

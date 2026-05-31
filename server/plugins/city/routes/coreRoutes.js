@@ -1,3 +1,17 @@
+const {
+    normalizeCityGoldAmount,
+    normalizeCityCalories,
+    normalizeCityItemQuantity,
+    normalizeCityTimeSkipMinutes,
+    normalizeCityConfigValue,
+    normalizeCityRowId,
+    normalizeCityListLimit,
+    normalizeStoredCityOffsetDays,
+    normalizeStoredCityOffsetHours,
+    MAX_CITY_LOG_QUERY_LIMIT,
+    MAX_CITY_ANNOUNCEMENT_QUERY_LIMIT
+} = require('../utils/inputGuards');
+
 function registerCoreCityRoutes(app, deps) {
     const {
         authMiddleware,
@@ -18,11 +32,12 @@ function registerCoreCityRoutes(app, deps) {
     app.get('/api/city/logs', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            const rawLimit = String(req.query.limit || '').trim().toLowerCase();
-            const requestedLimit = Number.parseInt(req.query.limit, 10);
-            const limit = rawLimit === 'all'
-                ? 'all'
-                : (Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 10000)) : 300);
+            const limit = normalizeCityListLimit(req.query.limit, {
+                fallback: 300,
+                max: MAX_CITY_LOG_QUERY_LIMIT,
+                allowAll: true
+            });
+            if (limit === null) return res.status(400).json({ error: '无效的活动记录数量' });
             res.json({ success: true, logs: req.db.city.getCityLogs(limit) });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -30,8 +45,8 @@ function registerCoreCityRoutes(app, deps) {
     app.post('/api/city/logs/:id/reroll', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
-            const logId = Number.parseInt(req.params.id, 10);
-            if (!Number.isFinite(logId) || logId <= 0) return res.status(400).json({ error: '无效的活动记录 ID' });
+            const logId = normalizeCityRowId(req.params.id);
+            if (!logId) return res.status(400).json({ error: '无效的活动记录 ID' });
             if (typeof regenerateActionNarrations !== 'function') return res.status(500).json({ error: '当前版本不支持重 roll 活动文案' });
             const rawDb = typeof req.db.getRawDb === 'function' ? req.db.getRawDb() : req.db;
             const log = rawDb.prepare('SELECT * FROM city_logs WHERE id = ?').get(logId);
@@ -96,16 +111,19 @@ function registerCoreCityRoutes(app, deps) {
                 }
             });
             res.json({ success: true, log: updated });
-        } catch (e) { res.status(500).json({ error: e.message }); }
+        } catch (e) { res.status(e.status || 500).json({ error: e.message, canRetry: !!e.canRetry }); }
     });
 
     app.get('/api/city/announcements', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            const requestedLimit = Number.parseInt(req.query.limit, 10);
-            const limit = Number.isFinite(requestedLimit) ? Math.max(1, Math.min(requestedLimit, 200)) : 50;
+            const limit = normalizeCityListLimit(req.query.limit, {
+                fallback: 50,
+                max: MAX_CITY_ANNOUNCEMENT_QUERY_LIMIT
+            });
+            if (limit === null) return res.status(400).json({ error: '无效的公告数量' });
             res.json({ success: true, announcements: req.db.city.getCityAnnouncements(limit) });
-        } catch (e) { res.status(500).json({ error: e.message }); }
+        } catch (e) { res.status(e.status || 500).json({ error: e.message, canRetry: !!e.canRetry }); }
     });
 
     app.get('/api/city/characters', authMiddleware, (req, res) => {
@@ -140,15 +158,21 @@ function registerCoreCityRoutes(app, deps) {
     app.post('/api/city/districts', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            if (!req.body.name) return res.status(400).json({ error: '缺少名称' });
-            const payload = normalizeDistrictPayload(req.body);
+            if (!req.body?.name) return res.status(400).json({ error: '缺少名称' });
+            const payload = normalizeDistrictPayload(req.body || {});
+            if (!payload) return res.status(400).json({ error: '分区数值无效' });
             req.db.city.upsertDistrict(payload);
             res.json({ success: true, district: req.db.city.getDistrict(payload.id) });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
     app.delete('/api/city/districts/:id', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); req.db.city.deleteDistrict(req.params.id); res.json({ success: true }); }
+        try {
+            ensureCityDb(req.db);
+            const deleted = req.db.city.deleteDistrict(req.params.id);
+            if (!deleted) return res.status(404).json({ error: '分区不存在' });
+            res.json({ success: true });
+        }
         catch (e) { res.status(500).json({ error: e.message }); }
     });
 
@@ -170,8 +194,11 @@ function registerCoreCityRoutes(app, deps) {
     app.post('/api/city/config', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            if (!req.body.key) return res.status(400).json({ error: '缺少 key' });
-            req.db.city.setConfig(req.body.key, req.body.value);
+            const key = String(req.body?.key || '').trim();
+            if (!key) return res.status(400).json({ error: '缺少 key' });
+            const value = normalizeCityConfigValue(key, req.body?.value);
+            if (value === null) return res.status(400).json({ error: '城市配置值无效' });
+            req.db.city.setConfig(key, value);
             res.json({ success: true, config: req.db.city.getConfig() });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
@@ -179,13 +206,13 @@ function registerCoreCityRoutes(app, deps) {
     app.post('/api/city/time-skip', authMiddleware, async (req, res) => {
         try {
             ensureCityDb(req.db);
-            const { minutes } = req.body;
-            if (!minutes || isNaN(minutes) || minutes <= 0) return res.status(400).json({ error: '无效的时间跳跃分钟数' });
+            const minutes = normalizeCityTimeSkipMinutes(req.body?.minutes);
+            if (!minutes) return res.status(400).json({ error: '无效的时间跳跃分钟数' });
 
             const config = req.db.city.getConfig();
             const oldCityDate = getCityDate(config);
-            const oldDays = parseInt(config.city_time_offset_days) || 0;
-            const oldHours = parseInt(config.city_time_offset_hours) || 0;
+            const oldDays = normalizeStoredCityOffsetDays(config.city_time_offset_days);
+            const oldHours = normalizeStoredCityOffsetHours(config.city_time_offset_hours);
 
             let totalOffsetHoursDisplay = oldHours + (minutes / 60);
             let addedDays = Math.floor(totalOffsetHoursDisplay / 24);
@@ -195,13 +222,14 @@ function registerCoreCityRoutes(app, deps) {
                 remainingHours += 24;
             }
 
+            const newCityDate = new Date(oldCityDate.getTime() + minutes * 60 * 1000);
+            const processedTasks = await runTimeSkipBackfill(req.db, oldCityDate, newCityDate, req.user.id);
+
             req.db.city.setConfig('city_time_offset_days', oldDays + addedDays);
             req.db.city.setConfig('city_time_offset_hours', remainingHours);
 
-            const newCityDate = getCityDate(req.db.city.getConfig());
-            const processedTasks = await runTimeSkipBackfill(req.db, oldCityDate, newCityDate, req.user.id);
             res.json({ success: true, processedTasks });
-        } catch (e) { res.status(500).json({ error: e.message }); }
+        } catch (e) { res.status(e.status || 500).json({ error: e.message, canRetry: !!e.canRetry }); }
     });
 
     app.get('/api/city/economy', authMiddleware, (req, res) => {
@@ -225,8 +253,9 @@ function registerCoreCityRoutes(app, deps) {
             const char = req.db.getCharacter(characterId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
             const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
-            const giftAmount = Number(amount) || 0;
-            const newWallet = (char.wallet || 0) + giftAmount;
+            const giftAmount = normalizeCityGoldAmount(amount);
+            if (!giftAmount) return res.status(400).json({ error: '无效的金币数量' });
+            const newWallet = +(Number(char.wallet || 0) + giftAmount).toFixed(2);
             req.db.updateCharacter(characterId, { wallet: newWallet });
             req.db.city.logAction(characterId, 'GIFT', `${userName}给 ${char.name} 送了 ${giftAmount} 金币 🎁`, 0, giftAmount);
 
@@ -250,7 +279,8 @@ function registerCoreCityRoutes(app, deps) {
             const char = req.db.getCharacter(characterId);
             if (!char) return res.status(404).json({ error: '角色不存在' });
             const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
-            const addCals = Number(calories) || 1000;
+            const addCals = normalizeCityCalories(calories);
+            if (!addCals) return res.status(400).json({ error: '无效的体力数量' });
             const newCals = Math.min(4000, (char.calories ?? 2000) + addCals);
             req.db.updateCharacter(characterId, { calories: newCals, city_status: newCals > 500 ? 'idle' : 'hungry' });
             req.db.city.logAction(characterId, 'FED', `${userName}给 ${char.name} 送了补给 (+${addCals}卡) 🍱`, addCals, 0);
@@ -269,15 +299,21 @@ function registerCoreCityRoutes(app, deps) {
     app.post('/api/city/items', authMiddleware, (req, res) => {
         try {
             ensureCityDb(req.db);
-            if (!req.body.name) return res.status(400).json({ error: '缺少名称' });
-            const payload = normalizeItemPayload(req.body);
+            if (!req.body?.name) return res.status(400).json({ error: '缺少名称' });
+            const payload = normalizeItemPayload(req.body || {});
+            if (!payload) return res.status(400).json({ error: '物品数值无效' });
             req.db.city.upsertItem(payload);
             res.json({ success: true, item: req.db.city.getItem(payload.id) });
         } catch (e) { res.status(500).json({ error: e.message }); }
     });
 
     app.delete('/api/city/items/:id', authMiddleware, (req, res) => {
-        try { ensureCityDb(req.db); req.db.city.deleteItem(req.params.id); res.json({ success: true }); }
+        try {
+            ensureCityDb(req.db);
+            const deleted = req.db.city.deleteItem(req.params.id);
+            if (!deleted) return res.status(404).json({ error: '物品不存在' });
+            res.json({ success: true });
+        }
         catch (e) { res.status(500).json({ error: e.message }); }
     });
 
@@ -297,7 +333,8 @@ function registerCoreCityRoutes(app, deps) {
             if (!char) return res.status(404).json({ error: '角色不存在' });
             if (!item) return res.status(404).json({ error: '物品不存在' });
             const userName = String(req.db.getUserProfile?.()?.name || '用户').trim() || '用户';
-            const safeQuantity = quantity || 1;
+            const safeQuantity = normalizeCityItemQuantity(quantity);
+            if (!safeQuantity) return res.status(400).json({ error: '无效的物品数量' });
             req.db.city.addToInventory(characterId, itemId, safeQuantity);
             req.db.city.logAction(characterId, 'GIVE_ITEM', `${userName}给 ${char.name} 送了 ${item.emoji}${item.name} x${safeQuantity} 🎁`, 0, 0);
             await triggerAdminGrantChat(req.user.id, req.db.getCharacter(characterId) || char, 'item', {

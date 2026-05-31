@@ -1,167 +1,210 @@
-
 # ChatPulse
 
-> [!IMPORTANT]
-> **2026-04-12 中文版补充更新说明**
-> - 输入前链新增并稳定了“切题判断”层，当前私聊主链路为 `摘要 -> 切题 -> 路由 -> 主题 -> 决策 -> 改写 -> 召回 -> 输出`。
-> - 前端 RAG 流程条与设置面板已同步显示切题判断结果，现在可以直接看到上一轮是“切题 / 继续当前话题 / 历史追问”。
-> - 日期回顾链路继续加强：支持按日期浏览、分块摘要、上下文分区，并修复了强热点话题污染日期回顾的问题。
-> - 输入前链与路由层的输出上限整体放宽到更安全的范围，专门缓解上游中转在短结构化步骤里偷偷消耗大量 reasoning token、导致结果被截断的问题。
-> - 输入前链请求增加了节流和按中转限速自适应的排队，尽量减少 `429` 和连续 planner 报错。
-> - 商业街自动行动如果遇到 API 失败，现在会直接取消本轮行动并写入折叠错误日志，不再强制把角色随机丢到别的地点。
-> - 商业街主动私聊提示词改成“事件驱动主动”，保留主动性，但不再默认用“你在干嘛 / 你在哪 / 在吗”这类空泛开头。
-> - 时间行为约束进一步加强：白天语境优先级高于话题惯性，减少角色在白天还顺着旧话题继续催用户睡觉的情况。
-> - 当前 README 关于实时记忆架构的说明保持为现行实现：`Qdrant + SQLite 正文/元数据`，不再把旧的 `vectra` 路径写成主链路。
+ChatPulse 是一个本地优先的 AI 社交模拟应用。它把私聊、群聊、长期记忆、朋友圈、日记、商业街生活模拟、像素街区、经济系统、住房社交、管理后台和实验性联网工具放在同一个本地应用里。
 
-> [!IMPORTANT]
-> **2026-04-06 中文版更新说明**
-> - 黑客据点现在会抓取用户过去 5 小时内与其他角色的真实私聊记录，按最近对话对象分配最多 20 条情报，并把这些对话作为“花钱买来的监听反馈”临时注入角色上下文；角色会按正常私聊/RAG链路自己做出带情绪的回应，而不是输出硬编码汇报。
-> - 后端重后台任务改成统一走后台队列，并加了全局并发上限，解决了之前多计时器叠在一起把前台请求拖成“空壳”的问题。
-> - 商业街分钟巡逻、角色自主行动、社交碰撞、私聊主动消息、群聊主动消息都已经按层恢复，并在恢复过程中做了稳定性回归。
-> - 大设置里新增了“后台任务队列”面板，现在可以看到真实队列状态、最近 24 小时任务历史，并按角色、群聊或商业街系统折叠显示。
-> - 商业街截断日志处理已经补上：疑似被截断的商业街活动会对角色隐藏，对用户显示为低存在感的折叠提示。
-> - 医院恢复逻辑改成住院期间每 5 分钟结算一次，不再是原来一次性瞬间恢复。
-> - 私聊到商业街的路由提示词进一步收紧：地点、去向、吃什么、送礼/收礼、现实状态来源这类问题会更偏向查询商业街。
-> - “上一轮是否路由到商业街内容”这行统计已经修正，现在会正确识别 `city_detail`，不再出现实际走了商业街但面板还显示“否”的情况。
-> - 修了一批前端问题，包括登录和重置本地界面状态卡住、`127.0.0.1:5173` 与 `127.0.0.1:8000` 地址不一致、联系人列表排版和后台任务面板可读性问题。
+项目目标不是做一个简单聊天壳，而是让角色拥有可持续的上下文、可检索的长期记忆、可变化的状态，以及能和其他角色、地点、任务、金钱、日程发生关系的生活系统。
 
-> [!IMPORTANT]
-> **2026-04-05 最新修复说明**
-> - 修掉了私聊里 RAG `retrieve` 阶段会卡死的问题，根因是聊天链里不该现场自愈重建索引。
-> - 实时聊天链默认不再让本地 `vectra` 参与自动回退，当前主路径是 `Qdrant + SQLite 正文 + lexical/semantic fallback`。
-> - 保留了检索前的查询扩展设计，只修掉了会把实时链路拖死的部分。
-> - 放松了 `profile` 槽过滤，轻度关系化的用户画像记忆不再被白白筛掉。
-> - 连续相同的 API 报错现在会在私聊里合并显示，不再一条一条刷屏。
-> - 商业街管理员赠送物品/钱/体力现在会按正常私聊链触发角色反馈并进入后续上下文。
->
-> 详细说明见下方中文的“**2026-04-05 修复记录**”和英文的 “**2026-04-05 Fix Notes**”。
+## 当前功能
 
-<p align="center">
-  <a href="#简体中文">简体中文</a> |
-  <a href="#english">English</a>
-</p>
+### 账号与权限
 
-## 简体中文
+- 本地账号登录 / 注册。
+- root / admin 管理员角色。
+- 管理员后台支持用户、邀请码、封禁、改角色、重置密码、强制登出和全局公告。
+- JWT 登录态，WebSocket 使用显式认证消息，不把 token 放进 URL。
+- 每个用户使用独立业务数据库，认证库和用户数据分离。
 
-ChatPulse 是一个本地优先的 AI 社交模拟应用，前端使用 React，后端使用 Express，主存储为 SQLite，并支持接入 Qdrant 做向量记忆检索。
+### 私聊
 
-### 缓存、RAG 与向量记忆科普
+- 角色私聊、消息重试、批量删除、清空角色数据。
+- 每个角色可配置模型 URL、Key、模型名、人设、头像、横幅、语音、主动消息和上下文窗口。
+- 支持 RAG 流程状态展示：切题判断、路由、主题扩展、决策、改写、召回、输出。
+- 支持连续相同 API 错误折叠，避免错误消息刷屏。
+- 支持消息级 TTS 音频、TTS 预览和腾讯音色列表。
+- 支持私聊转账、钱包、角色间好感 / 印象相关扩展。
+- 生成链失败时保持失败可见，不伪造成功回复。
 
-如果你是第一次接触这些词，可以先把它们理解成四个分工不同的层：
+### 角色与关系
 
-- 缓存：把已经整理好的上下文、摘要或模型结果先存起来，避免每一轮都从零重算。
-- SQLite：负责保存完整消息、记忆正文和业务元数据，像项目里的“资料库”。
-- Qdrant：负责按语义相近去找相关记忆，像项目里的“智能检索柜”。
-- RAG：不是让模型硬猜，而是先把相关历史资料找回来，再基于这些资料回答。
+- 创建、编辑、删除角色。
+- AI 生成角色基础配置。
+- 角色状态包含心情、压力、饥饿、体力、睡眠债、金币、位置等。
+- 关系 DLC 支持好友推荐、角色关系、互相印象和印象历史。
+- 角色可触发朋友圈、日记、关系、情绪、商业街意图等结构化标签。
 
-一句话概括就是：缓存让它更快，SQLite 负责存原文，Qdrant 负责按语义把过去找回来，RAG 负责先查再答。
+### 长期记忆
 
-### 技术栈
+- 实时主路径：SQLite 保存正文和元数据，Qdrant 负责语义向量检索。
+- 支持手动查看角色记忆、删除、导入、导出和立即提取。
+- 支持新版记忆库视图、旧库备份视图、正式记忆 / 来源卡片分类。
+- 支持记忆维护：批量整理、时间绑定、补全、外部记忆导入预览、自动运行、提交。
+- 支持 Qdrant 迁移脚本和系统嵌入状态检查。
+- 本地 `vectra` 只作为显式开启的兼容路径；当前实时链路优先使用 Qdrant。
 
-- 前端：React 19 + Vite
-- 后端：Node.js + Express + ws
-- 主存储：SQLite（`better-sqlite3`）
+### 朋友圈与日记
+
+- 角色朋友圈动态、图片、点赞、评论。
+- 用户个人资料、头像、横幅、简介、朋友圈参数。
+- 角色秘密日记，支持密码解锁和删除。
+- 朋友圈、日记、私聊会进入后续上下文或长期记忆整理流程。
+
+### 群聊
+
+- 创建群聊、编辑群聊、增删成员、删除群聊。
+- 群聊消息、群聊 AI 回复、历史读取、批量删除。
+- 群聊支持暂停 AI、无链模式和主动消息计时。
+- 群红包和领取记录由经济 DLC 提供。
+
+### 经济系统
+
+- 用户与角色钱包。
+- 私聊转账卡片、领取、退款。
+- 群红包创建、领取、查看。
+- 商业街金币、物品、库存、消费、任务奖励与钱包同步。
+
+### 商业街
+
+商业街是项目里的生活模拟系统，覆盖角色状态、地点、行动、任务、社交和市长 AI。
+
+- 商业街角色列表、地点 / 区域、商品、库存、公告、事件、任务。
+- 管理操作：给金币、喂食、给物品、时间跳跃、清理日志、清空商业街数据。
+- 角色日程生成、自动行动、行动日志、行动重掷。
+- 状态系统：饱腹、体力、压力、心情、睡眠债、胃负担、医院恢复等。
+- 行动系统：工作、购物、进食、医疗、学习、赌博、休息、地点活动等。
+- 公告任务：领取、推进、汇报、完成、奖励、失败处理。
+- 市长 AI：生成事件 / 任务 / 广播、评分任务难度、调整商品价格。
+- 社交遭遇：同地点角色碰撞、多人发言、关系变化、印象更新。
+- 商业街可触发私聊反馈，但生成失败不会写入伪造成功。
+- 默认安全模式会降低后台自动行为强度，避免开发环境被后台任务拖慢。
+
+### 像素世界
+
+像素世界是商业街的可视化和行为树实验面板。
+
+- 可视化街区编辑：建筑、道路、装饰、天空、街段、层级、画布缩放。
+- 双角色像素人物控制、自动移动、地点锚点、路径与碰撞规则。
+- 支持预览模式、保存布局、复制 JSON、查看地点锚点和图层。
+- 行为树面板支持完整树、输入、patch、输出调试。
+- 基础枝丫用于角色无互动时的自动生活行为。
+- 特殊枝丫用于玩家靠近角色后继续互动。
+- 后续枝丫会带上当前行为树和最近特殊互动上下文。
+- 特殊互动新增防重复：如果模型生成内容疑似复读上一轮，会返回可重试错误，而不是本地改写成成功。
+
+### 住房与社交
+
+- 住房职业 / 阶层、房源、角色绑定、租金支付。
+- 中介系统和房源广告。
+- 住房社交面板用于管理角色住处和社会身份。
+
+### 成长课程
+
+- 城市成长 DLC 提供课程管理。
+- 可配置课程、价格、持续时间、恢复 / 消耗等字段。
+- 角色可通过商业街行动或课程系统参与成长相关内容。
+
+### MCP 实验台
+
+- 实验性联网工具层。
+- 支持搜索、抓取 URL、任务队列、任务重跑、删除任务。
+- 支持知识条目保存与检索。
+- 支持搜索源配置：auto、DuckDuckGo、Serper、Tavily、Brave、Bing 等。
+- 当前定位是实验台，不是默认自动工具调用层。
+
+### 主题与外观
+
+- 全局主题设置和 CSS 变量。
+- AI 主题生成。
+- 头像、背景、侧边栏颜色、主色等 UI 配置。
+- 私聊抽屉、记忆库、后台任务、商业街和像素世界都有独立 UI 面板。
+
+### 备份与恢复
+
+- 系统备份导出为 zip。
+- 支持导入 zip 或数据库文件。
+- 支持系统擦除。
+- 角色包导入 / 导出包含聊天、记忆、朋友圈、日记及可重建 Qdrant 索引的数据。
+- 导入路径做了路径穿越防护。
+
+## 机制约定
+
+这些约定是产品机制，不是待修 bug：
+
+- AI / RAG / 行为树 / JSON 解析失败时，应该返回错误让用户重试。
+- 不用默认回复、默认记忆、默认行为树 patch 去伪造成功。
+- 商业街行动、社交遭遇、任务结算、市长 AI 等生成链路失败时，优先停止本轮写入。
+- 输入校验、数值边界、权限检查、数据一致性属于必须修复的范围。
+
+## 技术栈
+
+- 前端：React 19、Vite、lucide-react
+- 后端：Node.js、Express 5、ws
+- 主数据库：SQLite / better-sqlite3
 - 向量检索：Qdrant
-- 实时记忆主路径：Qdrant + SQLite 正文/元数据
+- 本地嵌入：`@xenova/transformers`、ONNX Runtime
+- 上传与媒体：multer、sharp
+- 备份：archiver、unzipper
+- 定时任务：node-cron
 
-### 本地部署
+## 本地运行
 
-环境要求：
+### 环境要求
 
-- Node.js 18+
-- npm 9+
-- 可选：Docker Desktop（如果你想本地跑 Qdrant）
+- Node.js 18+，推荐使用项目 `.runtime/node20` 或 Node 20。
+- npm 9+。
+- 可选：Docker Desktop，用于本地运行 Qdrant。
 
-克隆仓库：
+### 安装
 
 ```bash
 git clone https://github.com/NANA3333333/ChatPluse.git
 cd ChatPluse
-```
-
-初始化：
-
-```bash
 npm run setup
 ```
 
-Windows 一键安装并启动：
+`npm run setup` 会安装根目录、`server`、`client` 依赖，并创建本地运行目录。
+
+Windows 可以直接运行：
 
 ```bat
 install-and-start.cmd
 ```
 
-macOS / Linux 一键安装并启动：
+macOS / Linux 可以运行：
 
 ```bash
 chmod +x install-and-start.sh
 ./install-and-start.sh
 ```
 
-`npm run setup` 会自动：
-
-- 安装根目录、`server`、`client` 依赖
-- 创建本地运行目录
-- 自动生成 `server/.env`（如果不存在）
-- 创建运行所需但不会提交到 Git 的目录
-
-启动：
+### 启动开发环境
 
 ```bash
 npm run dev
 ```
 
-Windows 辅助脚本：
-
-```bat
-install-and-start.cmd
-start-stack.cmd
-status-stack.cmd
-stop-stack.cmd
-```
-
-macOS / Linux 辅助脚本：
-
-```bash
-chmod +x install-and-start.sh
-./install-and-start.sh
-```
-
 启动后访问：
 
-- 前端：[http://127.0.0.1:5173](http://127.0.0.1:5173)
-- 后端：[http://localhost:8000](http://localhost:8000)
+- 前端开发服务：[http://127.0.0.1:5173](http://127.0.0.1:5173)
+- 后端服务和构建后前端：[http://localhost:8000](http://localhost:8000)
+- Qdrant 默认地址：[http://127.0.0.1:6333](http://127.0.0.1:6333)
 
-首次登录：
+`npm run dev` 会优先使用 `.runtime/node20` 启动后端和 Vite，避免 Windows 上 `better-sqlite3` 因 Node ABI 不一致而加载失败。如果没有 bundled Node，会退回当前系统 Node。
 
-- 用户名：`Nana`
+### 构建前端
 
-如果你在 `server/.env` 中设置了 `ADMIN_PASSWORD`，那么全新初始化时会使用你设置的密码；否则首次启动会在服务器控制台生成一次性随机 root 密码。
+```bash
+npm --prefix client run build
+```
 
-### 数据库、缓存与向量库初始化
+后端会从 `client/dist` 提供构建后的前端页面。如果你主要使用 `http://localhost:8000`，改完前端后需要重新 build。
 
-首次启动时会自动创建：
-
-- `data/master.db`：认证库
-- `data/chatpulse_user_<id>.db`：每个用户自己的业务数据库
-- `server/public/uploads/`：上传目录
-- JWT secret 文件（如果环境变量未提供）
-
-Qdrant 行为：
-
-- Qdrant 可用时，实时记忆检索优先使用 Qdrant
-- Qdrant collection 会在首次写入记忆时自动创建
-- SQLite 持续保存完整消息、记忆正文和元数据
-
-当前 README 描述的现行实时链路以 `Qdrant + SQLite 正文/元数据` 为主。
-
-可选启动 Qdrant：
+### 启动 Qdrant
 
 ```bash
 docker compose up -d
 ```
 
-将已有记忆迁移到 Qdrant：
+迁移已有记忆到 Qdrant：
 
 ```bash
 npm run migrate:qdrant
@@ -175,13 +218,15 @@ npm run migrate:qdrant -- --user <userId>
 npm run migrate:qdrant -- --character <characterId>
 ```
 
-健康检查：
+### 健康检查
 
 ```bash
 npm run doctor
 ```
 
-常用命令：
+它会检查依赖、目录、SQLite native module 和 Qdrant 连接状态。
+
+## 常用命令
 
 ```bash
 npm run setup
@@ -189,17 +234,66 @@ npm run dev
 npm run doctor
 npm run migrate:qdrant
 npm run cleanup:city-memories
+npm --prefix client run lint
+npm --prefix client run build
+npm --prefix server test
 ```
 
-项目结构：
+Windows 辅助脚本：
+
+```bat
+start-stack.cmd
+status-stack.cmd
+stop-stack.cmd
+```
+
+## 配置
+
+主要配置文件在 `server/.env`。常用项包括：
+
+- `ADMIN_PASSWORD`：全新认证库初始化时使用的管理员密码；不设置时会生成一次性随机密码并打印在后端控制台。
+- `JWT_SECRET`：固定 JWT secret；不设置时会生成到本地数据目录。
+- `PORT`：后端端口，默认 `8000`。
+- `QDRANT_ENABLED`：是否启用 Qdrant，默认启用。
+- `QDRANT_URL`：Qdrant 地址，默认 `http://127.0.0.1:6333`。
+- `QDRANT_API_KEY`：远程 Qdrant 需要鉴权时填写。
+- `LOCAL_VECTOR_INDEX_ENABLED=1`：显式启用旧本地 vectra 路径。
+- `CP_SAFE_MODE`：商业街后台安全模式；默认开启较保守的后台行为。
+- `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_SEARCH_API_KEY` / `BING_SEARCH_API_KEY`：MCP Lab 搜索源可选 Key。
+
+不要把真实模型 Key、管理员密码或生产数据库提交到仓库。
+
+## 数据与目录
+
+运行时会自动创建：
+
+```text
+data/
+  master.db
+  chatpulse_user_<id>.db
+  qdrant/
+  .jwt_secret
+
+server/public/uploads/
+client/dist/
+.runtime/
+```
+
+核心源码结构：
 
 ```text
 client/
   src/
+    App.jsx
+    components/
+    plugins/
+    utils/
 
 server/
   index.js
   db.js
+  authDb.js
+  engine.js
   memory.js
   qdrant.js
   plugins/
@@ -211,397 +305,102 @@ scripts/
   migrate-memories-to-qdrant.js
 ```
 
-### City 模块结构说明
+## 插件结构
 
-`server/plugins/city` 现在不再只是一个“所有逻辑都堆在 `index.js`”里的单文件插件，而是逐步拆成了“入口编排 + 数据层 + service 层”。
+后端插件位于 `server/plugins/`：
 
-当前目录结构：
+```text
+adminDashboard/
+backup/
+city/
+cityGrowth/
+economy/
+groupChat/
+mcpLab/
+relationships/
+scheduler/
+socialHousing/
+theme/
+```
+
+前端插件入口在 `client/src/plugins.js`，当前可见插件包括：
+
+- MCP 实验台
+- 管理员后台
+- 住房与社交
+- 像素实装
+- 商业街
+
+## City 模块结构
+
+商业街模块已经从单文件巨块逐步拆为入口、路由、数据层和 service 层：
 
 ```text
 server/plugins/city/
   index.js
   cityDb.js
+  routes/
+    coreRoutes.js
+    eventQuestRoutes.js
   services/
     actionService.js
+    adminGrantService.js
     mayorService.js
     mayorRuntimeService.js
     questService.js
     socialService.js
+  utils/
 ```
 
-职责划分：
+职责大致如下：
 
-- `index.js`
-  仍然是 city DLC 的入口文件。
-  负责：
-  - 挂载 `/api/city/*` 路由
-  - 初始化依赖和上下文
-  - 组装各个 service
-  - 保留插件入口和外部调用形状
+- `index.js`：插件入口、依赖装配、后台调度和仍未完全拆出的 city 路由。
+- `routes/*`：核心管理路由、事件和任务路由。
+- `cityDb.js`：city 表结构和持久化接口。
+- `actionService.js`：角色商业街行动执行。
+- `adminGrantService.js`：管理员赠与后的私聊反馈流程。
+- `questService.js`：公告任务推进和结算。
+- `mayorService.js`：市长 AI 领域逻辑。
+- `mayorRuntimeService.js`：市长自动运行编排。
+- `socialService.js`：同地点社交遭遇。
+- `utils/*`：输入校验和共享工具。
 
-- `cityDb.js`
-  是 city 的数据访问层。
-  负责：
-  - `city_*` 相关表结构
-  - 任务、公告、日志、库存、地点、配置等读写
-  - 给上层 service 提供稳定的数据操作接口
+新 city 功能优先放入合适的 service / route / utils 文件，不建议继续把大量业务塞回 `index.js`。
 
-- `services/actionService.js`
-  是“商业街行动执行器”。
-  负责：
-  - 角色到某个地点后这次行动怎么结算
-  - 体力、金币、状态变化
-  - 赌博、购物、进食、医疗、学习等分支行为
-  - 行动后的广播、任务推进、钱包同步
+## 测试与质量检查
 
-- `services/questService.js`
-  是“公告任务推进与结算器”。
-  负责：
-  - 领取任务后的推进
-  - 汇报 / 交付阶段判断
-  - 任务完成与失败结算
-  - 任务结果文案生成
+当前项目主要用 smoke test 保护关键行为和安全边界：
 
-- `services/mayorService.js`
-  是“市长 AI 业务能力层”。
-  负责：
-  - 市长模型选择
-  - 市长 JSON 输出解析
-  - 任务难度评分
-  - 任务推进评分
-  - 市长决策结果落库
+```bash
+npm --prefix server test
+```
 
-- `services/mayorRuntimeService.js`
-  是“市长 AI 运行时编排层”。
-  负责：
-  - 是否到达自动执行时间
-  - 本轮市长 AI 是否允许执行
-  - 调用市长模型生成事件/任务/广播
-  - fallback 决策和运行锁
+常用前端检查：
 
-- `services/socialService.js`
-  是“同地点社交遭遇结算器”。
-  负责：
-  - 角色同地点碰撞检测
-  - 社交冷却
-  - 多角色顺序发言模拟
-  - 社交结果总结
-  - 好感 / 印象 / 私聊 / 朋友圈 / 日记更新
+```bash
+npm --prefix client run lint
+npm --prefix client run build
+```
 
-为什么这样拆：
+重要检查覆盖：
 
-- 原先 `city/index.js` 同时承担了：
-  - 路由
-  - 运行时调度
-  - 市长 AI
-  - 公告任务
-  - 商业街行动
-  - 社交遭遇
-  - 文案生成
-- 这种结构在功能变多后很容易让一个需求改动牵动整块文件。
-- 现在的拆分目标不是“一次性大重构”，而是先把最重、最容易继续膨胀的业务块独立出来，让 `index.js` 更像编排层。
+- 鉴权和权限边界。
+- 上传、备份、导入路径安全。
+- 角色、消息、记忆、群聊、经济、商业街输入校验。
+- AI / RAG / 行为树失败不能伪造成成功。
+- 商业街数值边界和 DB 防御。
+- 像素世界行为树选择、失败可见性、防重复。
+- 聊天抽屉懒加载不能让中间区域白屏。
 
-当前推荐理解方式：
-
-1. `index.js` 是 city 插件入口。
-2. `cityDb.js` 是 city 的持久化层。
-3. `services/*` 是真正的业务层。
-4. 新功能如果属于某个明确领域，优先继续放进对应 service，而不是再直接堆回 `index.js`。
-
-后续继续拆分时，推荐顺序：
-
-- `routes/`
-  把 `/api/city/*` 路由从 `index.js` 拆成独立路由文件
-- `scheduleService`
-  把日程生成和时段计划逻辑单独抽出
-- 更细的 action 子模块
-  例如把购物 / 医疗 / 赌博拆成 `actionService` 内部子文件
-
-目前这套结构的目标不是“绝对完美”，而是：
-
-- 保持现有功能继续可用
-- 让新增需求不再持续把 `index.js` 养成单文件巨兽
-- 让独立开发时也能靠模块边界维持可读性
-
-### 许可证
+## 许可证
 
 本项目采用 **CC BY-NC-ND 4.0** 许可。
 
 这意味着：
 
-- 允许转载和分享
-- 必须注明作者 `NANA3333333 / Nana` 以及原始仓库链接
-- 禁止商用
-- 禁止修改后再发布
-
-完整许可说明见 [LICENSE](./LICENSE) 和 [Creative Commons 官方页面](https://creativecommons.org/licenses/by-nc-nd/4.0/)。
-
----
-
-## English
-
-ChatPulse is a local-first AI social simulation app built with React, Express, SQLite, WebSocket realtime updates, and optional Qdrant-backed memory retrieval.
-
-### 2026-04-12 Update Notes
-
-This update focused on topic switching, date recall stability, and cleaning up stale architecture notes:
-
-- Added a dedicated topic-switch gate before the existing RAG route stage. The live pipeline is now `Summary -> Switch -> Route -> Topics -> Decision -> Rewrite -> Retrieve -> Output`.
-- Synced the front-end RAG progress header and settings drawer so the last round can explicitly show `Switch topic`, `Continue current topic`, or `History follow-up`.
-- Hardened the date-recall path with date-browse routing, chunked day summaries, context partitioning, and better cache invalidation for polluted strong-topic lines.
-- Prevented malformed / truncated outputs from pre-planner stages (`topic switch`, `topics`, `decision`, and `temporal browse summarize`) from being reused from cache.
-- Changed the topic-switch gate to fail closed: if that layer breaks, the turn now stops immediately and returns an error instead of silently falling back to `continue current topic`.
-- Raised output-token budgets across the pre-input planner chain and router layers to reduce false truncation on upstream relays that burn excessive reasoning tokens.
-- Added request pacing for pre-input planner calls so relay services with strict per-minute limits are less likely to trip repeated `429` failures.
-- Changed city autonomous-action API failures to stop the action and emit a folded error record instead of randomly forcing the character to wander somewhere unrelated.
-- Reworked proactive city-to-private-chat prompts so “initiative” favors event-driven updates, current state, and concrete incidents rather than repetitive openers like “what are you doing?”.
-- Strengthened time-of-day guidance so daytime replies are less likely to inherit late-night inertia such as repeatedly urging the user to sleep.
-- Updated this README to remove stale wording that still described `vectra` as part of the current real-time retrieval architecture.
-
-### Stack
-
-- Frontend: React 19 + Vite
-- Backend: Node.js + Express + ws
-- Primary storage: SQLite via `better-sqlite3`
-- Vector search: Qdrant
-- Real-time memory path: Qdrant + SQLite text/metadata
-
-### Local Setup
-
-Requirements:
-
-- Node.js 18+
-- npm 9+
-- Optional: Docker Desktop if you want to run Qdrant locally
-
-Clone:
-
-```bash
-git clone https://github.com/NANA3333333/ChatPluse.git
-cd ChatPulse
-```
-
-Bootstrap:
-
-```bash
-npm run setup
-```
-
-One-click install and start on Windows:
-
-```bat
-install-and-start.cmd
-```
-
-One-click install and start on macOS / Linux:
-
-```bash
-chmod +x install-and-start.sh
-./install-and-start.sh
-```
-
-`npm run setup` will:
-
-- install root, `server`, and `client` dependencies
-- create local runtime directories
-- generate `server/.env` if it does not exist
-- prepare runtime-only folders that are intentionally excluded from Git
-
-Start the app:
-
-```bash
-npm run dev
-```
-
-Production-style local serving:
-
-```bash
-npm --prefix client run build
-npm --prefix server run start
-```
-
-`npm run dev` starts the Vite dev server plus the backend. If you want the backend to serve the built frontend from `client/dist`, build the client first on that machine.
-
-Windows helper scripts:
-
-```bat
-install-and-start.cmd
-start-stack.cmd
-status-stack.cmd
-stop-stack.cmd
-```
-
-macOS / Linux helper script:
-
-```bash
-chmod +x install-and-start.sh
-./install-and-start.sh
-```
-
-URLs:
-
-- Frontend: [http://127.0.0.1:5173](http://127.0.0.1:5173)
-- Backend: [http://localhost:8000](http://localhost:8000)
-
-First login:
-
-- Username: `Nana`
-
-If you set `ADMIN_PASSWORD` in `server/.env`, that value will be used for first-run seeding on a brand-new auth database; otherwise the first startup prints a one-time random root password in the server console.
-
-### Databases, Cache, and Vector Initialization
-
-On first startup, the project automatically creates:
-
-- `data/master.db` for auth
-- `data/chatpulse_user_<id>.db` per user
-- `server/public/uploads/`
-- a JWT secret file when not provided by env
-
-Qdrant behavior:
-
-- Uses Qdrant when reachable
-- Creates Qdrant collections lazily on first memory write
-
-SQLite stores full message / memory content and metadata. Qdrant is the active real-time vector retrieval backend.
-
-### 2026-04-05 Fix Notes
-
-Today’s work focused on the Claude private-chat path, the RAG retrieval pipeline, and a few front-end UX regressions:
-
-- Removed chat-time self-healing index rebuilds from the live retrieval path. Previously, a normal private-chat request could enter `retrieve`, decide the index looked unhealthy, and start rebuilding during the reply, which caused long hangs and heavy local CPU usage.
-- Disabled vectra in the real-time retrieval path by default. The current live path is effectively `Qdrant + SQLite memory content + lexical/semantic fallback`. Local vectra is now opt-in only via `LOCAL_VECTOR_INDEX_ENABLED=1`.
-- Kept the retrieval-query expansion step as part of the design, but removed the parts of the live path that were causing retrieval to stall.
-- Added finer-grained retrieval tracing so logs now show retrieve start/end, per-slot progress, Qdrant query phases, and fallback phases. This makes it much easier to tell whether a request is stuck in topics, rewrite, retrieve, or main output.
-- Added `GET /api/system/embedding-status` to inspect the local `bge-m3` embedding runtime: loaded state, active jobs, recent latency, and errors.
-- Relaxed profile-slot filtering so lightly relationship-tinted user-profile memories can still be injected. This fixes a case where valid profile memories were being retrieved and then discarded because they mentioned possessiveness, teasing style, or interaction habits.
-- City-manager gifting / money / stamina actions now go through the normal private-chat chain and can generate ordinary in-character feedback that becomes part of later conversation context.
-- Expanded the private/group emoji picker, fixed the temporary `??` encoding regression, and kept the wider popup layout.
-- Consecutive identical system API errors in private chat are now collapsed into a single visible message with a repeat count, instead of spamming multiple identical red bubbles.
-
-Notes:
-
-- Recent Claude `503 model_not_found / no available channel` failures look like upstream relay/channel issues, not local RAG hangs.
-- SQLite stores memory content, while Qdrant stores vector indices. The main issue uncovered today was not lost memory text; it was an unstable “index state check + self-heal during live chat” design.
-
-Optional Qdrant startup:
-
-```bash
-docker compose up -d
-```
-
-Migrate existing memories into Qdrant:
-
-```bash
-npm run migrate:qdrant
-```
-
-Common options:
-
-```bash
-npm run migrate:qdrant -- --dry-run
-npm run migrate:qdrant -- --user <userId>
-npm run migrate:qdrant -- --character <characterId>
-```
-
-Health check:
-
-```bash
-npm run doctor
-```
-
-Useful commands:
-
-```bash
-npm run setup
-npm run dev
-npm run doctor
-npm run migrate:qdrant
-npm run cleanup:city-memories
-```
-
-### City Module Structure
-
-The `server/plugins/city` plugin is no longer treated as a single giant file. It is now being split into three layers: entry orchestration, persistence, and domain services.
-
-Current layout:
-
-```text
-server/plugins/city/
-  index.js
-  cityDb.js
-  services/
-    actionService.js
-    mayorService.js
-    mayorRuntimeService.js
-    questService.js
-    socialService.js
-```
-
-Responsibilities:
-
-- `index.js`
-  The DLC/plugin entry.
-  It wires dependencies, mounts `/api/city/*` routes, and orchestrates services.
-
-- `cityDb.js`
-  The persistence layer for city-specific data.
-  It owns `city_*` tables plus CRUD for districts, logs, quests, inventory, announcements, and config.
-
-- `services/actionService.js`
-  The city action executor.
-  It resolves what happens when a character performs an in-city action: stamina, money, state updates, shopping, food, medical, study, logging, and post-action sync.
-
-- `services/questService.js`
-  The quest lifecycle layer.
-  It owns claim/progress/report/resolve flow and quest result narration.
-
-- `services/mayorService.js`
-  The mayor AI domain layer.
-  It handles mayor model selection, JSON parsing, quest difficulty scoring, quest progress scoring, and applying mayor decisions.
-
-- `services/mayorRuntimeService.js`
-  The mayor AI runtime/orchestration layer.
-  It decides when the mayor should run, prevents duplicate concurrent runs, executes the mayor prompt, and handles fallback generation.
-
-- `services/socialService.js`
-  The social encounter layer.
-  It detects same-location collisions, enforces cooldowns, simulates multi-character encounters, and applies affinity / impression / outreach results.
-
-Why this split exists:
-
-- `city/index.js` originally mixed routes, scheduling, action execution, mayor logic, quests, social encounters, prompt assembly, and runtime guards in one place.
-- That made the file hard to reason about and increased regression risk whenever a new feature touched the city system.
-- The current goal is not a one-shot rewrite. It is an incremental extraction of the heaviest business areas so `index.js` becomes an orchestrator instead of the implementation of every feature.
-
-Recommended mental model:
-
-1. `index.js` is the plugin entry and composition root.
-2. `cityDb.js` is the persistence boundary.
-3. `services/*` hold the actual business logic.
-4. New city features should prefer extending an existing service or adding a new service, instead of growing `index.js` again.
-
-Recommended next extraction steps:
-
-- `routes/`
-  Move `/api/city/*` handlers out of `index.js`
-- `scheduleService`
-  Isolate schedule generation and daily plan logic
-- Smaller action submodules
-  Split shopping / medical / gambling branches out of `actionService` if that file grows too fast
-
-The point of the current structure is not “perfect architecture”.
-It is to keep the project shippable while preventing `city/index.js` from becoming a permanent single-file bottleneck.
-
-### License
-
-This project is licensed under **CC BY-NC-ND 4.0**.
-
-That means:
-
-- sharing and redistribution are allowed
-- attribution to `NANA3333333 / Nana` and the original repository is required
-- commercial use is not allowed
-- modified redistribution is not allowed
-
-See [LICENSE](./LICENSE) and the [official Creative Commons page](https://creativecommons.org/licenses/by-nc-nd/4.0/) for details.
+- 可以转载和分享。
+- 必须注明作者 `NANA3333333 / Nana` 以及原始仓库链接。
+- 禁止商用。
+- 禁止修改后再发布。
+
+完整许可见 [LICENSE](./LICENSE) 和 [Creative Commons 官方页面](https://creativecommons.org/licenses/by-nc-nd/4.0/)。

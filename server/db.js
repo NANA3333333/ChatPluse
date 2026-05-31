@@ -112,6 +112,95 @@ function getUserDb(userId) {
         }
     }
 
+    function normalizePositiveRowId(value, label = 'id') {
+        const id = Number(value);
+        if (!Number.isSafeInteger(id) || id <= 0) {
+            const error = new Error(`Invalid ${label}.`);
+            error.status = 400;
+            throw error;
+        }
+        return id;
+    }
+
+    function normalizeSqlLimit(value, fallback, max) {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
+        return Math.min(parsed, max);
+    }
+
+    function runOptionalDelete(sql, ...params) {
+        try {
+            return db.prepare(sql).run(...params).changes || 0;
+        } catch (e) {
+            return 0;
+        }
+    }
+
+    function deleteExternalKnowledgeDocsForCharacter(characterId) {
+        let changes = 0;
+        let docIds = [];
+        try {
+            docIds = db.prepare('SELECT id FROM external_knowledge_docs WHERE character_id = ?').all(characterId).map(row => row.id);
+        } catch (e) {
+            return 0;
+        }
+        if (docIds.length > 0) {
+            const placeholders = docIds.map(() => '?').join(', ');
+            changes += runOptionalDelete(`DELETE FROM external_knowledge_chunks WHERE doc_id IN (${placeholders})`, ...docIds);
+        }
+        changes += runOptionalDelete('DELETE FROM external_knowledge_docs WHERE character_id = ?', characterId);
+        return changes;
+    }
+
+    function deleteCharacterAttachedRows(characterId) {
+        const id = String(characterId || '').trim();
+        if (!id) return 0;
+        let changes = 0;
+        changes += runOptionalDelete('DELETE FROM message_tts WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM message_tts WHERE message_id IN (SELECT id FROM messages WHERE character_id = ?)', id);
+        changes += runOptionalDelete('DELETE FROM emotion_logs WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM llm_debug_logs WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM reply_dispatch_logs WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM token_usage WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM private_context_summaries WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM llm_cache WHERE character_id = ? OR cache_scope = ?', id, `character:${id}`);
+        changes += runOptionalDelete('DELETE FROM scheduled_tasks WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_character_courses WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_logs WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_inventory WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_schedules WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_action_guard WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_quest_progress_reviews WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM city_quest_claims WHERE character_id = ?', id);
+        changes += runOptionalDelete('DELETE FROM social_housing_bindings WHERE character_id = ?', id);
+        changes += deleteExternalKnowledgeDocsForCharacter(id);
+        return changes;
+    }
+
+    const MEMORY_UPDATE_COLUMNS = new Set([
+        'time', 'location', 'people', 'event', 'relationships', 'items', 'importance', 'embedding',
+        'last_retrieved_at', 'retrieval_count', 'group_id', 'memory_type', 'summary', 'content',
+        'people_json', 'items_json', 'relationship_json', 'emotion', 'source_message_ids_json',
+        'dedupe_key', 'updated_at', 'is_archived', 'source_started_at', 'source_ended_at',
+        'source_time_text', 'source_message_count', 'memory_tier', 'memory_focus',
+        'maintenance_status', 'classification_source', 'classified_at', 'retention_score',
+        'retention_action', 'retention_reason', 'retention_checked_at', 'consolidation_key',
+        'consolidation_summary', 'consolidated_into_memory_id', 'archive_reason',
+        'forgetting_grace_started_at', 'forgetting_grace_expires_at', 'source_context',
+        'scene_tag', 'source_app', 'temporal_label', 'temporal_scope', 'temporal_anchor',
+        'temporal_confidence', 'temporal_reason', 'temporal_checked_at'
+    ]);
+
+    function getAllowedMemoryUpdateFields(patch = {}) {
+        const fields = Object.keys(patch).filter(field => MEMORY_UPDATE_COLUMNS.has(field));
+        if (fields.length === 0) {
+            const error = new Error('No valid memory fields provided.');
+            error.status = 400;
+            throw error;
+        }
+        return fields;
+    }
+
     function normalizeMemoryRow(row) {
         if (!row) return row;
         const peopleList = normalizeArrayField(row.people_json ?? row.people, []);
@@ -1335,26 +1424,176 @@ function getUserDb(userId) {
         return String(Math.floor(1000 + Math.random() * 9000));
     }
 
+    function hasCharacterPatchField(data, field) {
+        return Object.prototype.hasOwnProperty.call(data, field);
+    }
+
+    function normalizeCharacterInteger(value, fallback, min, max) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) return fallback;
+        const integer = Math.trunc(parsed);
+        return Math.max(min, Math.min(max, integer));
+    }
+
+    function normalizeCharacterNumber(value, fallback, min, max, digits = 2) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) return fallback;
+        const clamped = Math.max(min, Math.min(max, parsed));
+        return +clamped.toFixed(digits);
+    }
+
+    function normalizeCharacterFlag(value, fallback = 1) {
+        const text = String(value ?? '').trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on'].includes(text)) return 1;
+        if (['0', 'false', 'no', 'off'].includes(text)) return 0;
+        return fallback ? 1 : 0;
+    }
+
+    function normalizeCharacterPatch(data, existing = null) {
+        const normalizedData = { ...data };
+        const intFields = {
+            max_tokens: [2000, 100, 20000],
+            sweep_limit: [30, 10, 100],
+            impression_q_limit: [3, 0, 10],
+            context_msg_limit: [60, 10, 200],
+            private_summary_threshold: [30, 5, 100],
+            city_action_frequency: [1, 1, 30]
+        };
+        for (const [field, [fallback, min, max]] of Object.entries(intFields)) {
+            if (hasCharacterPatchField(normalizedData, field)) {
+                normalizedData[field] = normalizeCharacterInteger(
+                    normalizedData[field],
+                    normalizeCharacterInteger(existing?.[field], fallback, min, max),
+                    min,
+                    max
+                );
+            }
+        }
+
+        const boundedPercentFields = {
+            affinity: 50,
+            initial_affinity: 50,
+            jealousy_level: 0,
+            stat_int: 50,
+            stat_sta: 50,
+            stat_cha: 50,
+            energy: 100,
+            sleep_pressure: 20,
+            mood: 50,
+            stress: 20,
+            social_need: 50,
+            health: 100,
+            satiety: 45,
+            stomach_load: 0,
+            work_distraction: 0,
+            sleep_disruption: 0
+        };
+        for (const [field, fallback] of Object.entries(boundedPercentFields)) {
+            if (hasCharacterPatchField(normalizedData, field)) {
+                normalizedData[field] = normalizeCharacterInteger(normalizedData[field], normalizeCharacterInteger(existing?.[field], fallback, 0, 100), 0, 100);
+            }
+        }
+
+        if (hasCharacterPatchField(normalizedData, 'pressure_level')) {
+            normalizedData.pressure_level = normalizeCharacterInteger(
+                normalizedData.pressure_level,
+                normalizeCharacterInteger(existing?.pressure_level, 0, 0, 4),
+                0,
+                4
+            );
+        }
+        if (hasCharacterPatchField(normalizedData, 'sleep_debt')) {
+            normalizedData.sleep_debt = normalizeCharacterInteger(normalizedData.sleep_debt, normalizeCharacterInteger(existing?.sleep_debt, 0, 0, 1000), 0, 1000);
+        }
+        if (hasCharacterPatchField(normalizedData, 'wallet')) {
+            normalizedData.wallet = normalizeCharacterNumber(normalizedData.wallet, normalizeCharacterNumber(existing?.wallet, 200, 0, 1000000000), 0, 1000000000);
+        }
+        if (hasCharacterPatchField(normalizedData, 'calories')) {
+            normalizedData.calories = normalizeCharacterInteger(normalizedData.calories, normalizeCharacterInteger(existing?.calories, 2000, 0, 4000), 0, 4000);
+        }
+
+        const flagFields = {
+            tts_enabled: 0,
+            tts_autoplay: 0,
+            sys_proactive: 1,
+            sys_timer: 1,
+            sys_pressure: 1,
+            sys_jealousy: 1,
+            is_diary_unlocked: 0,
+            is_blocked: 0,
+            llm_debug_capture: 1,
+            sys_survival: 1,
+            sys_city_notify: 0,
+            sys_city_social: 1,
+            is_scheduled: 1
+        };
+        for (const [field, fallback] of Object.entries(flagFields)) {
+            if (hasCharacterPatchField(normalizedData, field)) {
+                normalizedData[field] = normalizeCharacterFlag(normalizedData[field], existing?.[field] ?? fallback);
+            }
+        }
+
+        const hasMinInterval = hasCharacterPatchField(normalizedData, 'interval_min');
+        const hasMaxInterval = hasCharacterPatchField(normalizedData, 'interval_max');
+        if (hasMinInterval) {
+            normalizedData.interval_min = normalizeCharacterNumber(
+                normalizedData.interval_min,
+                normalizeCharacterNumber(existing?.interval_min, 10, 0.1, 120, 1),
+                0.1,
+                120,
+                1
+            );
+        }
+        if (hasMaxInterval) {
+            normalizedData.interval_max = normalizeCharacterNumber(
+                normalizedData.interval_max,
+                normalizeCharacterNumber(existing?.interval_max, 120, 0.1, 120, 1),
+                0.1,
+                120,
+                1
+            );
+        }
+        if (hasMinInterval || hasMaxInterval) {
+            const nextMin = hasMinInterval
+                ? normalizedData.interval_min
+                : normalizeCharacterNumber(existing?.interval_min, 10, 0.1, 120, 1);
+            const nextMax = hasMaxInterval
+                ? normalizedData.interval_max
+                : normalizeCharacterNumber(existing?.interval_max, 120, 0.1, 120, 1);
+            if (nextMax < nextMin) {
+                normalizedData.interval_max = nextMin;
+            }
+        }
+
+        return normalizedData;
+    }
+
     function updateCharacter(id, data) {
+        const existing = getCharacter(id);
+        const normalizedData = normalizeCharacterPatch(data, existing);
+        if (!existing && !String(normalizedData.name || '').trim()) {
+            const error = new Error('Character name is required.');
+            error.status = 400;
+            throw error;
+        }
         // Filter out 'id' from data keys — it's always passed as a separate parameter
-        const fields = Object.keys(data).filter(k => characterColumns.includes(k) && k !== 'id');
+        const fields = Object.keys(normalizedData).filter(k => characterColumns.includes(k) && k !== 'id');
         if (fields.length === 0) return;
 
-        const values = fields.map(f => data[f]);
+        const values = fields.map(f => normalizedData[f]);
 
         // Insert if not exists, else update
-        const existing = getCharacter(id);
         if (!existing) {
             const avatarIndex = fields.indexOf('avatar');
             if (avatarIndex === -1) {
                 fields.push('avatar');
-                values.push(buildDefaultAvatarUrl(data.name || id));
+                values.push(buildDefaultAvatarUrl(normalizedData.name || id));
             } else if (!String(values[avatarIndex] || '').trim()) {
-                values[avatarIndex] = buildDefaultAvatarUrl(data.name || id);
+                values[avatarIndex] = buildDefaultAvatarUrl(normalizedData.name || id);
             }
 
             // Auto-assign a diary password for new characters
-            if (!data.diary_password) {
+            if (!normalizedData.diary_password) {
                 const pw = generateDiaryPassword();
                 fields.push('diary_password');
                 values.push(pw);
@@ -1362,7 +1601,7 @@ function getUserDb(userId) {
 
             // Snapshot initial affinity on creation
             if (!fields.includes('initial_affinity')) {
-                const startAffinity = fields.includes('affinity') ? data.affinity : 50;
+                const startAffinity = fields.includes('affinity') ? normalizedData.affinity : 50;
                 fields.push('initial_affinity');
                 values.push(startAffinity);
             }
@@ -1460,8 +1699,9 @@ function getUserDb(userId) {
     }
 
     function getEmotionLogs(characterId, limit = 50) {
+        const safeLimit = normalizeSqlLimit(limit, 50, 100);
         return db.prepare('SELECT * FROM emotion_logs WHERE character_id = ? ORDER BY id DESC LIMIT ?')
-            .all(characterId, limit);
+            .all(characterId, safeLimit);
     }
 
     function addLlmDebugLog(entry) {
@@ -1482,8 +1722,9 @@ function getUserDb(userId) {
     }
 
     function getLlmDebugLogs(characterId, limit = 50) {
+        const safeLimit = normalizeSqlLimit(limit, 50, 200);
         return db.prepare('SELECT * FROM llm_debug_logs WHERE character_id = ? ORDER BY id DESC LIMIT ?')
-            .all(characterId, limit);
+            .all(characterId, safeLimit);
     }
 
     function addReplyDispatchLog(entry) {
@@ -1514,12 +1755,13 @@ function getUserDb(userId) {
     }
 
     function getReplyDispatchLogs(characterId, limit = 50) {
+        const safeLimit = normalizeSqlLimit(limit, 50, 200);
         return db.prepare(`
             SELECT * FROM reply_dispatch_logs
             WHERE character_id = ?
             ORDER BY id DESC
             LIMIT ?
-        `).all(characterId, limit).map(row => {
+        `).all(characterId, safeLimit).map(row => {
             let payload = row.payload;
             if (typeof payload === 'string' && payload.trim()) {
                 try {
@@ -1544,7 +1786,8 @@ function getUserDb(userId) {
         }
         const normalizedMetadata = metadata || {};
         try {
-            const tts = db.prepare('SELECT * FROM message_tts WHERE message_id = ?').get(row.id);
+            const tts = db.prepare('SELECT * FROM message_tts WHERE message_id = ? AND character_id = ?')
+                .get(row.id, row.character_id);
             if (tts) {
                 normalizedMetadata.tts = {
                     status: tts.status || 'pending',
@@ -1575,8 +1818,28 @@ function getUserDb(userId) {
 
     function upsertMessageTts(entry = {}) {
         const now = Date.now();
-        const messageId = Number(entry.message_id || 0);
-        if (!messageId) return null;
+        const messageId = normalizePositiveRowId(entry.message_id, 'message id');
+        const message = db.prepare('SELECT id, character_id FROM messages WHERE id = ? LIMIT 1').get(messageId);
+        if (!message) {
+            const error = new Error('Message not found.');
+            error.status = 404;
+            throw error;
+        }
+        const requestedCharacterId = String(entry.character_id || '').trim();
+        const characterId = String(message.character_id || '').trim();
+        if (requestedCharacterId && requestedCharacterId !== characterId) {
+            const error = new Error('TTS character does not match message.');
+            error.status = 400;
+            throw error;
+        }
+        const rawDurationMs = entry.duration_ms === undefined || entry.duration_ms === null || entry.duration_ms === ''
+            ? 0
+            : Number(entry.duration_ms);
+        if (!Number.isFinite(rawDurationMs) || rawDurationMs < 0) {
+            const error = new Error('Invalid TTS duration.');
+            error.status = 400;
+            throw error;
+        }
         const existing = db.prepare('SELECT created_at FROM message_tts WHERE message_id = ?').get(messageId);
         db.prepare(`
             INSERT INTO message_tts (
@@ -1597,14 +1860,14 @@ function getUserDb(userId) {
                 updated_at = excluded.updated_at
         `).run(
             messageId,
-            String(entry.character_id || ''),
+            characterId,
             String(entry.provider || ''),
             String(entry.voice || ''),
             String(entry.model || ''),
             String(entry.status || 'pending'),
             String(entry.audio_path || ''),
             String(entry.mime_type || 'audio/mpeg'),
-            Number(entry.duration_ms || 0),
+            Math.floor(rawDurationMs),
             String(entry.error || ''),
             typeof entry.intent_json === 'string' ? entry.intent_json : JSON.stringify(entry.intent_json || {}),
             Number(existing?.created_at || entry.created_at || now),
@@ -1614,21 +1877,29 @@ function getUserDb(userId) {
     }
 
     function getMessageTts(messageId) {
-        return normalizeMessageTtsRow(db.prepare('SELECT * FROM message_tts WHERE message_id = ?').get(Number(messageId || 0)));
+        const id = normalizePositiveRowId(messageId, 'message id');
+        return normalizeMessageTtsRow(db.prepare(`
+            SELECT message_tts.*
+            FROM message_tts
+            JOIN messages ON messages.id = message_tts.message_id
+            WHERE message_tts.message_id = ?
+        `).get(id));
     }
 
     // ─── Message Queries ────────────────────────────────────────────────────
 
     function getMessages(characterId, limit = 100) {
+        const safeLimit = normalizeSqlLimit(limit, 100, 200);
         return db.prepare('SELECT * FROM messages WHERE character_id = ? ORDER BY id DESC LIMIT ?')
-            .all(characterId, limit)
+            .all(characterId, safeLimit)
             .reverse()
             .map(normalizeMessageRow);
     }
 
     function getMessagesBefore(characterId, beforeId, limit = 100) {
+        const safeLimit = normalizeSqlLimit(limit, 100, 200);
         return db.prepare('SELECT * FROM messages WHERE character_id = ? AND id < ? ORDER BY id DESC LIMIT ?')
-            .all(characterId, beforeId, limit)
+            .all(characterId, beforeId, safeLimit)
             .reverse()
             .map(normalizeMessageRow);
     }
@@ -1839,25 +2110,60 @@ function getUserDb(userId) {
 
     function addMessage(characterId, role, content, metadata = null) {
         const ts = Date.now();
+        const targetCharacterId = String(characterId || '').trim();
+        const safeRole = String(role || '').trim();
+        const safeContent = typeof content === 'string' ? content : '';
+        if (!targetCharacterId) {
+            const error = new Error('Invalid character id.');
+            error.status = 400;
+            throw error;
+        }
+        if (!['user', 'character', 'system'].includes(safeRole)) {
+            const error = new Error('Invalid message role.');
+            error.status = 400;
+            throw error;
+        }
+        if (!safeContent.trim()) {
+            const error = new Error('Message content required.');
+            error.status = 400;
+            throw error;
+        }
+        const characterExists = db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(targetCharacterId);
+        if (!characterExists) {
+            const error = new Error('Character not found.');
+            error.status = 404;
+            throw error;
+        }
         const metadataStr = metadata ? JSON.stringify(metadata) : null;
         let info;
         try {
             info = db.prepare('INSERT INTO messages (character_id, role, content, timestamp, metadata) VALUES (?, ?, ?, ?, ?)')
-                .run(characterId, role, content, ts, metadataStr);
+                .run(targetCharacterId, safeRole, safeContent, ts, metadataStr);
         } catch (e) {
             // Fallback for old databases without metadata column
             info = db.prepare('INSERT INTO messages (character_id, role, content, timestamp) VALUES (?, ?, ?, ?)')
-                .run(characterId, role, content, ts);
+                .run(targetCharacterId, safeRole, safeContent, ts);
         }
         return { id: info.lastInsertRowid, timestamp: ts };
     }
 
-    function deleteMessage(messageId) {
-        db.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
+    function deleteMessage(messageId, characterId = null) {
+        const id = Number(messageId || 0);
+        if (!Number.isSafeInteger(id) || id <= 0) return 0;
+        const scopedCharacterId = characterId !== null && characterId !== undefined ? String(characterId || '').trim() : '';
+        const info = scopedCharacterId
+            ? db.prepare('DELETE FROM messages WHERE id = ? AND character_id = ?').run(id, scopedCharacterId)
+            : db.prepare('DELETE FROM messages WHERE id = ?').run(id);
+        if ((info.changes || 0) > 0) {
+            db.prepare('DELETE FROM message_tts WHERE message_id = ?').run(id);
+        }
+        return info.changes || 0;
     }
 
     function getMessageCharacterId(messageId) {
-        const row = db.prepare('SELECT character_id FROM messages WHERE id = ? LIMIT 1').get(messageId);
+        const id = Number(messageId || 0);
+        if (!Number.isSafeInteger(id) || id <= 0) return null;
+        const row = db.prepare('SELECT character_id FROM messages WHERE id = ? LIMIT 1').get(id);
         return row?.character_id || null;
     }
 
@@ -2103,6 +2409,12 @@ function getUserDb(userId) {
     }
 
     function updateMemory(id, memoryData) {
+        const memoryId = Number(id);
+        if (!Number.isSafeInteger(memoryId) || memoryId <= 0) {
+            const error = new Error('Invalid memory id.');
+            error.status = 400;
+            throw error;
+        }
         const patch = { ...memoryData };
         if (Object.prototype.hasOwnProperty.call(patch, 'people_json') || Object.prototype.hasOwnProperty.call(patch, 'people')) {
             const peopleList = normalizeArrayField(patch.people_json ?? patch.people, []);
@@ -2136,11 +2448,13 @@ function getUserDb(userId) {
                 patch.content = content;
             }
         }
+        const allowedFields = getAllowedMemoryUpdateFields(patch);
         patch.updated_at = patch.updated_at || Date.now();
-        const fields = Object.keys(patch);
+        const fields = Array.from(new Set([...allowedFields, 'updated_at']))
+            .filter(field => MEMORY_UPDATE_COLUMNS.has(field));
         const setClause = fields.map(f => `${f} = ?`).join(', ');
         const values = fields.map(f => patch[f]);
-        db.prepare(`UPDATE memories SET ${setClause} WHERE id = ?`).run(...values, id);
+        return db.prepare(`UPDATE memories SET ${setClause} WHERE id = ?`).run(...values, memoryId);
     }
 
     function deleteMemory(id) {
@@ -2182,17 +2496,38 @@ function getUserDb(userId) {
         return db.prepare('SELECT * FROM moments WHERE character_id = ? ORDER BY timestamp DESC').all(characterId);
     }
 
+    function getMoment(momentId) {
+        const id = normalizePositiveRowId(momentId, 'moment id');
+        return db.prepare('SELECT * FROM moments WHERE id = ? LIMIT 1').get(id) || null;
+    }
+
     function deleteMoment(momentId) {
-        db.prepare('DELETE FROM moment_likes WHERE moment_id = ?').run(momentId);
-        db.prepare('DELETE FROM moment_comments WHERE moment_id = ?').run(momentId);
-        db.prepare('DELETE FROM moments WHERE id = ?').run(momentId);
+        const id = normalizePositiveRowId(momentId, 'moment id');
+        const info = db.prepare('DELETE FROM moments WHERE id = ?').run(id);
+        if ((info.changes || 0) > 0) {
+            db.prepare('DELETE FROM moment_likes WHERE moment_id = ?').run(id);
+            db.prepare('DELETE FROM moment_comments WHERE moment_id = ?').run(id);
+        }
+        return info.changes || 0;
     }
 
     function addMoment(characterId, content, imageUrl = null, visibility = 'all') {
+        const authorId = String(characterId || '').trim();
+        const safeContent = typeof content === 'string' ? content.trim() : '';
+        if (!authorId || (authorId !== 'user' && !getCharacter(authorId))) {
+            const error = new Error('Moment author not found');
+            error.status = 404;
+            throw error;
+        }
+        if (!safeContent) {
+            const error = new Error('Moment content required');
+            error.status = 400;
+            throw error;
+        }
         const info = db.prepare(`
         INSERT INTO moments (character_id, content, image_url, visibility, timestamp) 
         VALUES (?, ?, ?, ?, ?)
-    `).run(characterId, content, imageUrl, visibility, Date.now());
+    `).run(authorId, safeContent, imageUrl, visibility, Date.now());
         return info.lastInsertRowid;
     }
 
@@ -2201,62 +2536,132 @@ function getUserDb(userId) {
     }
 
     function addDiary(characterId, content, emotion = null) {
+        const authorId = String(characterId || '').trim();
+        const safeContent = typeof content === 'string' ? content.trim() : '';
+        if (!authorId || !getCharacter(authorId)) {
+            const error = new Error('Diary author not found');
+            error.status = 404;
+            throw error;
+        }
+        if (!safeContent) {
+            const error = new Error('Diary content required');
+            error.status = 400;
+            throw error;
+        }
         const info = db.prepare(`
         INSERT INTO diaries (character_id, content, emotion, timestamp) 
         VALUES (?, ?, ?, ?)
-    `).run(characterId, content, emotion, Date.now());
+    `).run(authorId, safeContent, emotion, Date.now());
         return info.lastInsertRowid;
     }
 
     function deleteDiary(diaryId) {
-        db.prepare('DELETE FROM diaries WHERE id = ?').run(diaryId);
+        const id = normalizePositiveRowId(diaryId, 'diary id');
+        const info = db.prepare('DELETE FROM diaries WHERE id = ?').run(id);
+        return info.changes || 0;
     }
 
     function unlockDiaries(characterId) {
-        db.prepare('UPDATE characters SET is_diary_unlocked = 1 WHERE id = ?').run(characterId);
+        const authorId = String(characterId || '').trim();
+        if (!authorId || !getCharacter(authorId)) {
+            const error = new Error('Diary author not found');
+            error.status = 404;
+            throw error;
+        }
+        db.prepare('UPDATE characters SET is_diary_unlocked = 1 WHERE id = ?').run(authorId);
     }
 
     // Set the diary password (called when AI generates [DIARY_PASSWORD:xxxx] tag)
     function setDiaryPassword(characterId, password) {
-        db.prepare('UPDATE characters SET diary_password = ? WHERE id = ?').run(password, characterId);
+        const authorId = String(characterId || '').trim();
+        const safePassword = typeof password === 'string' ? password.trim() : '';
+        if (!authorId || !getCharacter(authorId)) {
+            const error = new Error('Diary author not found');
+            error.status = 404;
+            throw error;
+        }
+        if (!safePassword) {
+            const error = new Error('Diary password required');
+            error.status = 400;
+            throw error;
+        }
+        db.prepare('UPDATE characters SET diary_password = ? WHERE id = ?').run(safePassword, authorId);
     }
 
     // Verify and unlock the diary if password matches. Returns true on success.
     function verifyAndUnlockDiary(characterId, inputPassword) {
-        const char = db.prepare('SELECT diary_password, is_diary_unlocked FROM characters WHERE id = ?').get(characterId);
+        const authorId = String(characterId || '').trim();
+        const password = typeof inputPassword === 'string' ? inputPassword.trim() : '';
+        if (!password) return { success: false, reason: 'No password provided.' };
+        if (!authorId) return { success: false, reason: 'Character not found.' };
+        const char = db.prepare('SELECT diary_password, is_diary_unlocked FROM characters WHERE id = ?').get(authorId);
         if (!char) return { success: false, reason: 'Character not found.' };
         if (char.is_diary_unlocked) return { success: true, alreadyUnlocked: true };
         if (!char.diary_password) return { success: false, reason: 'No password has been set yet. Keep building your bond.' };
-        if (char.diary_password.trim().toLowerCase() === inputPassword.trim().toLowerCase()) {
-            db.prepare('UPDATE characters SET is_diary_unlocked = 1 WHERE id = ?').run(characterId);
+        if (char.diary_password.trim().toLowerCase() === password.toLowerCase()) {
+            db.prepare('UPDATE characters SET is_diary_unlocked = 1 WHERE id = ?').run(authorId);
             return { success: true };
         }
         return { success: false, reason: 'Wrong password.' };
     }
 
+    function normalizeSocialActorId(actorId, label = 'actor') {
+        const id = String(actorId || '').trim();
+        if (!id || (id !== 'user' && !getCharacter(id))) {
+            const error = new Error(`${label} not found`);
+            error.status = 404;
+            throw error;
+        }
+        return id;
+    }
+
     // Toggle like: user_id = 'user' for the human user, or char id
     function toggleLike(momentId, likerId) {
-        const existing = db.prepare('SELECT id FROM moment_likes WHERE moment_id=? AND liker_id=?').get(momentId, likerId);
+        const id = normalizePositiveRowId(momentId, 'moment id');
+        const moment = db.prepare('SELECT id FROM moments WHERE id = ? LIMIT 1').get(id);
+        if (!moment) {
+            const error = new Error('Moment not found');
+            error.status = 404;
+            throw error;
+        }
+        const actorId = normalizeSocialActorId(likerId, 'Moment liker');
+        const existing = db.prepare('SELECT id FROM moment_likes WHERE moment_id=? AND liker_id=?').get(id, actorId);
         if (existing) {
             db.prepare('DELETE FROM moment_likes WHERE id=?').run(existing.id);
             return false; // unliked
         } else {
-            db.prepare('INSERT INTO moment_likes(moment_id,liker_id,timestamp) VALUES(?,?,?)').run(momentId, likerId, Date.now());
+            db.prepare('INSERT INTO moment_likes(moment_id,liker_id,timestamp) VALUES(?,?,?)').run(id, actorId, Date.now());
             return true; // liked
         }
     }
 
     function getLikesForMoment(momentId) {
-        return db.prepare('SELECT liker_id FROM moment_likes WHERE moment_id=?').all(momentId);
+        const id = normalizePositiveRowId(momentId, 'moment id');
+        return db.prepare('SELECT liker_id FROM moment_likes WHERE moment_id=?').all(id);
     }
 
     function addComment(momentId, authorId, content) {
-        const info = db.prepare('INSERT INTO moment_comments(moment_id,author_id,content,timestamp) VALUES(?,?,?,?)').run(momentId, authorId, content, Date.now());
+        const id = normalizePositiveRowId(momentId, 'moment id');
+        const moment = db.prepare('SELECT id FROM moments WHERE id = ? LIMIT 1').get(id);
+        if (!moment) {
+            const error = new Error('Moment not found');
+            error.status = 404;
+            throw error;
+        }
+        const actorId = normalizeSocialActorId(authorId, 'Moment comment author');
+        const comment = typeof content === 'string' ? content.trim() : '';
+        if (!comment) {
+            const error = new Error('content required');
+            error.status = 400;
+            throw error;
+        }
+        const info = db.prepare('INSERT INTO moment_comments(moment_id,author_id,content,timestamp) VALUES(?,?,?,?)').run(id, actorId, comment, Date.now());
         return info.lastInsertRowid;
     }
 
     function getComments(momentId) {
-        return db.prepare('SELECT * FROM moment_comments WHERE moment_id=? ORDER BY timestamp ASC').all(momentId);
+        const id = normalizePositiveRowId(momentId, 'moment id');
+        return db.prepare('SELECT * FROM moment_comments WHERE moment_id=? ORDER BY timestamp ASC').all(id);
     }
 
     // ─── Moments Context Builder for LLM Injection ─────────────────────────
@@ -2394,26 +2799,75 @@ function getUserDb(userId) {
         return profile;
     }
 
+    function normalizeProfileInteger(value, fallback, min, max) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) return fallback;
+        const integer = Math.trunc(parsed);
+        return Math.max(min, Math.min(max, integer));
+    }
+
+    function normalizeProfileNumber(value, fallback, min, max) {
+        const parsed = Number(value);
+        if (!Number.isFinite(parsed)) return fallback;
+        return Math.max(min, Math.min(max, parsed));
+    }
+
+    function normalizeProfileBoolean(value, fallback = 0) {
+        const text = String(value ?? '').trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on'].includes(text)) return 1;
+        if (['0', 'false', 'no', 'off'].includes(text)) return 0;
+        return fallback ? 1 : 0;
+    }
+
+    function normalizeUserProfilePatch(data) {
+        const normalizedData = { ...data };
+        if (normalizedData.group_msg_limit !== undefined) {
+            normalizedData.group_msg_limit = normalizeProfileInteger(normalizedData.group_msg_limit, 20, 1, 200);
+        }
+        if (normalizedData.group_skip_rate !== undefined) {
+            normalizedData.group_skip_rate = normalizeProfileNumber(normalizedData.group_skip_rate, 0, 0, 1);
+        }
+        if (normalizedData.group_proactive_enabled !== undefined) {
+            normalizedData.group_proactive_enabled = normalizeProfileBoolean(normalizedData.group_proactive_enabled, 0);
+        }
+        if (normalizedData.group_interval_min !== undefined) {
+            normalizedData.group_interval_min = normalizeProfileInteger(normalizedData.group_interval_min, 10, 1, 1440);
+        }
+        if (normalizedData.group_interval_max !== undefined) {
+            normalizedData.group_interval_max = normalizeProfileInteger(normalizedData.group_interval_max, 60, 1, 1440);
+        }
+        if (normalizedData.group_interval_min !== undefined && normalizedData.group_interval_max !== undefined && normalizedData.group_interval_max < normalizedData.group_interval_min) {
+            normalizedData.group_interval_max = normalizedData.group_interval_min;
+        }
+        if (normalizedData.jealousy_chance !== undefined) {
+            normalizedData.jealousy_chance = normalizeProfileNumber(normalizedData.jealousy_chance, 0, 0, 1);
+        }
+        if (normalizedData.wallet !== undefined) {
+            normalizedData.wallet = +normalizeProfileNumber(normalizedData.wallet, 0, 0, 1000000000).toFixed(2);
+        }
+        if (normalizedData.private_msg_limit_for_group !== undefined) {
+            normalizedData.private_msg_limit_for_group = normalizeProfileInteger(normalizedData.private_msg_limit_for_group, 3, 0, 50);
+        }
+        if (normalizedData.moments_token_limit !== undefined) {
+            normalizedData.moments_token_limit = normalizeProfileInteger(normalizedData.moments_token_limit, 500, 0, 10000);
+        }
+        if (normalizedData.moments_reaction_rate !== undefined) {
+            normalizedData.moments_reaction_rate = normalizeProfileInteger(normalizedData.moments_reaction_rate, 0, 0, 100);
+        }
+        if (normalizedData.memory_maintenance_batch_size !== undefined) {
+            normalizedData.memory_maintenance_batch_size = normalizeProfileInteger(normalizedData.memory_maintenance_batch_size, 30, 10, 100);
+        }
+        if (normalizedData.memory_maintenance_max_tokens !== undefined) {
+            normalizedData.memory_maintenance_max_tokens = normalizeProfileInteger(normalizedData.memory_maintenance_max_tokens, 8000, 1000, 20000);
+        }
+        return normalizedData;
+    }
+
     function updateUserProfile(data) {
         const allowedFields = ['name', 'avatar', 'banner', 'bio', 'theme', 'custom_css', 'theme_config', 'group_msg_limit', 'group_skip_rate', 'group_proactive_enabled', 'group_interval_min', 'group_interval_max', 'jealousy_chance', 'wallet', 'private_msg_limit_for_group', 'moments_token_limit', 'moments_reaction_rate', 'serper_api_key', 'web_search_keys_json', 'web_search_provider', 'memory_maintenance_api_endpoint', 'memory_maintenance_api_key', 'memory_maintenance_model_name', 'memory_maintenance_batch_size', 'memory_maintenance_max_tokens'];
         const fields = Object.keys(data).filter(k => allowedFields.includes(k));
         if (fields.length === 0) return;
-        const normalizedData = { ...data };
-        if (normalizedData.group_skip_rate !== undefined) {
-            normalizedData.group_skip_rate = Math.max(0, Math.min(1, Number(normalizedData.group_skip_rate) || 0));
-        }
-        if (normalizedData.jealousy_chance !== undefined) {
-            normalizedData.jealousy_chance = Math.max(0, Math.min(1, Number(normalizedData.jealousy_chance) || 0));
-        }
-        if (normalizedData.moments_reaction_rate !== undefined) {
-            normalizedData.moments_reaction_rate = Math.max(0, Math.min(100, parseInt(normalizedData.moments_reaction_rate, 10) || 0));
-        }
-        if (normalizedData.memory_maintenance_batch_size !== undefined) {
-            normalizedData.memory_maintenance_batch_size = Math.max(10, Math.min(100, parseInt(normalizedData.memory_maintenance_batch_size, 10) || 30));
-        }
-        if (normalizedData.memory_maintenance_max_tokens !== undefined) {
-            normalizedData.memory_maintenance_max_tokens = Math.max(1000, Math.min(20000, parseInt(normalizedData.memory_maintenance_max_tokens, 10) || 8000));
-        }
+        const normalizedData = normalizeUserProfilePatch(data);
         const setClause = fields.map(f => `${f} = ?`).join(', ');
         const values = fields.map(f => normalizedData[f]);
         db.prepare(`UPDATE user_profile SET ${setClause} WHERE id = ?`).run(...values, 'default');
@@ -2458,11 +2912,14 @@ function getUserDb(userId) {
 
     // ─── Friendship Management ──────────────────────────────────────────────
     function addFriend(char1Id, char2Id) {
-        if (char1Id === char2Id) return false;
+        const sourceId = String(char1Id || '').trim();
+        const targetId = String(char2Id || '').trim();
+        if (!sourceId || !targetId || sourceId === targetId) return false;
+        if (!getCharacter(sourceId) || !getCharacter(targetId)) return false;
         const stmt = db.prepare('INSERT OR IGNORE INTO character_friends (char1_id, char2_id, created_at) VALUES (?, ?, ?)');
         const now = Date.now();
-        const info1 = stmt.run(char1Id, char2Id, now);
-        const info2 = stmt.run(char2Id, char1Id, now);
+        const info1 = stmt.run(sourceId, targetId, now);
+        const info2 = stmt.run(targetId, sourceId, now);
         return info1.changes > 0 || info2.changes > 0;
     }
 
@@ -2511,13 +2968,36 @@ function getUserDb(userId) {
 
     // ─── Group Chat Management ──────────────────────────────────────────────
     function createGroup(id, name, memberIds, avatar = null) {
-        db.prepare('INSERT INTO group_chats (id, name, avatar, created_at) VALUES (?, ?, ?, ?)').run(id, name, avatar, Date.now());
-        const stmt = db.prepare('INSERT OR IGNORE INTO group_members (group_id, member_id, role) VALUES (?, ?, ?)');
-        stmt.run(id, 'user', 'owner');
-        for (const mid of memberIds) {
-            stmt.run(id, mid, 'member');
+        const groupId = typeof id === 'string' ? id.trim() : '';
+        const groupName = typeof name === 'string' ? name.trim() : '';
+        if (!groupId) {
+            const error = new Error('Invalid group id.');
+            error.status = 400;
+            throw error;
         }
-        return id;
+        if (!groupName) {
+            const error = new Error('Invalid group name.');
+            error.status = 400;
+            throw error;
+        }
+        const cleanMemberIds = Array.from(new Set((Array.isArray(memberIds) ? memberIds : [])
+            .map(mid => String(mid || '').trim())
+            .filter(Boolean)));
+        const invalidMemberIds = cleanMemberIds.filter(mid => mid === 'user' || !getCharacter(mid));
+        if (cleanMemberIds.length === 0 || invalidMemberIds.length > 0) {
+            const error = new Error('Invalid group member ids.');
+            error.status = 400;
+            error.invalid_member_ids = invalidMemberIds;
+            throw error;
+        }
+        const safeAvatar = typeof avatar === 'string' ? avatar.trim() : null;
+        db.prepare('INSERT INTO group_chats (id, name, avatar, created_at) VALUES (?, ?, ?, ?)').run(groupId, groupName, safeAvatar || null, Date.now());
+        const stmt = db.prepare('INSERT OR IGNORE INTO group_members (group_id, member_id, role) VALUES (?, ?, ?)');
+        stmt.run(groupId, 'user', 'owner');
+        for (const mid of cleanMemberIds) {
+            stmt.run(groupId, mid, 'member');
+        }
+        return groupId;
     }
 
     function getGroups() {
@@ -2544,17 +3024,28 @@ function getUserDb(userId) {
         db.prepare('DELETE FROM group_chats WHERE id = ?').run(id);
     }
 
+    function normalizeGroupMessageQueryLimit(value, fallback = 100, max = 200) {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed <= 0) return fallback;
+        return Math.min(parsed, max);
+    }
+
     function getGroupMessages(groupId, limit = 100) {
-        return db.prepare('SELECT * FROM group_messages WHERE group_id = ? ORDER BY timestamp DESC LIMIT ?').all(groupId, limit).reverse();
+        const targetGroupId = String(groupId || '').trim();
+        if (!targetGroupId) return [];
+        const safeLimit = normalizeGroupMessageQueryLimit(limit, 100, 200);
+        return db.prepare('SELECT * FROM group_messages WHERE group_id = ? ORDER BY timestamp DESC LIMIT ?').all(targetGroupId, safeLimit).reverse();
     }
 
     function getVisibleGroupMessages(groupId, limit = 50, sinceTimestamp = 0) {
-        return db.prepare('SELECT * FROM group_messages WHERE group_id = ? AND hidden = 0 AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?').all(groupId, sinceTimestamp, limit).reverse();
+        const safeLimit = normalizeGroupMessageQueryLimit(limit, 50, 200);
+        return db.prepare('SELECT * FROM group_messages WHERE group_id = ? AND hidden = 0 AND timestamp >= ? ORDER BY timestamp DESC LIMIT ?').all(groupId, sinceTimestamp, safeLimit).reverse();
     }
 
     function getUnsummarizedGroupMessages(groupId, olderThanTimestamp, limit = 50) {
+        const safeLimit = normalizeGroupMessageQueryLimit(limit, 50, 500);
         return db.prepare('SELECT * FROM group_messages WHERE group_id = ? AND hidden = 0 AND is_summarized = 0 AND timestamp < ? ORDER BY timestamp ASC LIMIT ?')
-            .all(groupId, olderThanTimestamp, limit);
+            .all(groupId, olderThanTimestamp, safeLimit);
     }
 
     function countUnsummarizedGroupMessages(groupId, olderThanTimestamp) {
@@ -2635,14 +3126,53 @@ function getUserDb(userId) {
     }
 
     function addGroupMessage(groupId, senderId, content, senderName = null, senderAvatar = null, metadata = null) {
+        const targetGroupId = String(groupId || '').trim();
+        const cleanSenderId = String(senderId || '').trim();
+        const safeContent = typeof content === 'string' ? content : '';
+        if (!targetGroupId) {
+            const error = new Error('Invalid group id.');
+            error.status = 400;
+            throw error;
+        }
+        if (!cleanSenderId) {
+            const error = new Error('Invalid group message sender.');
+            error.status = 400;
+            throw error;
+        }
+        if (!safeContent.trim()) {
+            const error = new Error('Group message content required.');
+            error.status = 400;
+            throw error;
+        }
+        const groupExists = db.prepare('SELECT 1 FROM group_chats WHERE id = ? LIMIT 1').get(targetGroupId);
+        if (!groupExists) {
+            const error = new Error('Group not found.');
+            error.status = 404;
+            throw error;
+        }
+        if (cleanSenderId !== 'user' && cleanSenderId !== 'system') {
+            const senderExists = db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanSenderId);
+            if (!senderExists) {
+                const error = new Error('Group message sender not found.');
+                error.status = 404;
+                throw error;
+            }
+            const senderIsMember = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND member_id = ? LIMIT 1')
+                .get(targetGroupId, cleanSenderId);
+            if (!senderIsMember) {
+                const error = new Error('Group message sender is not a member.');
+                error.status = 403;
+                throw error;
+            }
+        }
         const metadataStr = metadata ? JSON.stringify(metadata) : null;
         let info;
         try {
             info = db.prepare('INSERT INTO group_messages (group_id, sender_id, content, timestamp, sender_name, sender_avatar, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)')
-                .run(groupId, senderId, content, Date.now(), senderName, senderAvatar, metadataStr);
+                .run(targetGroupId, cleanSenderId, safeContent, Date.now(), senderName, senderAvatar, metadataStr);
         } catch (e) {
             info = db.prepare('INSERT INTO group_messages (group_id, sender_id, content, timestamp, sender_name, sender_avatar) VALUES (?, ?, ?, ?, ?, ?)')
-                .run(groupId, senderId, content, Date.now(), senderName, senderAvatar);
+                .run(targetGroupId, cleanSenderId, safeContent, Date.now(), senderName, senderAvatar);
         }
         return info.lastInsertRowid;
     }
@@ -2666,7 +3196,15 @@ function getUserDb(userId) {
     }
 
     function addGroupMember(groupId, memberId, role = 'member') {
-        db.prepare('INSERT OR IGNORE INTO group_members (group_id, member_id, role, joined_at) VALUES (?, ?, ?, ?)').run(groupId, memberId, role, Date.now());
+        const cleanGroupId = String(groupId || '').trim();
+        const cleanMemberId = String(memberId || '').trim();
+        if (!cleanGroupId || !cleanMemberId || cleanMemberId === 'user') return 0;
+        const groupExists = db.prepare('SELECT 1 FROM group_chats WHERE id = ? LIMIT 1').get(cleanGroupId);
+        if (!groupExists) return 0;
+        const characterExists = db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanMemberId);
+        if (!characterExists) return 0;
+        const info = db.prepare('INSERT OR IGNORE INTO group_members (group_id, member_id, role, joined_at) VALUES (?, ?, ?, ?)').run(cleanGroupId, cleanMemberId, role, Date.now());
+        return info.changes;
     }
 
     function removeGroupMember(groupId, memberId) {
@@ -2699,6 +3237,7 @@ function getUserDb(userId) {
     // ─── Character Management ───────────────────────────────────────────────
 
     function deleteCharacter(id) {
+        deleteCharacterAttachedRows(id);
         db.prepare('DELETE FROM messages WHERE character_id = ?').run(id);
         const memoryIds = db.prepare('SELECT id FROM memories WHERE character_id = ?').all(id).map(row => row.id);
         if (memoryIds.length > 0) {
@@ -2729,26 +3268,58 @@ function getUserDb(userId) {
 
     // ─── Character Relationships (Inter-char Social System) ────────────────
 
+    function normalizeCharRelationshipEndpoint(value) {
+        const id = String(value || '').trim();
+        if (!id || !getCharacter(id)) return null;
+        return id;
+    }
+
+    function normalizeCharRelationshipSource(value) {
+        const source = String(value || '').trim();
+        return source ? source.slice(0, 120) : 'recommend';
+    }
+
+    function normalizeCharRelationshipAffinity(value) {
+        if (value === undefined || value === null) return null;
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > 100) return null;
+        return parsed;
+    }
+
+    function normalizeCharRelationshipImpression(value) {
+        return String(value || '').trim().slice(0, 200);
+    }
+
     function initCharRelationship(sourceId, targetId, affinity, impression, source = 'recommend') {
-        const safeImpression = impression || '';
+        const cleanSourceId = normalizeCharRelationshipEndpoint(sourceId);
+        const cleanTargetId = normalizeCharRelationshipEndpoint(targetId);
+        if (!cleanSourceId || !cleanTargetId || cleanSourceId === cleanTargetId) return false;
+        const safeSource = normalizeCharRelationshipSource(source);
+        const safeAffinity = normalizeCharRelationshipAffinity(affinity);
+        if (safeAffinity === null) return false;
+        const safeImpression = normalizeCharRelationshipImpression(impression);
         // Check existing record to avoid duplicate history entries
         const existing = db.prepare('SELECT affinity, impression FROM char_relationships WHERE source_id = ? AND target_id = ? AND source = ?')
-            .get(sourceId, targetId, source);
+            .get(cleanSourceId, cleanTargetId, safeSource);
 
         db.prepare(`INSERT OR REPLACE INTO char_relationships (source_id, target_id, affinity, impression, source) VALUES (?, ?, ?, ?, ?)`)
-            .run(sourceId, targetId, affinity, safeImpression, source);
+            .run(cleanSourceId, cleanTargetId, safeAffinity, safeImpression, safeSource);
 
         // Only add history if: impression changed AND (affinity changed by ≥5 OR it's a brand new relationship)
         const impressionChanged = !existing || existing.impression !== safeImpression;
-        const affinityDelta = existing ? Math.abs(affinity - existing.affinity) : 999;
+        const affinityDelta = existing ? Math.abs(safeAffinity - existing.affinity) : 999;
         if (safeImpression.trim() !== '' && impressionChanged && (!existing || affinityDelta >= 5)) {
-            addCharImpressionHistory(sourceId, targetId, safeImpression, `Formed: ${source}`);
+            addCharImpressionHistory(cleanSourceId, cleanTargetId, safeImpression, `Formed: ${safeSource}`);
         }
+        return true;
     }
 
     function getCharRelationship(sourceId, targetId) {
+        const cleanSourceId = normalizeCharRelationshipEndpoint(sourceId);
+        const cleanTargetId = normalizeCharRelationshipEndpoint(targetId);
+        if (!cleanSourceId || !cleanTargetId || cleanSourceId === cleanTargetId) return null;
         // Returns all relationship records between source→target (may have multiple sources)
-        const rows = db.prepare('SELECT * FROM char_relationships WHERE source_id = ? AND target_id = ?').all(sourceId, targetId);
+        const rows = db.prepare('SELECT * FROM char_relationships WHERE source_id = ? AND target_id = ?').all(cleanSourceId, cleanTargetId);
         if (rows.length === 0) return null;
         // Merge: total affinity = recommend base + sum of group deltas
         const recommend = rows.find(r => r.source === 'recommend');
@@ -2756,11 +3327,12 @@ function getUserDb(userId) {
         const totalAffinity = (recommend?.affinity || 50) + groupRows.reduce((sum, r) => sum + (r.affinity - 50), 0);
 
         // Fetch the most recent impression from history
-        const history = getCharImpressionHistory(sourceId, targetId, 1);
+        const history = getCharImpressionHistory(cleanSourceId, cleanTargetId, 1);
         const latestImpression = history.length > 0 ? history[0].impression : (recommend?.impression || groupRows[0]?.impression || '');
 
         return {
-            sourceId, targetId,
+            sourceId: cleanSourceId,
+            targetId: cleanTargetId,
             affinity: Math.max(0, Math.min(100, totalAffinity)),
             impression: latestImpression,
             isAcquainted: !!recommend,
@@ -2775,39 +3347,69 @@ function getUserDb(userId) {
     }
 
     function updateCharRelationship(sourceId, targetId, source, data) {
-        const existing = db.prepare('SELECT * FROM char_relationships WHERE source_id = ? AND target_id = ? AND source = ?').get(sourceId, targetId, source);
+        const cleanSourceId = normalizeCharRelationshipEndpoint(sourceId);
+        const cleanTargetId = normalizeCharRelationshipEndpoint(targetId);
+        if (!cleanSourceId || !cleanTargetId || cleanSourceId === cleanTargetId) return false;
+        const safeSource = normalizeCharRelationshipSource(source);
+        const existing = db.prepare('SELECT * FROM char_relationships WHERE source_id = ? AND target_id = ? AND source = ?').get(cleanSourceId, cleanTargetId, safeSource);
         if (existing) {
             const fields = [];
             const values = [];
-            if (data.affinity !== undefined) { fields.push('affinity = ?'); values.push(data.affinity); }
+            let nextAffinity = existing.affinity;
+            if (data.affinity !== undefined) {
+                const safeAffinity = normalizeCharRelationshipAffinity(data.affinity);
+                if (safeAffinity === null) return false;
+                fields.push('affinity = ?');
+                values.push(safeAffinity);
+                nextAffinity = safeAffinity;
+            }
             if (data.impression !== undefined) {
+                const safeImpression = normalizeCharRelationshipImpression(data.impression);
                 fields.push('impression = ?');
-                values.push(data.impression);
+                values.push(safeImpression);
 
                 // Only log history if impression text actually changed AND affinity shifted by ≥5
-                const affinityDelta = data.affinity !== undefined ? Math.abs(data.affinity - existing.affinity) : 0;
-                if (data.impression !== existing.impression && String(data.impression).trim() !== '' && affinityDelta >= 5) {
-                    addCharImpressionHistory(sourceId, targetId, data.impression, `Updated: ${source}`);
+                const affinityDelta = data.affinity !== undefined ? Math.abs(nextAffinity - existing.affinity) : 0;
+                if (safeImpression !== existing.impression && safeImpression !== '' && affinityDelta >= 5) {
+                    addCharImpressionHistory(cleanSourceId, cleanTargetId, safeImpression, `Updated: ${safeSource}`);
                 }
             }
             if (fields.length > 0) {
-                values.push(sourceId, targetId, source);
+                values.push(cleanSourceId, cleanTargetId, safeSource);
                 db.prepare(`UPDATE char_relationships SET ${fields.join(', ')} WHERE source_id = ? AND target_id = ? AND source = ?`).run(...values);
+                return true;
             }
+            return false;
         } else {
             // Auto-create if doesn't exist
-            initCharRelationship(sourceId, targetId, data.affinity || 50, data.impression || '', source);
+            const nextAffinity = data.affinity === undefined ? 50 : data.affinity;
+            return initCharRelationship(cleanSourceId, cleanTargetId, nextAffinity, data.impression || '', safeSource);
         }
     }
 
     function addCharImpressionHistory(sourceId, targetId, impression, triggerEvent) {
+        const cleanSourceId = normalizeCharRelationshipEndpoint(sourceId);
+        const cleanTargetId = normalizeCharRelationshipEndpoint(targetId);
+        const safeImpression = normalizeCharRelationshipImpression(impression);
+        if (!cleanSourceId || !cleanTargetId || cleanSourceId === cleanTargetId || !safeImpression) return false;
         db.prepare('INSERT INTO char_impression_history (source_id, target_id, impression, trigger_event, timestamp) VALUES (?, ?, ?, ?, ?)')
-            .run(sourceId, targetId, impression, triggerEvent, Date.now());
+            .run(cleanSourceId, cleanTargetId, safeImpression, String(triggerEvent || '').trim().slice(0, 200), Date.now());
+        return true;
+    }
+
+    function normalizeImpressionHistoryLimit(value, fallback = 50, max = 200) {
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed < 1) return fallback;
+        return Math.min(max, parsed);
     }
 
     function getCharImpressionHistory(sourceId, targetId, limit = 50) {
+        const cleanSourceId = normalizeCharRelationshipEndpoint(sourceId);
+        const cleanTargetId = normalizeCharRelationshipEndpoint(targetId);
+        if (!cleanSourceId || !cleanTargetId || cleanSourceId === cleanTargetId) return [];
+        const safeLimit = normalizeImpressionHistoryLimit(limit);
         return db.prepare('SELECT * FROM char_impression_history WHERE source_id = ? AND target_id = ? ORDER BY timestamp DESC LIMIT ?')
-            .all(sourceId, targetId, limit);
+            .all(cleanSourceId, cleanTargetId, safeLimit);
     }
 
     function deleteGroupRelationships(groupId) {
@@ -2816,22 +3418,61 @@ function getUserDb(userId) {
 
     // ─── Private Transfer System ──────────────────────────────────────
 
+    function normalizeTransferAmount(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount) || amount <= 0) throw new Error('转账金额无效');
+        const rounded = +amount.toFixed(2);
+        if (!Number.isFinite(rounded) || rounded <= 0) throw new Error('转账金额无效');
+        return rounded;
+    }
+
+    function normalizePaymentNote(value) {
+        if (value === undefined || value === null) return '';
+        if (typeof value !== 'string') {
+            const error = new Error('备注无效');
+            error.status = 400;
+            throw error;
+        }
+        return value.trim().slice(0, 120);
+    }
+
     function createTransfer({ charId, senderId, recipientId, amount, note, messageId }) {
+        const transferAmount = normalizeTransferAmount(amount);
+        const safeNote = normalizePaymentNote(note);
+        const cleanCharId = String(charId || '').trim();
+        const cleanSenderId = String(senderId || '').trim();
+        const cleanRecipientId = String(recipientId || '').trim();
+        if (!cleanCharId || !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanCharId)) {
+            throw new Error('角色不存在');
+        }
+        if (!cleanSenderId || !cleanRecipientId) throw new Error('转账参与方无效');
+        if (cleanSenderId !== 'user' && !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanSenderId)) {
+            throw new Error('付款方不存在');
+        }
+        if (cleanRecipientId !== 'user' && !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanRecipientId)) {
+            throw new Error('收款方不存在');
+        }
+        if (cleanSenderId !== 'user' && cleanSenderId !== cleanCharId && cleanRecipientId !== cleanCharId) {
+            throw new Error('转账角色无效');
+        }
+        if (cleanSenderId === 'user' && cleanRecipientId !== cleanCharId) {
+            throw new Error('转账角色无效');
+        }
         // Deduct from sender wallet
-        if (senderId === 'user') {
+        if (cleanSenderId === 'user') {
             const profile = db.prepare('SELECT wallet FROM user_profile WHERE id = ?').get('default');
             const bal = profile?.wallet ?? 520;
-            if (bal < amount) throw new Error('余额不足');
-            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal - amount).toFixed(2), 'default');
+            if (bal < transferAmount) throw new Error('余额不足');
+            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal - transferAmount).toFixed(2), 'default');
         } else {
-            const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(senderId);
+            const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(cleanSenderId);
             const bal = char?.wallet ?? 0;
-            if (bal < amount) throw new Error('余额不足');
-            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal - amount).toFixed(2), senderId);
+            if (bal < transferAmount) throw new Error('余额不足');
+            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal - transferAmount).toFixed(2), cleanSenderId);
         }
         const info = db.prepare(
             'INSERT INTO private_transfers (char_id, sender_id, recipient_id, amount, note, claimed, message_id, created_at) VALUES (?, ?, ?, ?, ?, 0, ?, ?)'
-        ).run(charId, senderId, recipientId, amount, note || '', messageId ?? null, Date.now());
+        ).run(cleanCharId, cleanSenderId, cleanRecipientId, transferAmount, safeNote, messageId ?? null, Date.now());
         return info.lastInsertRowid;
     }
 
@@ -2844,21 +3485,32 @@ function getUserDb(userId) {
         if (!t) return { success: false, error: '转账不存在' };
         if (t.claimed) return { success: false, error: '已经领取过了' };
         if (t.refunded) return { success: false, error: '已退还' };
-        if (t.recipient_id !== claimerId) return { success: false, error: '不是这笔转账的收款方' };
+        const cleanClaimerId = String(claimerId || '').trim();
+        if (!cleanClaimerId) return { success: false, error: '收款方无效' };
+        if (t.recipient_id !== cleanClaimerId) return { success: false, error: '不是这笔转账的收款方' };
+        if (cleanClaimerId !== 'user' && !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanClaimerId)) {
+            return { success: false, error: '收款方不存在' };
+        }
+        let transferAmount;
+        try {
+            transferAmount = normalizeTransferAmount(t.amount);
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
 
         db.prepare('UPDATE private_transfers SET claimed = 1, claimed_at = ? WHERE id = ?').run(Date.now(), transferId);
 
         // Credit to recipient
-        if (claimerId === 'user') {
+        if (cleanClaimerId === 'user') {
             const profile = db.prepare('SELECT wallet FROM user_profile WHERE id = ?').get('default');
             const bal = profile?.wallet ?? 520;
-            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal + t.amount).toFixed(2), 'default');
+            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal + transferAmount).toFixed(2), 'default');
         } else {
-            const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(claimerId);
+            const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(cleanClaimerId);
             const bal = char?.wallet ?? 0;
-            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal + t.amount).toFixed(2), claimerId);
+            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal + transferAmount).toFixed(2), cleanClaimerId);
         }
-        return { success: true, amount: t.amount };
+        return { success: true, amount: transferAmount };
     }
 
     function getUnclaimedTransfersFrom(senderId, charId) {
@@ -2871,9 +3523,26 @@ function getUserDb(userId) {
         const t = db.prepare('SELECT * FROM private_transfers WHERE id = ?').get(transferId);
         if (!t) return { success: false, error: '转账不存在' };
         if (t.refunded) return { success: false, error: '已经退还过了' };
+        const cleanRefunderId = String(refunderId || '').trim();
+        if (!cleanRefunderId) return { success: false, error: '退款方无效' };
+        if (cleanRefunderId !== 'user' && !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanRefunderId)) {
+            return { success: false, error: '退款方不存在' };
+        }
         // Allow sender to refund anytime if still pending, allow recipient to refund anytime
-        const canRefund = (refunderId === t.sender_id && !t.claimed) || (refunderId === t.recipient_id);
+        const canRefund = (cleanRefunderId === t.sender_id && !t.claimed) || (cleanRefunderId === t.recipient_id);
         if (!canRefund) return { success: false, error: '无权退还' };
+        let transferAmount;
+        try {
+            transferAmount = normalizeTransferAmount(t.amount);
+        } catch (e) {
+            return { success: false, error: e.message };
+        }
+        if (t.sender_id !== 'user' && !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(t.sender_id)) {
+            return { success: false, error: '付款方不存在' };
+        }
+        if (t.recipient_id !== 'user' && !db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(t.recipient_id)) {
+            return { success: false, error: '收款方不存在' };
+        }
 
         db.prepare('UPDATE private_transfers SET refunded = 1, claimed = 0 WHERE id = ?').run(transferId);
 
@@ -2881,33 +3550,37 @@ function getUserDb(userId) {
         if (t.sender_id === 'user') {
             const profile = db.prepare('SELECT wallet FROM user_profile WHERE id = ?').get('default');
             const bal = profile?.wallet ?? 520;
-            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal + t.amount).toFixed(2), 'default');
+            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal + transferAmount).toFixed(2), 'default');
         } else {
             const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(t.sender_id);
             const bal = char?.wallet ?? 0;
-            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal + t.amount).toFixed(2), t.sender_id);
+            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal + transferAmount).toFixed(2), t.sender_id);
         }
         // If the recipient had already claimed, also deduct from their wallet
         if (t.claimed) {
             if (t.recipient_id === 'user') {
                 const profile = db.prepare('SELECT wallet FROM user_profile WHERE id = ?').get('default');
                 const bal = profile?.wallet ?? 0;
-                db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(Math.max(0, +(bal - t.amount).toFixed(2)), 'default');
+                db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(Math.max(0, +(bal - transferAmount).toFixed(2)), 'default');
             } else {
                 const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(t.recipient_id);
                 const bal = char?.wallet ?? 0;
-                db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(Math.max(0, +(bal - t.amount).toFixed(2)), t.recipient_id);
+                db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(Math.max(0, +(bal - transferAmount).toFixed(2)), t.recipient_id);
             }
         }
-        return { success: true, amount: t.amount, senderId: t.sender_id };
+        return { success: true, amount: transferAmount, senderId: t.sender_id };
     }
 
     // ─── Red Packet System ──────────────────────────────────────────────────
 
     // Generates lucky (拼手气) amounts: random splits of total into N pieces, min 0.01 each
     function generateLuckyAmounts(total, count) {
+        const totalCents = Math.round(Number(total) * 100);
+        if (!Number.isSafeInteger(totalCents) || totalCents < count) {
+            throw new Error('红包金额不足以分配');
+        }
         const amounts = [];
-        let remaining = Math.round(total * 100); // work in cents to avoid float issues
+        let remaining = totalCents; // work in cents to avoid float issues
         for (let i = 0; i < count - 1; i++) {
             const maxCents = Math.floor(remaining * 2 / (count - i));
             const cents = Math.max(1, Math.floor(Math.random() * maxCents) + 1);
@@ -2924,41 +3597,70 @@ function getUserDb(userId) {
         return amounts.map(c => +(c / 100).toFixed(2));
     }
 
+    function normalizeRedPacketCount(value) {
+        const text = String(value ?? '').trim();
+        if (!/^\d+$/.test(text)) return null;
+        const parsed = Number(text);
+        return Number.isSafeInteger(parsed) && parsed >= 1 && parsed <= 100 ? parsed : null;
+    }
+
     function createRedPacket({ groupId, senderId, type, totalAmount, perAmount, count, note }) {
         const packetType = String(type || '').trim().toLowerCase();
-        const packetCount = Number.parseInt(count, 10);
+        const packetCount = normalizeRedPacketCount(count);
         const packetTotal = Number(totalAmount);
         const packetPerAmount = perAmount == null ? null : Number(perAmount);
+        const safeNote = normalizePaymentNote(note);
         if (!['fixed', 'lucky'].includes(packetType)) throw new Error('红包类型无效');
         if (!Number.isFinite(packetTotal) || packetTotal <= 0) throw new Error('红包金额无效');
-        if (!Number.isSafeInteger(packetCount) || packetCount < 1 || packetCount > 100) throw new Error('红包个数无效');
+        if (packetCount == null) throw new Error('红包个数无效');
         if (packetType === 'fixed' && (!Number.isFinite(packetPerAmount) || packetPerAmount <= 0)) throw new Error('红包金额无效');
+        const packetTotalCents = Math.round(packetTotal * 100);
+        if (!Number.isSafeInteger(packetTotalCents) || packetTotalCents < packetCount) throw new Error('红包金额不足以分配');
+        const cleanGroupId = String(groupId || '').trim();
+        const cleanSenderId = String(senderId || '').trim();
+        const groupExists = db.prepare('SELECT 1 FROM group_chats WHERE id = ? LIMIT 1').get(cleanGroupId);
+        if (!groupExists) throw new Error('群聊不存在');
+        if (!cleanSenderId) throw new Error('红包发送者无效');
+        if (cleanSenderId !== 'user') {
+            const senderExists = db.prepare('SELECT 1 FROM characters WHERE id = ? LIMIT 1').get(cleanSenderId);
+            if (!senderExists) throw new Error('红包发送者不存在');
+            const senderIsMember = db.prepare('SELECT 1 FROM group_members WHERE group_id = ? AND member_id = ? LIMIT 1').get(cleanGroupId, cleanSenderId);
+            if (!senderIsMember) throw new Error('红包发送者不在群聊中');
+        }
+        const normalizedTotal = +(packetTotalCents / 100).toFixed(2);
+        let normalizedPerAmount = null;
+        if (packetType === 'fixed') {
+            const packetPerCents = Math.round(packetPerAmount * 100);
+            if (!Number.isSafeInteger(packetPerCents) || packetPerCents < 1) throw new Error('红包金额无效');
+            if (packetPerCents * packetCount !== packetTotalCents) throw new Error('红包金额无效');
+            normalizedPerAmount = +(packetPerCents / 100).toFixed(2);
+        }
 
         // Deduct from sender wallet
-        if (senderId === 'user') {
+        if (cleanSenderId === 'user') {
             const profile = db.prepare('SELECT wallet FROM user_profile WHERE id = ?').get('default');
             const bal = profile?.wallet ?? 520;
-            if (bal < packetTotal) throw new Error('余额不足');
-            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal - packetTotal).toFixed(2), 'default');
+            if (bal < normalizedTotal) throw new Error('余额不足');
+            db.prepare('UPDATE user_profile SET wallet = ? WHERE id = ?').run(+(bal - normalizedTotal).toFixed(2), 'default');
         } else {
-            const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(senderId);
+            const char = db.prepare('SELECT wallet FROM characters WHERE id = ?').get(cleanSenderId);
             const bal = char?.wallet ?? 0;
-            if (bal < packetTotal) throw new Error('余额不足');
-            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal - packetTotal).toFixed(2), senderId);
+            if (bal < normalizedTotal) throw new Error('余额不足');
+            db.prepare('UPDATE characters SET wallet = ? WHERE id = ?').run(+(bal - normalizedTotal).toFixed(2), cleanSenderId);
         }
 
         // Pre-generate amounts
         let amounts;
         if (packetType === 'lucky') {
-            amounts = generateLuckyAmounts(packetTotal, packetCount);
+            amounts = generateLuckyAmounts(normalizedTotal, packetCount);
         } else {
-            const each = packetPerAmount ?? +(packetTotal / packetCount).toFixed(2);
+            const each = normalizedPerAmount ?? +(normalizedTotal / packetCount).toFixed(2);
             amounts = Array(packetCount).fill(each);
         }
 
         const info = db.prepare(
             'INSERT INTO group_red_packets (group_id, sender_id, type, total_amount, per_amount, count, remaining_count, amounts, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        ).run(groupId, senderId, packetType, packetTotal, packetPerAmount ?? null, packetCount, packetCount, JSON.stringify(amounts), note || '', Date.now());
+        ).run(cleanGroupId, cleanSenderId, packetType, normalizedTotal, normalizedPerAmount, packetCount, packetCount, JSON.stringify(amounts), safeNote, Date.now());
         return info.lastInsertRowid;
     }
 
@@ -2971,9 +3673,10 @@ function getUserDb(userId) {
     }
 
     // Returns { success, amount, error }
-    function claimRedPacket(packetId, claimerId) {
+    function claimRedPacket(packetId, claimerId, groupId = null) {
         const pkt = db.prepare('SELECT * FROM group_red_packets WHERE id = ?').get(packetId);
         if (!pkt) return { success: false, error: '红包不存在' };
+        if (groupId !== null && String(pkt.group_id) !== String(groupId)) return { success: false, error: '红包不存在' };
         if (pkt.remaining_count <= 0) return { success: false, error: '红包已被抢光' };
 
         const already = db.prepare('SELECT id FROM group_red_packet_claims WHERE packet_id = ? AND claimer_id = ?').get(packetId, claimerId);
@@ -2983,6 +3686,9 @@ function getUserDb(userId) {
         const claimedCount = pkt.count - pkt.remaining_count;
         const amounts = JSON.parse(pkt.amounts);
         const amount = amounts[claimedCount];
+        if (!Number.isFinite(Number(amount)) || Number(amount) <= 0) {
+            return { success: false, error: '红包金额异常' };
+        }
 
         // Atomic update
         db.prepare('UPDATE group_red_packets SET remaining_count = remaining_count - 1 WHERE id = ?').run(packetId);
@@ -3614,6 +4320,7 @@ function getUserDb(userId) {
         getMoments,
         getMomentsSince,
         getCharacterMoments,
+        getMoment,
         addMoment,
         deleteMoment,
         toggleLike,

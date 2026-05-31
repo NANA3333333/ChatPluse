@@ -1,3 +1,8 @@
+const {
+    normalizeCityEventPayload,
+    normalizeCityQuestPayload
+} = require('../utils/inputGuards');
+
 function createMayorService(deps = {}) {
     const {
         callLLM,
@@ -29,12 +34,14 @@ function createMayorService(deps = {}) {
     }
 
     function parseMayorJsonReply(replyText, errorLabel = '市长 AI 返回内容不是合法 JSON。') {
-        const text = String(replyText || '').trim();
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) {
+        const cleaned = String(replyText || '')
+            .replace(/```(?:json)?\s*/gi, '')
+            .replace(/```/g, '')
+            .trim();
+        if (!cleaned) {
             throw new Error(errorLabel);
         }
-        return JSON.parse(jsonMatch[0]);
+        return JSON.parse(cleaned);
     }
 
     function getQuestDifficultyFallbackTarget(questLike = {}) {
@@ -46,15 +53,21 @@ function createMayorService(deps = {}) {
         return 6;
     }
 
+    function normalizeMayorScoreInteger(value, min, max) {
+        const text = String(value ?? '').trim();
+        if (!/^\d+$/.test(text)) return null;
+        const parsed = Number(text);
+        return Number.isSafeInteger(parsed) && parsed >= min && parsed <= max ? parsed : null;
+    }
+
     async function scoreQuestDifficultyWithMayor(db, questDraft = {}, aiChar = null) {
-        const fallbackTarget = getQuestDifficultyFallbackTarget(questDraft);
         const resolvedAiChar = aiChar || resolveMayorAiCharacter(db);
         if (!resolvedAiChar?.api_endpoint || !resolvedAiChar?.api_key || !resolvedAiChar?.model_name) {
             return {
                 success: false,
-                fallback: true,
-                targetScore: fallbackTarget,
-                reason: '未找到可用的市长模型，已按任务难度做默认映射。'
+                canRetry: true,
+                error: 'mayor_model_unavailable',
+                reason: '市长难度评分缺少可用市长模型，请重试。'
             };
         }
         const prompt = [
@@ -85,7 +98,8 @@ function createMayorService(deps = {}) {
             });
             recordCityLlmDebug(db, resolvedAiChar, 'output', 'city_quest_difficulty_score', reply, { model: resolvedAiChar.model_name });
             const parsed = parseMayorJsonReply(reply, '市长 AI 难度评分返回内容不是合法 JSON。');
-            const targetScore = Math.max(1, Math.min(10, parseInt(parsed?.target_score, 10) || fallbackTarget));
+            const targetScore = normalizeMayorScoreInteger(parsed?.target_score, 1, 10);
+            if (targetScore == null) throw new Error('市长 AI 难度评分 target_score 无效。');
             return {
                 success: true,
                 targetScore,
@@ -95,9 +109,9 @@ function createMayorService(deps = {}) {
             console.warn('[Mayor AI] Quest difficulty score failed:', err.message);
             return {
                 success: false,
-                fallback: true,
-                targetScore: fallbackTarget,
-                reason: `市长 AI 难度评分失败，已按默认难度映射。(${String(err?.message || 'unknown_error').slice(0, 120)})`
+                canRetry: true,
+                error: String(err?.message || 'unknown_error'),
+                reason: `市长 AI 难度评分失败，请重试。(${String(err?.message || 'unknown_error').slice(0, 120)})`
             };
         }
     }
@@ -208,7 +222,8 @@ function createMayorService(deps = {}) {
             });
             const parsed = parseMayorJsonReply(reply, '市长 AI 任务评分返回内容不是合法 JSON。');
             const isValidProgress = parsed?.is_valid_progress !== false;
-            let progressDelta = Math.max(0, Math.min(3, parseInt(parsed?.progress_delta, 10) || 0));
+            let progressDelta = normalizeMayorScoreInteger(parsed?.progress_delta, 0, 3);
+            if (progressDelta == null) throw new Error('市长 AI 任务评分 progress_delta 无效。');
             if (!isValidProgress) progressDelta = 0;
             let nextProgress = currentProgress + progressDelta;
             const completedBySignal = parsed?.is_completed === true;
@@ -291,7 +306,7 @@ function createMayorService(deps = {}) {
         if (Array.isArray(decision.events)) {
             for (const ev of decision.events) {
                 if (ev.title) {
-                    db.city.createEvent({
+                    const eventPayload = normalizeCityEventPayload({
                         type: ev.type || 'random',
                         title: ev.title,
                         emoji: ev.emoji || '📙',
@@ -300,6 +315,8 @@ function createMayorService(deps = {}) {
                         target_district: ev.effect?.district || '',
                         duration_hours: ev.duration_hours || 12
                     });
+                    if (!eventPayload) throw new Error('市长事件数值无效');
+                    db.city.createEvent(eventPayload);
                     db.city.logAction('system', 'EVENT', `${ev.emoji || '📙'} 城市事件: ${ev.title} - ${ev.description || ''}`, 0, 0);
                     results.events++;
                 }
@@ -309,25 +326,31 @@ function createMayorService(deps = {}) {
         if (Array.isArray(decision.quests)) {
             for (const q of decision.quests) {
                 if (q.title) {
-                    const scoredQuest = await scoreQuestDifficultyWithMayor(db, {
+                    const questDraft = normalizeCityQuestPayload({
                         title: q.title,
+                        emoji: q.emoji || '📐',
                         description: q.description || q.desc || '',
+                        reward_gold: q.reward_gold ?? 50,
+                        reward_cal: q.reward_cal ?? 0,
                         difficulty: q.difficulty || q.diff || 'normal',
                         quest_type: q.quest_type || '',
                         target_district: q.target_district || ''
-                    }, aiChar);
-                    const questId = db.city.createQuest({
-                        title: q.title,
-                        emoji: q.emoji || '📐',
-                        description: q.description || '',
-                        reward_gold: q.reward_gold ?? 50,
-                        reward_cal: q.reward_cal ?? 0,
-                        difficulty: q.difficulty || 'normal',
+                    });
+                    if (!questDraft) throw new Error('市长任务奖励或目标数值无效');
+                    const scoredQuest = await scoreQuestDifficultyWithMayor(db, questDraft, aiChar);
+                    if (!scoredQuest?.success) {
+                        throw new Error(scoredQuest?.error || scoredQuest?.reason || '市长难度评分失败，请重试。');
+                    }
+                    const questPayload = normalizeCityQuestPayload({
+                        ...questDraft,
+                        description: q.description || q.desc || '',
                         completion_target: scoredQuest.targetScore,
                         difficulty_reason: scoredQuest.reason
                     });
-                    publishQuestAnnouncement(db, questId, q);
-                    db.city.logAction('system', 'QUEST', `📐 新悬赏任务: ${q.title} (${q.difficulty || 'normal'}) - 目标进度 ${scoredQuest.targetScore} - 奖励 ${q.reward_gold ?? 50} 金币`, 0, 0);
+                    if (!questPayload) throw new Error('市长任务奖励或目标数值无效');
+                    const questId = db.city.createQuest(questPayload);
+                    publishQuestAnnouncement(db, questId, questPayload);
+                    db.city.logAction('system', 'QUEST', `📐 新悬赏任务: ${q.title} (${q.difficulty || 'normal'}) - 目标进度 ${scoredQuest.targetScore} - 奖励 ${questPayload.reward_gold} 金币`, 0, 0);
                     results.quests++;
                 }
             }
